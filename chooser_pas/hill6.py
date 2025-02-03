@@ -148,20 +148,19 @@ def disturb(A, H, L, d):
 
   ret = [e for e in A[i]]
 
-  # Permute the high symbols
-  ps = [e for e in H[i]]
-  qs = [e for e in H[i]]
+  if random.random() < .5:
+    # Permute the high symbols
+    ps = [e for e in H[i]]
+    qs = [e for e in H[i]]
+  else:
+    # Permute the low symbols
+    ps = [e for e in L[i]]
+    qs = [e for e in L[i]]
+
+  ret = [e for e in A[i]]
   random.shuffle(qs)
   for u,v in zip(ps,qs):
     ret[u] = A[i][v]
-
-  # Permute the low symbols
-  ps = [e for e in L[i]]
-  qs = [e for e in L[i]]
-  random.shuffle(qs)
-  for u,v in zip(ps,qs):
-    ret[u] = A[i][v]
-
   A[i] = ret
 
 
