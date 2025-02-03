@@ -9,8 +9,10 @@ from datetime import datetime
 
 
 def separated(u, v, d):
+  dd = d*d
   for a,b in zip(u,v):
-    if abs(a-b) >= d:
+    if (a-b)**2 >= dd:
+    # if abs(a-b) >= d:
       return True
   return False
 
