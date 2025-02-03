@@ -10,8 +10,9 @@ from datetime import datetime
 
 
 def separated(u, v, d):
+  dd = d*d
   for a,b in zip(u,v):
-    if abs(a-b) >= d:
+    if (a-b)**2 >= dd:
       return True
   return False
 
@@ -53,8 +54,8 @@ def dumb_pa(n, k):
   H = list(it.combinations(list(range(n)), k))
   L = [sorted(sr-set(e)) for e in H]
   for ps in H:
-    highs = tuple(range(m))
-    lows = tuple(range(m, n))
+    lows = tuple(range(m))
+    highs = tuple(range(m, n))
     h, l = 0, 0
     row = []
     for i in range(n):
@@ -104,34 +105,34 @@ def score_pa(A, d):
   return ret
 
 
-# def disturb(A, H, L, d):
+def disturb2(A, H, L, d):
+  s = [[] for _ in A]
+  for vx in range(len(A)):
+    for ux in range(vx):
+      if ux != vx and separated(A[ux], A[vx], d):
+        s[ux].append(vx)
+        s[vx].append(ux)
+  q = sorted([(len(si), idx) for idx,si in enumerate(s)])
+  # for _ in range(random.randrange(1, 4)):
+  for _ in range(1):
+    i = random.randrange(10)
+    i = q[i][1]
 
-#   # Pick a random broken one
-#   shuf = list(range(len(A)))
-#   random.shuffle(shuf)
-#   for vx in shuf:
-#     for ux in range(len(A)):
-#       if ux != vx and not separated(A[ux], A[vx], d):
-#         i = vx
-#         break
-#     else:
-#       continue
-#     break
+    ret = [e for e in A[i]]
 
-#   ps = [e for e in H[i]]
-#   qs = [e for e in H[i]]
-#   random.shuffle(qs)
-#   ret = [e for e in A[i]]
-#   for u,v in zip(ps,qs):
-#     ret[u] = A[i][v]
+    ps = [e for e in H[i]]
+    qs = [e for e in H[i]]
+    random.shuffle(qs)
+    for u,v in zip(ps,qs):
+      ret[u] = A[i][v]
 
-#   ps = [e for e in L[i]]
-#   qs = [e for e in L[i]]
-#   random.shuffle(qs)
-#   ret = [e for e in A[i]]
-#   for u,v in zip(ps,qs):
-#     ret[u] = A[i][v]
-#   A[i] = ret
+    ps = [e for e in L[i]]
+    qs = [e for e in L[i]]
+    random.shuffle(qs)
+    for u,v in zip(ps,qs):
+      ret[u] = A[i][v]
+
+  A[i] = ret
 
 def disturb(A, H, L, d):
   # Pick a random row that isn't fully separated
@@ -178,9 +179,9 @@ def main(n, k, d):
   count_disturbs = 0
   try:
    for qwer in it.count():
-    # if True:
+    if True:
     # if (qwer % 1000 == 0) or (best_score < 3000):
-    if (qwer % 1000 == 0) or (best_score < 20):
+    # if (qwer % 1000 == 0) or (best_score < 20):
       disagreements = asdf(A, d)
       w = sum(disagreements.values())
       if w < best_score:
@@ -219,12 +220,14 @@ def main(n, k, d):
 
 
 if __name__ == '__main__':
+  from sys import argv
+  n, d = int(argv[1]), int(argv[2])
+
   # The original PA is size m
-  filename = 'dump99.txt'
-  # pa = main(10, 5, 5)
-  pa = main(12, 6, 6)
+  filename = f'pa_{n}_choose_{d}.txt'
+  pa = main(n, d, d)
   with open(filename, 'w+') as f:
-    disagreements = asdf(pa, 5)
+    disagreements = asdf(pa, d)
     f.write(f'# Disagreements: {len(disagreements)} {disagreements}\n\n')
     for row in pa:
       f.write(' '.join(map(str, row)) + '\n')
