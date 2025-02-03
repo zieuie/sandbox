@@ -1,5 +1,5 @@
 # Sudborough's January 31 Algorithm with a tweaked score, and disturbing instead of halting
-# And permuting the whole HIGH(i) instead of just transposing
+# And permuting the whole HIGH(i) instead of just transposing, but choosing candidate permutations randomly
 
 from copy import deepcopy
 import random
@@ -36,7 +36,7 @@ def asdf(pa, d):
 
 def load_pa():
   ret = []
-  with open(filename, 'r') as f:
+  with open('dump.txt', 'r') as f:
     for line in f:
       line = line.strip()
       if not line or line[0] == '#':
@@ -68,8 +68,8 @@ def dumb_pa(n, k):
 
 
 # Find the best permutation of A[i]
-def imp(A, start, s, i, d):
-  bestw = 0
+def best_permutation(A, start, s, i, d, old_score):
+  bestw = old_score
   end = None
 
   for target in it.permutations(start):
@@ -86,6 +86,26 @@ def imp(A, start, s, i, d):
       bestw, end = w, target
 
   return bestw, start, end
+
+
+# Find the best permutation of A[i]
+def random_good_permutation(A, start, s, i, d, old_score, loops=10):
+  target = [e for e in start]
+  for _ in range(loops):
+    random.shuffle(target)
+    pot = [e for e in A[i]]
+    for u,v in zip(start, target):
+      pot[u] = A[i][v]
+
+    w = 0
+    for x, e in enumerate(A):
+      if x != i and separated(pot, e, d):
+        w += len(s[x])
+
+    if w > old_score:
+      return w, start, target
+  else:
+    return 0, None, None
 
 
 def score_pa(A, d):
@@ -105,31 +125,54 @@ def score_pa(A, d):
 
 
 def disturb(A, H, L, d):
-  s = [[] for _ in A]
-  for vx in range(len(A)):
-    for ux in range(vx):
-      if ux != vx and separated(A[ux], A[vx], d):
-        s[ux].append(vx)
-        s[vx].append(ux)
-  q = sorted([(len(si), idx) for idx,si in enumerate(s)])
-  # for _ in range(random.randrange(1, 4)):
-  for _ in range(1):
-    i = random.randrange(10)
-    i = q[i][1]
 
-    ps = [e for e in H[i]]
-    qs = [e for e in H[i]]
-    random.shuffle(qs)
-    ret = [e for e in A[i]]
-    for u,v in zip(ps,qs):
-      ret[u] = A[i][v]
+  # # Randomly pick the top 10 worst 
+  # s = [[] for _ in A]
+  # for vx in range(len(A)):
+  #   for ux in range(vx):
+  #     if ux != vx and separated(A[ux], A[vx], d):
+  #       s[ux].append(vx)
+  #       s[vx].append(ux)
+  # q = sorted([(len(si), idx) for idx,si in enumerate(s)])
+  # i = random.randrange(10)
+  # i = q[i][1]
 
-    ps = [e for e in L[i]]
-    qs = [e for e in L[i]]
-    random.shuffle(qs)
-    ret = [e for e in A[i]]
-    for u,v in zip(ps,qs):
-      ret[u] = A[i][v]
+  # # Pick the first broken one
+  # for vx in range(len(A)):
+  #   for ux in range(vx):
+  #     if ux != vx and not separated(A[ux], A[vx], d):
+  #       i = vx
+  #       break
+  #   else:
+  #     continue
+  #   break
+
+  # Pick a random broken one
+  shuf = list(range(len(A)))
+  random.shuffle(shuf)
+  for vx in shuf:
+    for ux in range(len(A)):
+      if ux != vx and not separated(A[ux], A[vx], d):
+        i = vx
+        break
+    else:
+      continue
+    break
+
+
+  ps = [e for e in H[i]]
+  qs = [e for e in H[i]]
+  random.shuffle(qs)
+  ret = [e for e in A[i]]
+  for u,v in zip(ps,qs):
+    ret[u] = A[i][v]
+
+  ps = [e for e in L[i]]
+  qs = [e for e in L[i]]
+  random.shuffle(qs)
+  ret = [e for e in A[i]]
+  for u,v in zip(ps,qs):
+    ret[u] = A[i][v]
   A[i] = ret
 
 
@@ -148,15 +191,15 @@ def main(n, k, d):
   count_disturbs = 0
   try:
    for qwer in it.count():
-    if True:
-    # if (qwer % 100 == 0) or (best_score < 20):
+    # if True:
+    if (qwer % 10 == 0) or (best_score < 20):
       disagreements = asdf(A, d)
       w = sum(disagreements.values())
       if w < best_score:
         best_score = w
         best_coverage = len(disagreements)
         best_pa = deepcopy(A)
-      print(datetime.now(), 'Iteration:', qwer, 'Uncovered:', len(disagreements), 'Disagreements:', sum(disagreements.values()), 'Best score:', best_score, 'Best:', len(A) - best_coverage, 'of', len(A), 'Disturbances:', count_disturbs) # , disagreements)
+      print(datetime.now(), 'Iteration:', qwer, 'Uncovered:', len(disagreements), 'Disagreements:', sum(disagreements.values()), 'Best score:', best_score, 'Best coverage:', len(A) - best_coverage, 'of', len(A), 'Disturbances:', count_disturbs) # , disagreements)
 
       if 0 == len(disagreements):
         return A
@@ -181,38 +224,34 @@ def main(n, k, d):
     q = sorted(q)
 
     # Step 4 - Find the least separated row...
-    for si, i in q:
+    for score, i in q[:10]:
       # Step 5 - ...and find the best improved transposition
-      # separations, one, two = step_five(A, H, s, i, d)  # Try the highs
-      separations, one, two = imp(A, H[i], s, i, d)  # Try the highs
-      if separations <= si:
-        separations, one, two = imp(A, L[i], s, i, d)  # Try the lows
+
+      fun = random_good_permutation
+      separations, one, two = fun(A, H[i], s, i, d, score, 10)  # Try the highs
+      if separations <= score:
+        separations, one, two = fun(A, L[i], s, i, d, score, 10)  # Try the lows
 
       # We found a good transposition
-      if separations > si:
+      if separations > score:
         nex = [e for e in A[i]]
         for u,v in zip(one,two):
           nex[u] = A[i][v]
-          # nex[v] = A[i][u]
         A[i] = nex
         break
     else:
-      # There's nothing to do!
-      # print ('Disturbing!')
       disturb(A, H, L, d)
       count_disturbs += 1
-      # full_metric = not full_metric
-      # return A
+
   except KeyboardInterrupt:
     return best_pa
 
 
 if __name__ == '__main__':
   # The original PA is size m
-  filename = 'dump6.txt'
   # pa = main(10, 5, 5)
   pa = main(12, 6, 6)
-  with open(filename, 'w+') as f:
+  with open('dump.txt', 'w+') as f:
     disagreements = asdf(pa, 6)
     f.write(f'# Disagreements: {len(disagreements)} {disagreements}\n\n')
     for row in pa:

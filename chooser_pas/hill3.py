@@ -1,5 +1,7 @@
 # Sudborough's January 31 Algorithm with a tweaked score, and disturbing instead of halting
 
+# Pretty bad at finishing off things
+
 from copy import deepcopy
 import random
 import itertools as it
@@ -35,7 +37,7 @@ def asdf(pa, d):
 
 def load_pa():
   ret = []
-  with open('dump.txt', 'r') as f:
+  with open(filename, 'r') as f:
     for line in f:
       line = line.strip()
       if not line or line[0] == '#':
@@ -227,9 +229,10 @@ def main(n, k, d):
 
 if __name__ == '__main__':
   # The original PA is size m
-  pa = main(10, 5, 5)
-  # pa = main(12, 6, 6)
-  with open('dump.txt', 'w+') as f:
+  filename = 'dump.txt'
+  # pa = main(10, 5, 5)
+  pa = main(12, 6, 6)
+  with open(filename, 'w+') as f:
     disagreements = asdf(pa, 6)
     f.write(f'# Disagreements: {len(disagreements)} {disagreements}\n\n')
     for row in pa:
