@@ -64,8 +64,8 @@ if __name__ == '__main__':
   n, d = int(argv[1]), int(argv[2])
 
   # The original PA is size m
-  # filename = f'pa_{n}_choose_{d}.txt'
-  filename = f'dump88.txt'
+  filename = f'pa_{n}_choose_{d}.txt'
+  # filename = f'dump88.txt'
   pa = main(n, d, d)
   with open(filename, 'w+') as f:
     disagreements = disagreement_counter(pa, d)
