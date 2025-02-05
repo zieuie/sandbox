@@ -1,12 +1,18 @@
-# Sudborough's January 31 Algorithm with a tweaked score, and disturbing instead of halting
-# And permuting the whole HIGH(i) instead of just transposing
-# And doing the minimum effort to track the score changes!
-
-from copy import deepcopy
-import random
 import itertools as it
+from copy import deepcopy
 from datetime import datetime
+
 from lib import *
+
+
+HELP_STR = '''
+Usage:
+  pypy3 hill.py n d
+
+Creates an (n,d)-PA of size (n choose d), where
+each row has its d highest symbols in a different of the
+(n choose d) positions that they could be arranged in.
+'''
 
 
 def main(n, k, d):
@@ -21,7 +27,7 @@ def main(n, k, d):
 
   best_score = float('inf')
   best_pa = deepcopy(A)
-  last_printed_score = None
+  last_printed_score = float('inf')
   last_tweak = 0
 
   try:
@@ -32,8 +38,9 @@ def main(n, k, d):
       if uncoverage == 0:
         return A
       
-      should_print = it_count % uncoverage == 0
+      # should_print = it_count % uncoverage == 0
       # should_print = True
+      should_print = False
       if W-w < best_score:
         best_score = W-w
         should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
@@ -61,11 +68,14 @@ def main(n, k, d):
 
 if __name__ == '__main__':
   from sys import argv
-  n, d = int(argv[1]), int(argv[2])
+  try:
+    n, d = int(argv[1]), int(argv[2])
+  except:
+    print (HELP_STR)
+    exit(1)
 
   # The original PA is size m
   filename = f'pa_{n}_choose_{d}.txt'
-  # filename = f'dump88.txt'
   pa = main(n, d, d)
   with open(filename, 'w+') as f:
     disagreements = disagreement_counter(pa, d)
