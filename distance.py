@@ -18,26 +18,45 @@ with open(sys.argv[1]) as f:
     line = re.sub(r'[^\d\s]', '', line)
     A.append(list(map(int, line.split())))
 
+pairs = []
 n = None
-for row in A:
+for x, row in enumerate(A):
   if n is None:
     n = len(row)
   
   if len(row) != n:
-    print('Invalid length of row')
+    print(f'Invalid length of row {x+1}')
     exit(1)
   if len(set(row)) != n:
-    print('Duplicate in row')
+    print(f'Duplicate in row {x+1}')
     exit(1)
   if max(row) != n-1:
-    print('Invalid max in row')
+    print(f'Invalid max in row {x+1}')
     exit(1)
   if min(row) != 0:
-    print('Invalid min in row')
+    print(f'Invalid min in row {x+1}')
     exit(1)
 
+pairs = []
 ret = float('inf')
 for ux, u in enumerate(A):
   for vx in range(ux):
-    ret = min(ret, distance(u, A[vx]))
-print(ret)
+    d = distance(u, A[vx])
+    if d < ret:
+      ret = d
+      pairs = [(ux,vx)]
+      print(f'New minimum distance: {ret}')
+    elif d == ret:
+      pairs.append((ux,vx))
+
+if len(pairs) < 20:
+  print(f'Distance {ret} happens at these pairs of rows:')
+  for ux,vx in pairs:
+    print(f'  - {ux}, {vx}')
+  print()
+  print(f'Distance is {ret}')
+else:
+  print(f'Distance {ret} happens in {len(pairs)} pairs of rows')
+  print(f'Minimum distance is {ret}')
+
+
