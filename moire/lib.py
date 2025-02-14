@@ -3,40 +3,6 @@ import itertools as it
 import random
 
 
-def apply_permutation(perm, src, dst):
-  ret = [e for e in perm]
-  for u,v in zip(src, dst):
-    ret[u] = perm[v]
-  return ret
-
-
-def separated(u, v, d):
-  dd = d*d
-  for a,b in zip(u,v):
-    if (a-b)**2 >= dd:
-      return True
-  return False
-
-
-def disagreement_counter(pa, d):
-  ret = []
-  c = Counter()
-  for vx, v in enumerate(pa):
-    for ux in range(vx):
-      u = pa[ux]
-      separated = False
-      for a,b in zip(u,v):
-        if abs(a-b) >= d:
-          separated = True
-          break
-      if not separated:
-        ret.append((ux,vx))
-        c.update([ux])
-        c.update([vx])
-  # return ret
-  return c
-
-
 def load_pa(filename):
   ret = []
   with open(filename, 'r') as f:
@@ -70,6 +36,39 @@ def dumb_pa(n, k):
   return A, H, L
 
 
+def apply_permutation(perm, src, dst):
+  ret = [e for e in perm]
+  for u,v in zip(src, dst):
+    ret[u] = perm[v]
+  return ret
+
+
+def separated(u, v, d):
+  dd = d*d
+  for a,b in zip(u,v):
+    if (a-b)**2 >= dd:
+      return True
+  return False
+
+
+def disagreement_counter(pa, d):
+  ret = []
+  c = Counter()
+  for vx, v in enumerate(pa):
+    for ux in range(vx):
+      u = pa[ux]
+      separated = False
+      for a,b in zip(u,v):
+        if abs(a-b) >= d:
+          separated = True
+          break
+      if not separated:
+        ret.append((ux,vx))
+        c.update([ux])
+        c.update([vx])
+  return c
+
+
 def init_separations(A, d):
   s = [set() for _ in A]
   for vx in range(len(A)):
@@ -78,13 +77,6 @@ def init_separations(A, d):
         s[ux].add(vx)
         s[vx].add(ux)
   return s
-
-
-def kid_permutation(A, start, s, i, d):
-  target = [e for e in start]
-  random.shuffle(target)
-  adders, subers, news = eval_permutation(A, start, target, s, i, d)
-  return target, adders, subers, news
 
 
 def eval_permutation(A, start, target, s, i, d):
@@ -105,58 +97,14 @@ def eval_permutation(A, start, target, s, i, d):
   return adders, subers, news
 
 
-def hammer(A, d):
-  dd=d*d
-  asdf = dict()
-  # s = [set() for _ in A]
-  for vx in range(len(A)):
-    for ux in range(vx):
-      if ux != vx:
-        count = 0
-        for a,b in zip(A[ux],A[vx]):
-          if (a-b)**2 >= dd:
-            count += 1
-        if count > 1:
-          asdf.setdefault(count, []).append((ux,vx))
-  return asdf
-  # print(list(reversed(sorted(asdf.keys()))))
-
-
-# Mutates A, s
-def mist(A,H,L,s,d):
-  asdf = hammer(A, d)
-  print(list(reversed(sorted((k,len(v)) for k,v in asdf.items()))))
-  while True:
-    for k in reversed(sorted(asdf.keys())):
-    # for k in sorted(asdf.keys()):
-      random.shuffle(asdf[k]) 
-      for v in asdf[k]:
-        for i in v:
-          for _ in range(1000):
-            # i = random.randrange(len(A)) if givens is None else random.choice(givens)
-            one = random.choice((H, L))[i]
-            two, adders, subers, news = kid_permutation(A, one, s, i, d)
-            if len(news) + len(adders) >= 2*len(subers):
-              return i, one, two, adders, subers, news
-
-def gentle_fist(A, H, L, s, d):
-  i, one, two, adders, subers, news = mist(A,H,L,s,d)
-  A[i] = apply_permutation(A[i], one, two)
-  s[i].update(news)
-  for x in adders:
-    s[x].add(i)
-  for x in subers:
-    s[i].discard(x)
-    s[x].discard(i)
-  return len(news) + len(adders) > 2*len(subers)
-
-
 # Mutates A, s
 def gently_disturb(A, H, L, s, d, givens=None):
   while True:
     i = random.randrange(len(A)) if givens is None else random.choice(givens)
     one = random.choice((H, L))[i]
-    two, adders, subers, news = kid_permutation(A, one, s, i, d)
+    two = [e for e in one]
+    random.shuffle(two)
+    adders, subers, news = eval_permutation(A, one, two, s, i, d)
     if len(news) + len(adders) >= 2*len(subers):
       break
 
@@ -168,72 +116,6 @@ def gently_disturb(A, H, L, s, d, givens=None):
     s[i].discard(x)
     s[x].discard(i)
   return len(news) + len(adders) > 2*len(subers)
-
-
-# Mutates A, s
-def random_good_permutation(A, H, L, s, i, d, loops=10):
-  for _ in range(loops):
-    one = random.choice((H, L))[i]
-    two, adders, subers, news = kid_permutation(A, one, s, i, d)
-    if len(news) + len(adders) >= 2*len(subers):
-      A[i] = apply_permutation(A[i], one, two)
-      s[i].update(news)
-      for x in adders:
-        s[x].add(i)
-      for x in subers:
-        s[i].discard(x)
-        s[x].discard(i)
-      return True
-  return False    
-
-
-# Mutates A, s
-def best_permutation(A, one, s, i, d):
-  best = None
-  for two in it.permutations(one):
-    adders, subers, news = eval_permutation(A, one, two, s, i, d)
-    w = len(news) + len(adders) - 2*len(subers)
-    if best is None or w > best[0]:
-      best = w, two, adders, subers, news
-
-  w, two, adders, subers, news = best
-  if w <= 0:
-    return False
-
-  A[i] = apply_permutation(A[i], one, two)
-  s[i].update(news)
-  for x in adders:
-    s[x].add(i)
-  for x in subers:
-    s[i].discard(x)
-    s[x].discard(i)
-  return True  
-
-
-# Mutates A, s
-def best_full_permutation(A, H, L, s, i, d):
-  best = None
-  one = list(H[i]) + L[i]
-  for ht in it.permutations(H[i]):
-   for lt in it.permutations(L[i]):
-    two = ht+lt
-    adders, subers, news = eval_permutation(A, one, two, s, i, d)
-    w = len(news) + len(adders) - 2*len(subers)
-    if best is None or w > best[0]:
-      best = w, two, adders, subers, news
-
-  w, two, adders, subers, news = best
-  if w <= 0:
-    return False
-
-  A[i] = apply_permutation(A[i], one, two)
-  s[i].update(news)
-  for x in adders:
-    s[x].add(i)
-  for x in subers:
-    s[i].discard(x)
-    s[x].discard(i)
-  return True  
 
 
 def greatly_disturb(A, H, L, s, d):
