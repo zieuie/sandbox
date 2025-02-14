@@ -35,14 +35,9 @@ def main(n, k, d):
     for it_count in it.count():
       w = sum(len(e) for e in s)
       coverage = sum(1 for e in s if len(e) == len(A)-1)
-      uncoverage = len(A) - coverage
-      if uncoverage == 0:
-        print ('Fully covered')
 
-        return A
-      
       # should_print = it_count % uncoverage == 0
-      should_print = it_count % 10000 == 0
+      should_print = it_count % 10000 == 0 or len(A) == coverage
       # should_print = True
       # should_print = False
       if W-w < best_score:
@@ -58,12 +53,15 @@ def main(n, k, d):
         print(datetime.now(), 'Iteration:', it_count, 'Score:', W-w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(A), 'Last tweak:', last_tweak)
         last_printed_score = best_score
 
-      if W-w > best_score and it_count - last_tweak > 1000000:
+      if len(A) == coverage:
+        return A
+
+      if W-w > best_score and it_count - last_tweak > 100000:
         A = deepcopy(best_pa)
         s = deepcopy(best_s)
         greatly_disturb(A, H, L, s, d)
         last_tweak = it_count
-      elif W-w == best_score and it_count - last_tweak > 100000:
+      elif W-w == best_score and it_count - last_tweak > 1000:
         greatly_disturb(A, H, L, s, d)
         last_tweak = it_count
       elif gently_disturb(A, H, L, s, d):
