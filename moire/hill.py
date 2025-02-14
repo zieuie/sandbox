@@ -27,6 +27,7 @@ def main(n, k, d):
 
   best_score = float('inf')
   best_pa = deepcopy(A)
+  best_s = deepcopy(s)
   last_printed_score = float('inf')
   last_tweak = 0
 
@@ -36,29 +37,37 @@ def main(n, k, d):
       coverage = sum(1 for e in s if len(e) == len(A)-1)
       uncoverage = len(A) - coverage
       if uncoverage == 0:
+        print ('Fully covered')
+
         return A
       
       # should_print = it_count % uncoverage == 0
+      should_print = it_count % 10000 == 0
       # should_print = True
-      should_print = False
+      # should_print = False
       if W-w < best_score:
         best_score = W-w
         should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
         best_pa = deepcopy(A)
-      elif W-w == best_score:
+        best_s = deepcopy(s)
+      elif W-w == best_score and random.random() < 2:
         best_pa = deepcopy(A)
+        best_s = deepcopy(s)
 
       if should_print:
         print(datetime.now(), 'Iteration:', it_count, 'Score:', W-w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(A), 'Last tweak:', last_tweak)
         last_printed_score = best_score
 
-      if it_count - last_tweak > 3000:
+      if W-w > best_score and it_count - last_tweak > 1000000:
         A = deepcopy(best_pa)
+        s = deepcopy(best_s)
         greatly_disturb(A, H, L, s, d)
         last_tweak = it_count
-      else:
-        if gently_disturb(A, H, L, s, d):
-          last_tweak = it_count
+      elif W-w == best_score and it_count - last_tweak > 100000:
+        greatly_disturb(A, H, L, s, d)
+        last_tweak = it_count
+      elif gently_disturb(A, H, L, s, d):
+        last_tweak = it_count
 
   except KeyboardInterrupt:
     pass
@@ -77,6 +86,11 @@ if __name__ == '__main__':
   # The original PA is size m
   filename = f'pa_{n}_choose_{d}.txt'
   pa = main(n, d, d)
+  if verify(pa, d):
+    print ('Verified')
+  else:
+    print ('Failed to verify')
+
   with open(filename, 'w+') as f:
     disagreements = disagreement_counter(pa, d)
     f.write(f'# Disagreements: {len(disagreements)} {disagreements}\n\n')

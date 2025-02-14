@@ -51,6 +51,14 @@ def separated(u, v, d):
   return False
 
 
+def verify(pa, d):
+  for vx in range(len(pa)):
+    for ux in range(vx):
+      if not separated(pa[ux], pa[vx], d):
+        return False
+  return True
+       
+
 def disagreement_counter(pa, d):
   ret = []
   c = Counter()
@@ -97,6 +105,16 @@ def eval_permutation(A, start, target, s, i, d):
   return adders, subers, news
 
 
+def update_diffs(A, s, i, row, adders, subers, news):
+  A[i] = row
+  s[i].update(news)
+  for x in adders:
+    s[x].add(i)
+  for x in subers:
+    s[i].discard(x)
+    s[x].discard(i)
+
+
 # Mutates A, s
 def gently_disturb(A, H, L, s, d, givens=None):
   while True:
@@ -108,13 +126,8 @@ def gently_disturb(A, H, L, s, d, givens=None):
     if len(news) + len(adders) >= 2*len(subers):
       break
 
-  A[i] = apply_permutation(A[i], one, two)
-  s[i].update(news)
-  for x in adders:
-    s[x].add(i)
-  for x in subers:
-    s[i].discard(x)
-    s[x].discard(i)
+  row = apply_permutation(A[i], one, two)
+  update_diffs(A, s, i, row, adders, subers, news)  
   return len(news) + len(adders) > 2*len(subers)
 
 
@@ -133,10 +146,5 @@ def greatly_disturb(A, H, L, s, d):
   two = hps + lps
   adders, subers, news = eval_permutation(A, one, two, s, i, d)
 
-  A[i] = apply_permutation(A[i], one, two)
-  s[i].update(news)
-  for x in adders:
-    s[x].add(i)
-  for x in subers:
-    s[i].discard(x)
-    s[x].discard(i)
+  row = apply_permutation(A[i], one, two)
+  update_diffs(A, s, i, row, adders, subers, news)
