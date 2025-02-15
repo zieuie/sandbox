@@ -30,7 +30,7 @@ def main(n, d):
   best_s = deepcopy(s)
   last_printed_score = float('inf')
   last_tweak = 0
-  high_only = True
+  high_only = False
 
   try:
     for it_count in it.count():
@@ -39,7 +39,7 @@ def main(n, d):
 
       # should_print = it_count % uncoverage == 0
       should_print = it_count % 1000 == 0 or len(A) == coverage
-      # should_print = True
+      should_print = True
       # should_print = False
       if W-w < best_score:
         best_score = W-w
