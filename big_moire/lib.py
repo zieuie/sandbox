@@ -14,15 +14,23 @@ def load_pa(filename):
   return ret
 
 
-def dumb_pa(n, k):
-  m = n-k
+# g is the number of repetitions
+def dumb_pa(n, d):
   sr = set(range(n))
   A = []
-  H = list(it.combinations(list(range(n)), k))
+  H = list(it.combinations(list(range(n)), d))
   L = [sorted(sr-set(e)) for e in H]
+  extend_pa(A, H, n, d)
+  return A, H, L
+
+
+def extend_pa(A, H, n, d):
+  m = n-d
+  lows = list(range(m))
+  highs = list(range(m, n))
   for ps in H:
-    lows = tuple(range(m))
-    highs = tuple(range(m, n))
+    random.shuffle(lows)
+    random.shuffle(highs)
     h, l = 0, 0
     row = []
     for i in range(n):
@@ -33,7 +41,6 @@ def dumb_pa(n, k):
         row.append(lows[l])
         l += 1
     A.append(row)
-  return A, H, L
 
 
 def apply_permutation(perm, src, dst):
@@ -116,11 +123,12 @@ def update_diffs(A, s, i, row, adders, subers, news):
 
 
 # Mutates A, s
-def gently_disturb(A, H, L, s, d, givens=None):
+def gently_disturb(A, H, L, s, d, high_only=False):
   while True:
-    i = random.randrange(len(A)) if givens is None else random.choice(givens)
-    one = random.choice((H, L))[i]
-    # one = H[i]
+    i = random.randrange(len(A))
+    one = random.choice((H, L))[i%len(H)]
+    if high_only:
+      one = H[i%len(H)]
     two = [e for e in one]
     random.shuffle(two)
     adders, subers, news = eval_permutation(A, one, two, s, i, d)
@@ -132,22 +140,24 @@ def gently_disturb(A, H, L, s, d, givens=None):
   return len(news) + len(adders) > 2*len(subers)
 
 
-def greatly_disturb(A, H, L, s, d):
+def greatly_disturb(A, H, L, s, d, high_only=False):
   q = sorted([(len(si), idx) for idx,si in enumerate(s)])
+  # i = random.randrange(len(A))
   # i = random.randrange(10)
   i = q[-1][1]
 
-  hps = [e for e in H[i]]
+  hps = [e for e in H[i % len(H)]]
   random.shuffle(hps)
 
-  lps = [e for e in L[i]]
+  lps = [e for e in L[i % len(H)]]
   random.shuffle(lps)
 
-  one = list(H[i]) + list(L[i])
+  one = list(H[i % len(H)]) + list(L[i % len(H)])
   two = hps + lps
   
-  # one = list(H[i])
-  # two = hps
+  if high_only:
+    one = list(H[i % len(H)])
+    two = hps
 
   adders, subers, news = eval_permutation(A, one, two, s, i, d)
 
