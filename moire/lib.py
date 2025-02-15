@@ -120,6 +120,7 @@ def gently_disturb(A, H, L, s, d, givens=None):
   while True:
     i = random.randrange(len(A)) if givens is None else random.choice(givens)
     one = random.choice((H, L))[i]
+    # one = H[i]
     two = [e for e in one]
     random.shuffle(two)
     adders, subers, news = eval_permutation(A, one, two, s, i, d)
@@ -144,6 +145,10 @@ def greatly_disturb(A, H, L, s, d):
 
   one = list(H[i]) + list(L[i])
   two = hps + lps
+  
+  # one = list(H[i])
+  # two = hps
+
   adders, subers, news = eval_permutation(A, one, two, s, i, d)
 
   row = apply_permutation(A[i], one, two)
