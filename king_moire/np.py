@@ -3,7 +3,7 @@ from copy import deepcopy
 from datetime import datetime
 
 from lib import *
-
+import numpy as np
 
 HELP_STR = '''
 Usage:
@@ -59,13 +59,59 @@ def yoink_columns(A, n, d):
   return ret
 
 
+def eval_permutation3(A, src, dst, s, ux, d):
+  # before := those rows which were covered in the src columns before permuting
+  R = A[ux]
+  mask = np.any(np.abs(A[:, src] - R[src, None].T) >= d, axis=1)
+  before = set(np.where(mask)[0])
+
+  # after := those rows which are covered in the src columns after permuting
+  R = np.array(apply_permutation(A[ux], src, dst))
+  mask = np.any(np.abs(A[:, src] - R[src, None].T) >= d, axis=1)
+  after = set(np.where(mask)[0])
+
+  # unchanged := those rows which were covered outside of the src columns
+  rows = list(after | before)
+  meep = list( set(range(n)) - set(src) )
+  mask = np.any(np.abs(A[rows][:, meep] - R[meep, None].T) >= d, axis=1)
+  unchanged = set(np.array(rows)[mask])
+
+  # print('Before', before)
+  # print()
+  # print('After',  after)
+  # print()
+  # print(len(before), len(after), len(before-after), len(after-before))
+  # input()
+  return before-unchanged, after-unchanged
+
+
+def eval_permutation2(A, src, dst, s, ux, d):
+  R = A[ux]
+  mask = np.any(np.abs(A - R.T) >= d, axis=1)
+  before = set(np.where(mask)[0])
+
+  R = np.array(apply_permutation(A[ux], src, dst))
+  mask = np.any(np.abs(A - R.T) >= d, axis=1)
+  after = set(np.where(mask)[0])
+
+
+def update_diffs2(A, s, i, row, before, after):
+  A[i] = row
+  s[i].update(after)
+  for x in after:
+    s[x].add(i)
+  for x in before - after:
+    s[i].discard(x)
+    s[x].discard(i)
+
+
 def hill_climb(A, n, d):
   N = len(A)
   s = init_separations(A, d)
   W = N * (N-1)
   P = yoink_columns(A, n, d)
 
-  # A = np.array(A)
+  A = np.array(A)
   best_score = float('inf')
   best_pa = deepcopy(A)
   best_s = deepcopy(s)
@@ -77,11 +123,10 @@ def hill_climb(A, n, d):
       score = W - sum(len(e) for e in s)
       coverage = sum(1 for e in s if len(e) == N-1)
 
-      should_print = it_count % 100 == 0
-      # should_print = True
+      # should_print = it_count % 1000 == 0 or N == coverage
+      should_print = True
       if score < best_score:
         best_score = score
-        should_print = True
         # should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
         best_pa = deepcopy(A)
         best_s = deepcopy(s)
@@ -95,8 +140,10 @@ def hill_climb(A, n, d):
         return
 
       force = False
-      if score >= best_score and it_count - last_tweak > 10000:
-        A, s, last_tweak, force = deepcopy(best_pa), deepcopy(best_s), it_count, True
+      if score > best_score and it_count - last_tweak > 100000:
+        A, s, last_tweak = deepcopy(best_pa), deepcopy(best_s), it_count
+        last_tweak = it_count
+        force = True
 
       for tries in it.count():
         i = random.randrange(N)
@@ -104,23 +151,40 @@ def hill_climb(A, n, d):
         dst = deepcopy(src)
         random.shuffle(dst)
 
-        adders, subers, news = eval_permutation(A, src, dst, s, i, d)
-        if len(news) + len(adders) > 2*len(subers):
+        before, after = eval_permutation3(A, src, dst, s, i, d)
+        # before, after = [], [] #eval_permutation3(A, src, dst, s, i, d)
+        if len(after) > len(before):
           # improvement, great!
-          print('tries', tries)
           last_tweak = it_count
           break
-        elif len(news) + len(adders) == 2*len(subers) and tries > 100 and not force:
+        elif len(after) == len(before) and tries > 1000 and not force:
           # wandering, sure!
           break
         elif tries > 100000 or force:
           # backtracking, maybe.
-          print ('backtracking...')
           last_tweak = it_count
           break
 
-      row = apply_permutation(A[i], src, dst)
-      update_diffs(A, s, i, row, adders, subers, news)
+      # print('tries', tries)
+      # row = apply_permutation(A[i], src, dst)
+      # update_diffs2(A, s, i, row, before, after)
+
+        # adders, subers, news = eval_permutation2(A, src, dst, s, i, d)
+        # if len(news) + len(adders) > 2*len(subers):
+        #   # improvement, great!
+        #   last_tweak = it_count
+        #   break
+        # elif len(news) + len(adders) == 2*len(subers) and tries > 1000 and not force:
+        #   # wandering, sure!
+        #   break
+        # elif tries > 100000 or force:
+        #   # backtracking, maybe.
+        #   last_tweak = it_count
+        #   break
+
+      # print('tries', tries)
+      # row = apply_permutation(A[i], src, dst)
+      # update_diffs(A, s, i, row, adders, subers, news)
 
 
   except KeyboardInterrupt:
@@ -146,6 +210,6 @@ if __name__ == '__main__':
       filename = f'pa_{n}_choose_{d}_unfinished.txt'
       print ('Failed to verify', filename)
 
-    with open(filename, 'w+') as f:
-      for row in pa:
-        f.write(' '.join(map(str, row)) + '\n')
+    # with open(filename, 'w+') as f:
+    #   for row in pa:
+    #     f.write(' '.join(map(str, row)) + '\n')

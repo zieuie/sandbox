@@ -14,35 +14,6 @@ def load_pa(filename):
   return ret
 
 
-# g is the number of repetitions
-def dumb_pa(n, d):
-  sr = set(range(n))
-  A = []
-  H = list(it.combinations(list(range(n)), d))
-  L = [sorted(sr-set(e)) for e in H]
-  extend_pa(A, H, n, d)
-  return A, H, L
-
-
-def extend_pa(A, H, n, d):
-  m = n-d
-  lows = list(range(m))
-  highs = list(range(m, n))
-  for ps in H:
-    random.shuffle(lows)
-    random.shuffle(highs)
-    h, l = 0, 0
-    row = []
-    for i in range(n):
-      if i in ps:
-        row.append(highs[h])
-        h += 1
-      else:
-        row.append(lows[l])
-        l += 1
-    A.append(row)
-
-
 def apply_permutation(perm, src, dst):
   ret = [e for e in perm]
   for u,v in zip(src, dst):
