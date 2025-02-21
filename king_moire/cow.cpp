@@ -15,9 +15,11 @@
 
 /** My typedefs go here */
 using namespace std;
-typedef ssize_t num_t;
+typedef signed char num_t;
 typedef vector<num_t> perm_t;
 typedef vector<perm_t> pa_t;
+typedef vector<vector<bool>> sep_t;
+typedef vector<ssize_t> vec_ssize_t;
 
 random_device rd; // Seed source
 mt19937 rng(rd());  // Random number generator
@@ -26,6 +28,9 @@ mt19937 rng(rd());  // Random number generator
 std::atomic<bool> ctrlCPressed{false};  // Global flag
 
 void signalHandler(int signum) {
+  if (ctrlCPressed) {
+    exit(1);
+  }
   std::cout << "\nCtrl+C detected! Saving and exiting.\n";
   ctrlCPressed = true;  // Set the flag
 }
@@ -86,16 +91,8 @@ void randomShuffle(vector<T>& data) {
 
 
 string datetimeNow() {
-  // auto now = chrono::system_clock::now();
-  // time_t now_c = chrono::system_clock::to_time_t(now);
-  // return format("{:%Y-%m-%d %H:%M:%S}", *localtime(&now_c));
-  auto start = chrono::system_clock::now();
-  // Some computation here
   auto end = chrono::system_clock::now();
-
-  chrono::duration<double> elapsed_seconds = end - start;
   time_t end_time = chrono::system_clock::to_time_t(end);
-
   string ret = ctime(&end_time);
   ret.resize(ret.size() - 1);
   return ret;
@@ -112,8 +109,22 @@ pa_t enweave(pa_t const& A, const num_t n, const num_t d) {
   pa_t ret;
   perm_t highs = listRange(n - d, n);
 
-  for (perm_t row : A) {
-    for (vector<long int> ps : combinations(listRange(n), d)) {
+  auto elements = listRange(n);
+  // Binary selection mask: first r elements are 1 (selected), rest are 0
+  vector<bool> mask(n, false);
+  fill(mask.begin(), mask.begin() + d, true);
+
+  vector<ssize_t> ps;
+  do {
+    ps.clear();
+    for (int i = 0; i < n; i++) {
+      if (mask[i]) {
+        ps.push_back(elements[i]);
+      }
+    }
+    // result push back
+
+    for (perm_t row : A) {
       randomShuffle(highs);
       int l = 0;
       int h = 0;
@@ -129,7 +140,9 @@ pa_t enweave(pa_t const& A, const num_t n, const num_t d) {
       }
       ret.push_back(t);
     }
-  }
+
+  } while (prev_permutation(mask.begin(), mask.end()));
+  
   return ret;
 }
 
@@ -158,7 +171,7 @@ pa_t loadPa(const string& filename) {
       }
     }
 
-    num_t num;
+    ssize_t num;
     while (ss >> num) {
       row.push_back(num);
     }
@@ -180,14 +193,18 @@ pa_t loadPa2(const num_t n, const num_t d) {
   }
 
   sprintf(filename, "pa_%li_choose_%li_verified.txt", n - d, d);
-  printf("Loaded from smaller file\n");
-  return enweave(loadPa(filename), n, d);
+  printf("Loading from smaller file\n");
+  auto a = loadPa(filename);
+  printf("Loaded\n");
+  auto ret = enweave(a, n, d);
+  printf("Weaved\n");
+  return ret;
 }
 
 
 /** Helper functions for manipulating PAs */
 
-vector<pa_t> yoink_columns(const pa_t& A, int n, int d) {
+vector<vector<vector<num_t>>> yoink_columns(const pa_t& A, int n, int d) {
   num_t twists = n / d;
   vector<vector<vector<num_t>>> ret(twists);
 
@@ -216,7 +233,7 @@ inline bool separated(perm_t u, perm_t v, num_t d) {
   return false;
 }
 
-void init_separations(const pa_t& A, int d, pa_t& s) {
+void init_separations(const pa_t& A, int d, sep_t& s) {
   for (size_t vx = 0; vx < A.size(); vx++) {
     for (size_t ux = 0; ux < vx; ux++) {
       if (ux != vx && separated(A[ux], A[vx], d)) {
@@ -241,8 +258,8 @@ void eval_permutation(
   const pa_t& A,
   const perm_t& src,
   const perm_t& dst,
-  perm_t& adders, perm_t& subers,
-  pa_t& s, int i, int d) {
+  vec_ssize_t& adders, vec_ssize_t& subers,
+  sep_t& s, int i, int d) {
 
   adders.clear();
   subers.clear();
@@ -272,7 +289,7 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
   ssize_t W = N * (N - 1);
 
   // separation lookup table
-  pa_t s;
+  sep_t s;
   s.resize(N);
   for (auto& row : s) {
     row.resize(N);
@@ -283,36 +300,36 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
   auto P = yoink_columns(A, n, d);
 
   // set difference holders...
-  perm_t adders, subers;
+  vec_ssize_t adders, subers;
+  perm_t src, dst;
 
   // loop state
   ssize_t best_score = W;
   ssize_t last_tweak = 0;
+  ssize_t score = W;
+  for (auto row : s) {
+    for (auto e : row) {
+      score -= e;
+    }
+  }
 
   // climb that hill!
   for (ssize_t it_count = 0;; it_count++) {
-    // recalculate score
-    ssize_t score = W;
-    for (auto row : s) {
-      for (auto e : row) {
-        score -= e;
-      }
-    }
-
-    // and coverage
-    ssize_t coverage = 0;
-    for (auto row : s) {
-      int count = 0;
-      for (auto e : row) {
-        count += e;
-      }
-      if (count == N - 1) {
-        coverage++;
-      }
-    }
+    // // coverage
+    // ssize_t coverage = 0;
+    // for (auto row : s) {
+    //   int count = 0;
+    //   for (auto e : row) {
+    //     count += e;
+    //   }
+    //   if (count == N - 1) {
+    //     coverage++;
+    //   }
+    // }
 
     // is it time to print?
-    bool should_print = it_count % 100 == 0;
+    // bool should_print = it_count % 100 == 0;
+    bool should_print = true;
     if (score < best_score) {
       best_score = score;
       should_print = true;
@@ -321,7 +338,8 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
     // i'm gonna call a hundred times
     if (should_print) {
-      printf("%s Iteration: %li Score: %li Best: %li Coverage %li of %li Last tweak: %li\n", datetimeNow().c_str(), it_count, score, best_score, coverage, N, last_tweak);
+      printf("%s Iteration: %li Score: %li Best: %li Last tweak: %li\n", datetimeNow().c_str(), it_count, score, best_score, last_tweak);
+      // printf("%s Iteration: %li Score: %li Best: %li Coverage %li of %li Last tweak: %li\n", datetimeNow().c_str(), it_count, score, best_score, coverage, N, last_tweak);
     }
 
     // are we really over now?
@@ -337,8 +355,6 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
     // live a lie you like
     ssize_t i;
-    perm_t src, dst;
-
     for (ssize_t tries = 0; ; tries++) {
       // pick a random row to improve
       i = randrange(N);
@@ -371,8 +387,10 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
     perm_t row = apply_permutation(A[i], src, dst);
     A[i] = row;
+    score -= 2*(adders.size() - subers.size());
     for (ssize_t x : adders) {
       s[x][i] = 1;
+      s[i][x] = 1;
     }
     for (ssize_t x : subers) {
       s[i][x] = 1;
@@ -397,7 +415,8 @@ bool verify(const pa_t& A, int d) {
 int main(int argc, char* argv[]) {
   signal(SIGINT, signalHandler);  // Register SIGINT handler
 
-  int n = 9, d = 3;
+  int n = 12, d = 3;
+  // int n = 9, d = 3;
   auto pa = loadPa2(n, d);
   // printArray(data);
   hill_climb(pa, n, d);
@@ -413,7 +432,7 @@ int main(int argc, char* argv[]) {
 
   ofstream f(filename);
   for (auto row : pa) {
-    for (auto num : row) {
+    for (int num : row) {
       f << num << " ";
     }
     f << "\n";
