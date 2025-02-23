@@ -186,13 +186,19 @@ pa_t loadPa(const string& filename) {
 
 pa_t loadPa2(const num_t n, const num_t d) {
   char filename[1024];
-  sprintf(filename, "pa_%li_choose_%li_unfinished.txt", n, d);
+  sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
   if (filesystem::exists(filename)) {
-    printf("Loaded from unfinished file\n");
+    printf("Resuming unfinished file\n");
     return loadPa(filename);
   }
 
-  sprintf(filename, "pa_%li_choose_%li_verified.txt", n - d, d);
+  sprintf(filename, "pa_%d_choose_%d.txt", n, d);
+  if (filesystem::exists(filename)) {
+    printf("Resuming unfinished file\n");
+    return loadPa(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d_verified.txt", n - d, d);
   printf("Loading from smaller file\n");
   auto a = loadPa(filename);
   printf("Loaded\n");
@@ -328,8 +334,8 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
     // }
 
     // is it time to print?
-    // bool should_print = it_count % 100 == 0;
-    bool should_print = true;
+    bool should_print = it_count % 100 == 0;
+    // bool should_print = true;
     if (score < best_score) {
       best_score = score;
       should_print = true;
@@ -415,10 +421,9 @@ bool verify(const pa_t& A, int d) {
 int main(int argc, char* argv[]) {
   signal(SIGINT, signalHandler);  // Register SIGINT handler
 
-  int n = 12, d = 3;
-  // int n = 9, d = 3;
+  int n = std::stoi(argv[1]);
+  int d = std::stoi(argv[2]);
   auto pa = loadPa2(n, d);
-  // printArray(data);
   hill_climb(pa, n, d);
 
   char filename[1024];
