@@ -12,6 +12,8 @@
 #include <atomic>
 #include <csignal>
 #include <thread>
+#include <string.h>
+
 
 /** My typedefs go here */
 using namespace std;
@@ -21,18 +23,26 @@ typedef vector<perm_t> pa_t;
 typedef vector<vector<bool>> sep_t;
 typedef vector<ssize_t> vec_ssize_t;
 
-random_device rd; // Seed source
-mt19937 rng(rd());  // Random number generator
+
+/** Forward declaration */
+void driver(int n, int d);
+
+
+/** Initialization of RNG */
+random_device rd;
+mt19937 rng(rd());
+
 
 /** Special exit logic */
-std::atomic<bool> ctrlCPressed{false};  // Global flag
+std::atomic<bool> ctrl_c_pressed{false};  // Global flag
 
-void signalHandler(int signum) {
-  if (ctrlCPressed) {
+void signal_handler(int signum) {
+  if (ctrl_c_pressed) {
+    std::cout << "\nCtrl+C detected twice! Exiting NOW!\n";
     exit(1);
   }
   std::cout << "\nCtrl+C detected! Saving and exiting.\n";
-  ctrlCPressed = true;  // Set the flag
+  ctrl_c_pressed = true;  // Set the flag
 }
 
 
@@ -63,7 +73,8 @@ vector<vector<T>> combinations(const vector<T>& elements, int r) {
   return result;
 }
 
-perm_t listRange(const num_t start, const num_t end) {
+
+perm_t list_range(const num_t start, const num_t end) {
   perm_t ret;
   for (num_t x = start; x < end; x++) {
     ret.push_back(x);
@@ -71,11 +82,13 @@ perm_t listRange(const num_t start, const num_t end) {
   return move(ret);
 }
 
-perm_t listRange(const num_t end) {
-  return listRange(0, end);
+
+perm_t list_range(const num_t end) {
+  return list_range(0, end);
 }
 
-void printArray(const pa_t& data) {
+
+void print_array(const pa_t& data) {
   for (const auto& row : data) {
     for (int num : row) {
       cout << num << " ";
@@ -84,13 +97,14 @@ void printArray(const pa_t& data) {
   }
 }
 
+
 template <typename T>
-void randomShuffle(vector<T>& data) {
+void random_shuffle(vector<T>& data) {
   shuffle(data.begin(), data.end(), rng);
 }
 
 
-string datetimeNow() {
+string datetime_now() {
   auto end = chrono::system_clock::now();
   time_t end_time = chrono::system_clock::to_time_t(end);
   string ret = ctime(&end_time);
@@ -103,13 +117,14 @@ int randrange(int stop) {
   return dist(rng);
 }
 
-/** Helper functions for loading files*/
+
+/** Helper functions for loading files */
 
 pa_t enweave(pa_t const& A, const num_t n, const num_t d) {
   pa_t ret;
-  perm_t highs = listRange(n - d, n);
+  perm_t highs = list_range(n - d, n);
 
-  auto elements = listRange(n);
+  auto elements = list_range(n);
   // Binary selection mask: first r elements are 1 (selected), rest are 0
   vector<bool> mask(n, false);
   fill(mask.begin(), mask.begin() + d, true);
@@ -125,7 +140,7 @@ pa_t enweave(pa_t const& A, const num_t n, const num_t d) {
     // result push back
 
     for (perm_t row : A) {
-      randomShuffle(highs);
+      random_shuffle(highs);
       int l = 0;
       int h = 0;
       perm_t t;
@@ -142,11 +157,12 @@ pa_t enweave(pa_t const& A, const num_t n, const num_t d) {
     }
 
   } while (prev_permutation(mask.begin(), mask.end()));
-  
+
   return ret;
 }
 
-pa_t loadPa(const string& filename) {
+
+pa_t load_pa(const string& filename) {
   ifstream file(filename);
   if (!file) {
     cerr << "Error opening file: " << filename << endl;
@@ -184,27 +200,108 @@ pa_t loadPa(const string& filename) {
   return data;
 }
 
-pa_t loadPa2(const num_t n, const num_t d) {
+
+pa_t random_pa(const num_t n, const num_t d) {
+  pa_t pot;
+  perm_t row = list_range(0, n-d);
+  random_shuffle(row);
+  pot.push_back(row);
+  return enweave(pot, n, d);
+}
+
+
+pa_t resume_computation(const num_t n, const num_t d) {
+  vector<string> pots;
+
   char filename[1024];
+  sprintf(filename, "pa_%d_choose_%d_verified.txt", n, d);
+  if (filesystem::exists(filename)) {
+    printf("This PA already exists and is verified!");
+    pots.push_back(filename);
+  }
+
   sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
   if (filesystem::exists(filename)) {
-    printf("Resuming unfinished file\n");
-    return loadPa(filename);
+    pots.push_back(filename);
   }
 
   sprintf(filename, "pa_%d_choose_%d.txt", n, d);
   if (filesystem::exists(filename)) {
-    printf("Resuming unfinished file\n");
-    return loadPa(filename);
+    pots.push_back(filename);
   }
 
-  sprintf(filename, "pa_%d_choose_%d_verified.txt", n - d, d);
-  printf("Loading from smaller file\n");
-  auto a = loadPa(filename);
-  printf("Loaded\n");
-  auto ret = enweave(a, n, d);
-  printf("Weaved\n");
-  return ret;
+  sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n-d, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d.txt", n-d, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  if (0 == pots.size()) {
+    if (n-d <= d) {
+      printf("For n <= 2d, we generate a PA at random.\n");
+      return random_pa(n, d);
+    }
+    printf("No existing files can support P(%d, %d). Constructing a smaller PA first.\n", n, d);
+    driver(n-d, d);
+    sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
+  } else if (1 == pots.size()) {
+    strcpy(filename, pots[0].c_str());
+  } else {
+    printf("\n%li files could be used as the seed for computing P(%d, %d).\n", pots.size(), n, d);
+    int usr = -1;
+    while (! (0 < usr && usr <= pots.size())) {
+      for (ssize_t x = 0; x < pots.size(); x++) {
+        printf("  %3li: %s\n", x+1, pots[x].c_str());
+      }
+      printf("Choose a file from the list: ");
+
+      if (scanf("%d", &usr) != 1) {
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF);
+      }
+    }
+    strcpy(filename, pots[usr-1].c_str());
+  }
+
+  auto a = load_pa(filename);
+  printf("Loaded from %s\n", filename);
+  if (a.size() && a[0].size() < n) {
+    auto ret = enweave(a, n, d);
+    printf("Weaved\n");
+    return ret;
+  } else {
+    printf("No weaving necessary\n");
+    return a;
+  }
+}
+
+
+void save_pa(const pa_t& pa, int n, int d, bool verified) {
+  char filename[1024];
+  if (verified) {
+    sprintf(filename, "pa_%d_choose_%d_verified.txt", n, d);
+    printf("Verified %s\n", filename);
+  } else {
+    sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
+    printf("Failed to verify %s\n", filename);
+  }
+
+  ofstream f(filename);
+  for (auto row : pa) {
+    for (int num : row) {
+      f << num << " ";
+    }
+    f << "\n";
+  }
 }
 
 
@@ -230,6 +327,7 @@ vector<vector<vector<num_t>>> yoink_columns(const pa_t& A, int n, int d) {
   return ret;
 }
 
+
 inline bool separated(perm_t u, perm_t v, num_t d) {
   for (ssize_t i = 0; i < u.size(); i++) {
     if (abs(u[i] - v[i]) >= d) {
@@ -238,6 +336,7 @@ inline bool separated(perm_t u, perm_t v, num_t d) {
   }
   return false;
 }
+
 
 void init_separations(const pa_t& A, int d, sep_t& s) {
   for (size_t vx = 0; vx < A.size(); vx++) {
@@ -250,6 +349,7 @@ void init_separations(const pa_t& A, int d, sep_t& s) {
   }
 }
 
+
 perm_t apply_permutation(const perm_t& perm, const perm_t& src, const perm_t& dst) {
   perm_t ret = perm;
 
@@ -259,6 +359,7 @@ perm_t apply_permutation(const perm_t& perm, const perm_t& src, const perm_t& ds
 
   return ret;
 }
+
 
 void eval_permutation(
   const pa_t& A,
@@ -287,6 +388,7 @@ void eval_permutation(
   }
 }
 
+
 void hill_climb(pa_t& A, num_t n, num_t d) {
   // height of the permutation array
   ssize_t N = A.size();
@@ -304,6 +406,17 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
   // weird setup of course
   auto P = yoink_columns(A, n, d);
+
+  // for (ssize_t x = 0; x < A.size(); x++) {
+  //   for (auto block : P) {
+  //     printf("[ ");
+  //     for (auto e : block[x]) {
+  //       printf("%d ", e);
+  //     }
+  //     printf("] ");
+  //   }
+  //   cout << endl;
+  // }
 
   // set difference holders...
   vec_ssize_t adders, subers;
@@ -344,12 +457,12 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
     // i'm gonna call a hundred times
     if (should_print) {
-      printf("%s Iteration: %li Score: %li Best: %li Last tweak: %li\n", datetimeNow().c_str(), it_count, score, best_score, last_tweak);
-      // printf("%s Iteration: %li Score: %li Best: %li Coverage %li of %li Last tweak: %li\n", datetimeNow().c_str(), it_count, score, best_score, coverage, N, last_tweak);
+      printf("%s Iteration: %li Score: %li Best: %li Last tweak: %li\n", datetime_now().c_str(), it_count, score, best_score, last_tweak);
+      // printf("%s Iteration: %li Score: %li Best: %li Coverage %li of %li Last tweak: %li\n", datetime_now().c_str(), it_count, score, best_score, coverage, N, last_tweak);
     }
 
     // are we really over now?
-    if (score == 0 || ctrlCPressed) {
+    if (score == 0 || ctrl_c_pressed) {
       return;
     }
 
@@ -370,7 +483,7 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
       // scramble the eggs
       dst = src;
-      randomShuffle(dst);
+      random_shuffle(dst);
 
       // would you still love me if i were a worm?
       eval_permutation(A, src, dst, adders, subers, s, i, d);
@@ -399,12 +512,13 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
       s[i][x] = 1;
     }
     for (ssize_t x : subers) {
-      s[i][x] = 1;
-      s[x][i] = 1;
+      s[i][x] = 0;
+      s[x][i] = 0;
     }
 
   }
 }
+
 
 bool verify(const pa_t& A, int d) {
   for (ssize_t vx = 0; vx < A.size(); vx++) {
@@ -418,30 +532,32 @@ bool verify(const pa_t& A, int d) {
 }
 
 
-int main(int argc, char* argv[]) {
-  signal(SIGINT, signalHandler);  // Register SIGINT handler
+void driver(int n, int d) {
+  auto pa = resume_computation(n, d);
 
-  int n = std::stoi(argv[1]);
-  int d = std::stoi(argv[2]);
-  auto pa = loadPa2(n, d);
+  // print_array(pa);
+  // string usr;
+  // printf("Press enter to continue: ");
+  // cin >> usr;
+
   hill_climb(pa, n, d);
 
   char filename[1024];
-  if (verify(pa, d)) {
-    sprintf(filename, "pa_%d_choose_%d_verified.txt", n, d);
-    printf("Verified %s\n", filename);
-  } else {
-    sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
-    printf("Failed to verify %s\n", filename);
-  }
+  bool verified = verify(pa, d);
+  save_pa(pa, n, d, verified);
+}
 
-  ofstream f(filename);
-  for (auto row : pa) {
-    for (int num : row) {
-      f << num << " ";
-    }
-    f << "\n";
-  }
+
+int main(int argc, char* argv[]) {
+  // Register SIGINT handler
+  signal(SIGINT, signal_handler);
+
+  // parse args
+  int n = std::stoi(argv[1]);
+  int d = std::stoi(argv[2]);
+
+  // you don't need a license to drive a sandwich
+  driver(n, d);
 
   return 0;
 }
