@@ -309,6 +309,7 @@ void save_pa(const pa_t& pa, int n, int d, bool verified) {
 
 vector<vector<vector<num_t>>> yoink_columns(const pa_t& A, int n, int d) {
   num_t twists = n / d;
+  num_t offset = n%d;
   vector<vector<vector<num_t>>> ret(twists);
 
   for (const auto& row : A) {
@@ -316,7 +317,7 @@ vector<vector<vector<num_t>>> yoink_columns(const pa_t& A, int n, int d) {
 
     for (size_t i = 0; i < row.size(); i++) {
       num_t e = row[i];
-      buckets[e / d].push_back(i);
+      buckets[max(0, e-offset) / d].push_back(i);
     }
 
     for (size_t j = 0; j < twists; j++) {
@@ -447,7 +448,7 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
     // }
 
     // is it time to print?
-    bool should_print = it_count % 100 == 0;
+    bool should_print = it_count % 1000 == 0;
     // bool should_print = true;
     if (score < best_score) {
       best_score = score;
@@ -457,7 +458,7 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
     // i'm gonna call a hundred times
     if (should_print) {
-      printf("%s Iteration: %li Score: %li Best: %li Last tweak: %li\n", datetime_now().c_str(), it_count, score, best_score, last_tweak);
+      printf("[%s] P(%d,%d) Iteration: %li Score: %li Best: %li Last tweak: %li\n", datetime_now().c_str(), n, d, it_count, score, best_score, last_tweak);
       // printf("%s Iteration: %li Score: %li Best: %li Coverage %li of %li Last tweak: %li\n", datetime_now().c_str(), it_count, score, best_score, coverage, N, last_tweak);
     }
 
@@ -468,7 +469,8 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
     // maybe i can change your mind
     bool force = false;
-    if (score >= best_score and it_count - last_tweak > 10000) {
+    if ((score == best_score && it_count - last_tweak > 10000) ||
+        (score > best_score && it_count - last_tweak > 50000)) {
       force = true;
     }
 
@@ -481,7 +483,7 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
       // pick a random group of digits to terrorize
       src = P[randrange(P.size())][i];
 
-      // scramble the eggs
+      // the world shall taste my eggs
       dst = src;
       random_shuffle(dst);
 
@@ -495,9 +497,11 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
       } else if (adders.size() == subers.size() && tries > 100 && !force) {
         // wandering, sure!
         break;
-      } else if (tries > 100000 or force) {
-        // backtracking, maybe.
+      } else if (tries > 100000) {
         printf("backtracking...\n");
+      } else if (force) {
+        // backtracking, maybe.
+        printf("backtracking forced... %li %li\n", it_count, last_tweak);
         last_tweak = it_count;
         break;
       }
