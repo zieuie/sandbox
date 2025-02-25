@@ -435,17 +435,17 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
   // climb that hill!
   for (ssize_t it_count = 0;; it_count++) {
-    // // coverage
-    // ssize_t coverage = 0;
-    // for (auto row : s) {
-    //   int count = 0;
-    //   for (auto e : row) {
-    //     count += e;
-    //   }
-    //   if (count == N - 1) {
-    //     coverage++;
-    //   }
-    // }
+    // coverage
+    ssize_t coverage = 0;
+    for (auto row : s) {
+      int count = 0;
+      for (auto e : row) {
+        count += e;
+      }
+      if (count == N - 1) {
+        coverage++;
+      }
+    }
 
     // is it time to print?
     bool should_print = it_count % 1000 == 0;
@@ -458,7 +458,7 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
 
     // i'm gonna call a hundred times
     if (should_print) {
-      printf("[%s] P(%d,%d) Iteration: %li Score: %li Best: %li Last tweak: %li\n", datetime_now().c_str(), n, d, it_count, score, best_score, last_tweak);
+      printf("[%s] P(%d,%d) Iteration: %li Score: %li Best: %li Coverage: %li of %li Last tweak: %li\n", datetime_now().c_str(), n, d, it_count, score, best_score, coverage, N, last_tweak);
       // printf("%s Iteration: %li Score: %li Best: %li Coverage %li of %li Last tweak: %li\n", datetime_now().c_str(), it_count, score, best_score, coverage, N, last_tweak);
     }
 
