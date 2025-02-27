@@ -253,6 +253,22 @@ void eval_permutation(
   }
 }
 
+void report_s(const pa_t& A, const sep_t& s) {
+  for (ssize_t x = 0; x < A.size(); x++) {
+    printf("%4li | ", x);
+    for (auto e : A[x]) {
+      printf("%d ", e);
+    }
+
+    printf("| ");
+    for (ssize_t y = 0; y < A.size(); y++) {
+      if (x != y && !s[x][y]) {
+        printf("%li ", y);
+      }
+    }
+    printf("\n");
+  }
+}
 
 void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
   // height of the permutation array
@@ -268,6 +284,7 @@ void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
     row.resize(N);
   }
   init_separations(A, d, s);
+  // report_s(A, s);
 
   // set difference holders...
   vec_ssize_t adders, subers;
@@ -308,12 +325,16 @@ void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
 
     // i'm gonna call a hundred times
     if (should_print) {
+      // report_s(A, s);
       printf("[%s] P(%d,%d) Iteration: %li Score: %li Best: %li Coverage: %li of %li Last tweak: %li\n", datetime_now().c_str(), n, d, it_count, score, best_score, coverage, N, last_tweak);
       // printf("%s Iteration: %li Score: %li Best: %li Coverage %li of %li Last tweak: %li\n", datetime_now().c_str(), it_count, score, best_score, coverage, N, last_tweak);
+      // string usr;
+      // cin >> usr;
     }
 
     // are we really over now?
     if (score == 0 || ctrl_c_pressed) {
+      report_s(A, s);
       return;
     }
 
@@ -349,6 +370,8 @@ void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
         break;
       } else if (tries > 100000) {
         printf("backtracking...\n");
+        last_tweak = it_count;
+        break;
       } else if (force) {
         // backtracking, maybe.
         printf("backtracking forced... %li %li\n", it_count, last_tweak);
@@ -572,7 +595,7 @@ void driver(int n, int d) {
 // A is an (n-2,d)-PA.
 pa_t enweave2(pa_t const& A, const num_t n, const num_t d) {
   pa_t ret;
-  
+
   for (ssize_t zero_idx = 0; zero_idx < n; zero_idx++) {
     for (ssize_t high_idx = zero_idx+1; high_idx < n; high_idx++) {
       for (perm_t row : A) {
@@ -658,7 +681,7 @@ pa_t resume_computation2(const num_t n, const num_t d) {
 
 
 yoink_t yoink_columns2(const pa_t& A, int n, int d) {
-  num_t twists = 2;
+  num_t twists = 3;
   // num_t offset = n%d;
   vector<vector<vector<num_t>>> ret(twists);
 
@@ -668,9 +691,9 @@ yoink_t yoink_columns2(const pa_t& A, int n, int d) {
     for (size_t i = 0; i < row.size(); i++) {
       num_t e = row[i];
       if (e == 0 || e == n-1) {
-        buckets[0].push_back(i);
+        buckets[3].push_back(i);
       } else {
-        buckets[1].push_back(i);
+        buckets[(e-1) / (d-1)].push_back(i);
       }
     }
 
@@ -708,6 +731,152 @@ void driver2(int n, int d) {
 
 
 //////////////////////////////////////////////////////////////////////////////
+/** Construct (2k+1, k+1) as (2k+1 choose k) settings of lower symbols */
+//////////////////////////////////////////////////////////////////////////////
+
+
+pa_t random_pa3(const num_t n, const num_t d) {
+  pa_t ret;
+  perm_t lows = list_range(0, d-1);
+  perm_t highs = list_range(d, n);
+
+  auto elements = list_range(n);
+  // Binary selection mask: first r elements are 1 (selected), rest are 0
+  vector<bool> mask(n, false);
+  fill(mask.begin(), mask.begin() + d, true);
+
+  vector<ssize_t> ps;
+  do {
+    ps.clear();
+    for (int i = 0; i < n; i++) {
+      if (mask[i]) {
+        ps.push_back(elements[i]);
+      }
+    }
+
+    random_shuffle(lows);
+    random_shuffle(highs);
+    int l = 0;
+    int h = 0;
+    // ssize_t m = ret.size() % d;
+    perm_t t;
+    for (int i = 0; i < n; i++) {
+      if (find(ps.begin(), ps.end(), i) != ps.end()) {
+        t.push_back(h ? highs[h-1] : d-1);
+        h += 1;
+      } else {
+        // t.push_back(0);
+        t.push_back(lows[l]);
+        l += 1;
+      }
+    }
+    ret.push_back(t);
+
+  } while (prev_permutation(mask.begin(), mask.end()));
+
+  return ret;
+}
+
+
+pa_t resume_computation3(const num_t n, const num_t d) {
+  vector<string> pots;
+  pots.push_back("randomly generated");
+
+  char filename[1024];
+  sprintf(filename, "pa_%d_%d_experimental_verified.txt", n, d);
+  if (filesystem::exists(filename)) {
+    printf("This PA already exists and is verified!");
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_%d_experimental_unfinished.txt", n, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  int usr = -1;
+  if (1 == pots.size()) {
+    usr = 1;
+  } else {
+    printf("\n%li files could be used as the seed for computing P(%d, %d).\n", pots.size(), n, d);
+    while (! (0 < usr && usr <= pots.size())) {
+      for (ssize_t x = 0; x < pots.size(); x++) {
+        printf("  %3li: %s\n", x+1, pots[x].c_str());
+      }
+      printf("Choose a file from the list: ");
+
+      if (scanf("%d", &usr) != 1) {
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF);
+      }
+    }
+    strcpy(filename, pots[usr-1].c_str());
+  }
+
+  printf("Loading from %s\n", filename);
+  if (usr != 1) {
+    return load_pa(filename);
+  } else {
+    return random_pa3(n, d);
+  }
+}
+
+
+yoink_t yoink_columns3(const pa_t& A, int n, int d) {
+  num_t twists = 2;
+  // num_t offset = n%d;
+  vector<vector<vector<num_t>>> ret(twists);
+
+  for (const auto& row : A) {
+    vector<vector<num_t>> buckets(twists);
+
+    for (size_t i = 0; i+1 < row.size(); i++) {
+      num_t e = row[i];
+      if (e < d-1) {
+      // if (e < d) {
+        buckets[0].push_back(i);
+      } else if (e >= d) {
+        buckets[1].push_back(i);
+      }
+      // That's right! We don't use e=d
+    }
+
+    for (size_t j = 0; j < twists; j++) {
+      ret[j].push_back(buckets[j]);
+    }
+  }
+
+  return ret;
+}
+
+
+void save_pa3(const pa_t& pa, int n, int d, bool verified) {
+  char filename[1024];
+  if (verified) {
+    sprintf(filename, "pa_%d_%d_experimental_verified.txt", n, d);
+    printf("Verified %s\n", filename);
+  } else {
+    sprintf(filename, "pa_%d_%d_experimental_unfinished.txt", n, d);
+    printf("Failed to verify %s\n", filename);
+  }
+  dump_pa(pa, filename);
+}
+
+
+void driver3(int n, int d) {
+  auto pa = resume_computation3(n, d);
+  yoink_t P = yoink_columns3(pa, n, d);
+  // print_array(pa);
+  // exit(1);
+  hill_climb(pa, P, n, d);
+
+  char filename[1024];
+  bool verified = verify(pa, d);
+  save_pa3(pa, n, d, verified);
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
 /** Main */
 //////////////////////////////////////////////////////////////////////////////
 
@@ -721,8 +890,9 @@ int main(int argc, char* argv[]) {
 
   // options go here
   vector<string> pots;
-  pots.push_back("Construct an (N,D) from (N-D,D)");
-  pots.push_back("Construct an (N,D) from (N-2,D-2)");
+  pots.push_back("P(n,d) >= (n choose d) * P(n-d, d)");
+  pots.push_back("P(n,d) >= (n choose 2) * P(n-2, d-1)");
+  pots.push_back("P(9,5) >= (9 choose 5)");
 
   // make the user pick an option
   int usr = -1;
@@ -745,7 +915,18 @@ int main(int argc, char* argv[]) {
       driver(n, d);
       break;
     case 2:
+      if (2*d != n) {
+        printf("FATAL: You must have n = 2d.\n");
+        exit(1);
+      }
       driver2(n, d);
+      break;
+    case 3:
+    if (2*d-1 != n) {
+      printf("FATAL: You must have n = 2d-1.\n");
+      exit(1);
+    }
+    driver3(n, d);
       break;
   }
 
