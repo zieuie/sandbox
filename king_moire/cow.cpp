@@ -14,6 +14,9 @@
 #include <thread>
 #include <string.h>
 
+//////////////////////////////////////////////////////////////////////////////
+// Helper stuff
+//////////////////////////////////////////////////////////////////////////////
 
 /** My typedefs go here */
 using namespace std;
@@ -22,6 +25,7 @@ typedef vector<num_t> perm_t;
 typedef vector<perm_t> pa_t;
 typedef vector<vector<bool>> sep_t;
 typedef vector<ssize_t> vec_ssize_t;
+typedef vector<vector<vector<num_t>>> yoink_t;
 
 
 /** Forward declaration */
@@ -97,6 +101,23 @@ void print_array(const pa_t& data) {
   }
 }
 
+void print_yoink(const yoink_t& P) {
+  if (P.size() < 1) {
+    return;
+  }
+
+  for (ssize_t x = 0; x < P[0].size(); x++) {
+    for (auto block : P) {
+      printf("[ ");
+      for (auto e : block[x]) {
+        printf("%d ", e);
+      }
+      printf("] ");
+    }
+    cout << endl;
+  }
+}
+
 
 template <typename T>
 void random_shuffle(vector<T>& data) {
@@ -119,48 +140,6 @@ int randrange(int stop) {
 
 
 /** Helper functions for loading files */
-
-pa_t enweave(pa_t const& A, const num_t n, const num_t d) {
-  pa_t ret;
-  perm_t highs = list_range(n - d, n);
-
-  auto elements = list_range(n);
-  // Binary selection mask: first r elements are 1 (selected), rest are 0
-  vector<bool> mask(n, false);
-  fill(mask.begin(), mask.begin() + d, true);
-
-  vector<ssize_t> ps;
-  do {
-    ps.clear();
-    for (int i = 0; i < n; i++) {
-      if (mask[i]) {
-        ps.push_back(elements[i]);
-      }
-    }
-    // result push back
-
-    for (perm_t row : A) {
-      random_shuffle(highs);
-      int l = 0;
-      int h = 0;
-      perm_t t;
-      for (int i = 0; i < n; i++) {
-        if (find(ps.begin(), ps.end(), i) != ps.end()) {
-          t.push_back(highs[h]);
-          h += 1;
-        } else {
-          t.push_back(row[l]);
-          l += 1;
-        }
-      }
-      ret.push_back(t);
-    }
-
-  } while (prev_permutation(mask.begin(), mask.end()));
-
-  return ret;
-}
-
 
 pa_t load_pa(const string& filename) {
   ifstream file(filename);
@@ -201,100 +180,7 @@ pa_t load_pa(const string& filename) {
 }
 
 
-pa_t random_pa(const num_t n, const num_t d) {
-  pa_t pot;
-  perm_t row = list_range(0, n-d);
-  random_shuffle(row);
-  pot.push_back(row);
-  return enweave(pot, n, d);
-}
-
-
-pa_t resume_computation(const num_t n, const num_t d) {
-  vector<string> pots;
-
-  char filename[1024];
-  sprintf(filename, "pa_%d_choose_%d_verified.txt", n, d);
-  if (filesystem::exists(filename)) {
-    printf("This PA already exists and is verified!");
-    pots.push_back(filename);
-  }
-
-  sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
-  if (filesystem::exists(filename)) {
-    pots.push_back(filename);
-  }
-
-  sprintf(filename, "pa_%d_choose_%d.txt", n, d);
-  if (filesystem::exists(filename)) {
-    pots.push_back(filename);
-  }
-
-  sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n-d, d);
-  if (filesystem::exists(filename)) {
-    pots.push_back(filename);
-  }
-
-  sprintf(filename, "pa_%d_choose_%d.txt", n-d, d);
-  if (filesystem::exists(filename)) {
-    pots.push_back(filename);
-  }
-
-  sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
-  if (filesystem::exists(filename)) {
-    pots.push_back(filename);
-  }
-
-  if (0 == pots.size()) {
-    if (n-d <= d) {
-      printf("For n <= 2d, we generate a PA at random.\n");
-      return random_pa(n, d);
-    }
-    printf("No existing files can support P(%d, %d). Constructing a smaller PA first.\n", n, d);
-    driver(n-d, d);
-    sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
-  } else if (1 == pots.size()) {
-    strcpy(filename, pots[0].c_str());
-  } else {
-    printf("\n%li files could be used as the seed for computing P(%d, %d).\n", pots.size(), n, d);
-    int usr = -1;
-    while (! (0 < usr && usr <= pots.size())) {
-      for (ssize_t x = 0; x < pots.size(); x++) {
-        printf("  %3li: %s\n", x+1, pots[x].c_str());
-      }
-      printf("Choose a file from the list: ");
-
-      if (scanf("%d", &usr) != 1) {
-        int c;
-        while ((c = getchar()) != '\n' && c != EOF);
-      }
-    }
-    strcpy(filename, pots[usr-1].c_str());
-  }
-
-  auto a = load_pa(filename);
-  printf("Loaded from %s\n", filename);
-  if (a.size() && a[0].size() < n) {
-    auto ret = enweave(a, n, d);
-    printf("Weaved\n");
-    return ret;
-  } else {
-    printf("No weaving necessary\n");
-    return a;
-  }
-}
-
-
-void save_pa(const pa_t& pa, int n, int d, bool verified) {
-  char filename[1024];
-  if (verified) {
-    sprintf(filename, "pa_%d_choose_%d_verified.txt", n, d);
-    printf("Verified %s\n", filename);
-  } else {
-    sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
-    printf("Failed to verify %s\n", filename);
-  }
-
+void dump_pa(const pa_t& pa, const string& filename) {
   ofstream f(filename);
   for (auto row : pa) {
     for (int num : row) {
@@ -306,28 +192,6 @@ void save_pa(const pa_t& pa, int n, int d, bool verified) {
 
 
 /** Helper functions for manipulating PAs */
-
-vector<vector<vector<num_t>>> yoink_columns(const pa_t& A, int n, int d) {
-  num_t twists = n / d;
-  num_t offset = n%d;
-  vector<vector<vector<num_t>>> ret(twists);
-
-  for (const auto& row : A) {
-    vector<vector<num_t>> buckets(twists);
-
-    for (size_t i = 0; i < row.size(); i++) {
-      num_t e = row[i];
-      buckets[max(0, e-offset) / d].push_back(i);
-    }
-
-    for (size_t j = 0; j < twists; j++) {
-      ret[j].push_back(buckets[j]);
-    }
-  }
-
-  return ret;
-}
-
 
 inline bool separated(perm_t u, perm_t v, num_t d) {
   for (ssize_t i = 0; i < u.size(); i++) {
@@ -390,7 +254,7 @@ void eval_permutation(
 }
 
 
-void hill_climb(pa_t& A, num_t n, num_t d) {
+void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
   // height of the permutation array
   ssize_t N = A.size();
 
@@ -404,20 +268,6 @@ void hill_climb(pa_t& A, num_t n, num_t d) {
     row.resize(N);
   }
   init_separations(A, d, s);
-
-  // weird setup of course
-  auto P = yoink_columns(A, n, d);
-
-  // for (ssize_t x = 0; x < A.size(); x++) {
-  //   for (auto block : P) {
-  //     printf("[ ");
-  //     for (auto e : block[x]) {
-  //       printf("%d ", e);
-  //     }
-  //     printf("] ");
-  //   }
-  //   cout << endl;
-  // }
 
   // set difference holders...
   vec_ssize_t adders, subers;
@@ -536,21 +386,330 @@ bool verify(const pa_t& A, int d) {
 }
 
 
+//////////////////////////////////////////////////////////////////////////////
+/** Turn (n-d,d) into (n,d) by putting the top (n-d to n) symbols into the (n choose d) positions */
+//////////////////////////////////////////////////////////////////////////////
+
+pa_t enweave(pa_t const& A, const num_t n, const num_t d) {
+  pa_t ret;
+  perm_t highs = list_range(n - d, n);
+
+  auto elements = list_range(n);
+  // Binary selection mask: first r elements are 1 (selected), rest are 0
+  vector<bool> mask(n, false);
+  fill(mask.begin(), mask.begin() + d, true);
+
+  vector<ssize_t> ps;
+  do {
+    ps.clear();
+    for (int i = 0; i < n; i++) {
+      if (mask[i]) {
+        ps.push_back(elements[i]);
+      }
+    }
+    // result push back
+
+    for (perm_t row : A) {
+      random_shuffle(highs);
+      int l = 0;
+      int h = 0;
+      perm_t t;
+      for (int i = 0; i < n; i++) {
+        if (find(ps.begin(), ps.end(), i) != ps.end()) {
+          t.push_back(highs[h]);
+          h += 1;
+        } else {
+          t.push_back(row[l]);
+          l += 1;
+        }
+      }
+      ret.push_back(t);
+    }
+
+  } while (prev_permutation(mask.begin(), mask.end()));
+
+  return ret;
+}
+
+
+pa_t random_pa(const num_t n, const num_t d) {
+  pa_t pot;
+  perm_t row = list_range(0, n-d);
+  random_shuffle(row);
+  pot.push_back(row);
+  return enweave(pot, n, d);
+}
+
+
+pa_t resume_computation(const num_t n, const num_t d) {
+  vector<string> pots;
+
+  char filename[1024];
+  sprintf(filename, "pa_%d_choose_%d_verified.txt", n, d);
+  if (filesystem::exists(filename)) {
+    printf("This PA already exists and is verified!");
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d.txt", n, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n-d, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d.txt", n-d, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  if (0 == pots.size()) {
+    if (n-d <= d) {
+      printf("For n <= 2d, we generate a PA at random.\n");
+      return random_pa(n, d);
+    }
+    printf("No existing files can support P(%d, %d). Constructing a smaller PA first.\n", n, d);
+    driver(n-d, d);
+    sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
+  } else if (1 == pots.size()) {
+    strcpy(filename, pots[0].c_str());
+  } else {
+    printf("\n%li files could be used as the seed for computing P(%d, %d).\n", pots.size(), n, d);
+    int usr = -1;
+    while (! (0 < usr && usr <= pots.size())) {
+      for (ssize_t x = 0; x < pots.size(); x++) {
+        printf("  %3li: %s\n", x+1, pots[x].c_str());
+      }
+      printf("Choose a file from the list: ");
+
+      if (scanf("%d", &usr) != 1) {
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF);
+      }
+    }
+    strcpy(filename, pots[usr-1].c_str());
+  }
+
+  auto a = load_pa(filename);
+  printf("Loaded from %s\n", filename);
+  if (a.size() && a[0].size() < n) {
+    auto ret = enweave(a, n, d);
+    printf("Weaved\n");
+    return ret;
+  } else {
+    printf("No weaving necessary\n");
+    return a;
+  }
+}
+
+
+yoink_t yoink_columns(const pa_t& A, int n, int d) {
+  num_t twists = n / d;
+  num_t offset = n%d;
+  vector<vector<vector<num_t>>> ret(twists);
+
+  for (const auto& row : A) {
+    vector<vector<num_t>> buckets(twists);
+
+    for (size_t i = 0; i < row.size(); i++) {
+      num_t e = row[i];
+      buckets[max(0, e-offset) / d].push_back(i);
+    }
+
+    for (size_t j = 0; j < twists; j++) {
+      ret[j].push_back(buckets[j]);
+    }
+  }
+
+  return ret;
+}
+
+
+void save_pa(const pa_t& pa, int n, int d, bool verified) {
+  char filename[1024];
+  if (verified) {
+    sprintf(filename, "pa_%d_choose_%d_verified.txt", n, d);
+    printf("Verified %s\n", filename);
+  } else {
+    sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
+    printf("Failed to verify %s\n", filename);
+  }
+  dump_pa(pa, filename);
+}
+
+
 void driver(int n, int d) {
   auto pa = resume_computation(n, d);
-
-  // print_array(pa);
-  // string usr;
-  // printf("Press enter to continue: ");
-  // cin >> usr;
-
-  hill_climb(pa, n, d);
+  yoink_t P = yoink_columns(pa, n, d);
+  hill_climb(pa, P, n, d);
 
   char filename[1024];
   bool verified = verify(pa, d);
   save_pa(pa, n, d, verified);
 }
 
+
+//////////////////////////////////////////////////////////////////////////////
+/** Turn (n-2,d-1) into (n,d) by bumping everything up by one, adding a new 0 and n-1 into the (n choose 2) positions */
+//////////////////////////////////////////////////////////////////////////////
+// Epecially along the (2d, d), (6,3), (8,4), etc.
+//   2n choose n upper.
+//   12,6 done for lower. 14,7 is 2805 to 3432, 16,8 9379 to 12870
+
+// A is an (n-2,d)-PA.
+pa_t enweave2(pa_t const& A, const num_t n, const num_t d) {
+  pa_t ret;
+  
+  for (ssize_t zero_idx = 0; zero_idx < n; zero_idx++) {
+    for (ssize_t high_idx = zero_idx+1; high_idx < n; high_idx++) {
+      for (perm_t row : A) {
+        int l = 0;
+        perm_t t;
+        for (int i = 0; i < n; i++) {
+          if (i == zero_idx) {
+            t.push_back(0);
+          } else if (i == high_idx) {
+            t.push_back(n-1);
+          } else {
+            t.push_back(1+row[l]);
+            l += 1;
+          }
+        }
+        ret.push_back(t);
+      }
+    }
+  }
+
+  return ret;
+}
+
+
+pa_t resume_computation2(const num_t n, const num_t d) {
+  vector<string> pots;
+
+  char filename[1024];
+  sprintf(filename, "pa_%d_%d_plus_2_verified.txt", n, d);
+  if (filesystem::exists(filename)) {
+    printf("This PA already exists and is verified!");
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_%d_plus_2_unfinished.txt", n, d);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_choose_%d_verified.txt", n-2, d-1);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  sprintf(filename, "pa_%d_%d.txt", n-2, d-1);
+  if (filesystem::exists(filename)) {
+    pots.push_back(filename);
+  }
+
+  if (0 == pots.size()) {
+    printf("No existing files can support P(%d, %d).\n", n, d);
+    exit(1);
+  } else if (1 == pots.size()) {
+    strcpy(filename, pots[0].c_str());
+  } else {
+    printf("\n%li files could be used as the seed for computing P(%d, %d).\n", pots.size(), n, d);
+    int usr = -1;
+    while (! (0 < usr && usr <= pots.size())) {
+      for (ssize_t x = 0; x < pots.size(); x++) {
+        printf("  %3li: %s\n", x+1, pots[x].c_str());
+      }
+      printf("Choose a file from the list: ");
+
+      if (scanf("%d", &usr) != 1) {
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF);
+      }
+    }
+    strcpy(filename, pots[usr-1].c_str());
+  }
+
+  auto a = load_pa(filename);
+  printf("Loaded from %s\n", filename);
+  if (a.size() && a[0].size() < n) {
+    auto ret = enweave2(a, n, d);
+    printf("Weaved\n");
+    return ret;
+  } else {
+    printf("No weaving necessary\n");
+    return a;
+  }
+}
+
+
+yoink_t yoink_columns2(const pa_t& A, int n, int d) {
+  num_t twists = 2;
+  // num_t offset = n%d;
+  vector<vector<vector<num_t>>> ret(twists);
+
+  for (const auto& row : A) {
+    vector<vector<num_t>> buckets(twists);
+
+    for (size_t i = 0; i < row.size(); i++) {
+      num_t e = row[i];
+      if (e == 0 || e == n-1) {
+        buckets[0].push_back(i);
+      } else {
+        buckets[1].push_back(i);
+      }
+    }
+
+    for (size_t j = 0; j < twists; j++) {
+      ret[j].push_back(buckets[j]);
+    }
+  }
+
+  return ret;
+}
+
+
+void save_pa2(const pa_t& pa, int n, int d, bool verified) {
+  char filename[1024];
+  if (verified) {
+    sprintf(filename, "pa_%d_%d_plus_2_verified.txt", n, d);
+    printf("Verified %s\n", filename);
+  } else {
+    sprintf(filename, "pa_%d_%d_plus_2_unfinished.txt", n, d);
+    printf("Failed to verify %s\n", filename);
+  }
+  dump_pa(pa, filename);
+}
+
+
+void driver2(int n, int d) {
+  auto pa = resume_computation2(n, d);
+  yoink_t P = yoink_columns2(pa, n, d);
+  hill_climb(pa, P, n, d);
+
+  char filename[1024];
+  bool verified = verify(pa, d);
+  save_pa2(pa, n, d, verified);
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+/** Main */
+//////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char* argv[]) {
   // Register SIGINT handler
@@ -560,8 +719,35 @@ int main(int argc, char* argv[]) {
   int n = std::stoi(argv[1]);
   int d = std::stoi(argv[2]);
 
+  // options go here
+  vector<string> pots;
+  pots.push_back("Construct an (N,D) from (N-D,D)");
+  pots.push_back("Construct an (N,D) from (N-2,D-2)");
+
+  // make the user pick an option
+  int usr = -1;
+  while (! (0 < usr && usr <= pots.size())) {
+    for (ssize_t x = 0; x < pots.size(); x++) {
+      printf("  %3li: %s\n", x+1, pots[x].c_str());
+    }
+    printf("Choose an option from the list: ");
+
+    if (scanf("%d", &usr) != 1) {
+      int c;
+      while ((c = getchar()) != '\n' && c != EOF);
+    }
+  }
+
+  printf("You chose %s\n", pots[usr-1].c_str());
   // you don't need a license to drive a sandwich
-  driver(n, d);
+  switch(usr) {
+    case 1:
+      driver(n, d);
+      break;
+    case 2:
+      driver2(n, d);
+      break;
+  }
 
   return 0;
 }
