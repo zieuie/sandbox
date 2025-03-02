@@ -763,6 +763,7 @@ pa_t random_pa3(const num_t n, const num_t d) {
     for (int i = 0; i < n; i++) {
       if (find(ps.begin(), ps.end(), i) != ps.end()) {
         t.push_back(h ? highs[h-1] : d-1);
+        // t.push_back(h ? 1 : 2);
         h += 1;
       } else {
         // t.push_back(0);
@@ -864,16 +865,41 @@ void save_pa3(const pa_t& pa, int n, int d, bool verified) {
 
 
 void driver3(int n, int d) {
-  auto pa = resume_computation3(n, d);
-  yoink_t P = yoink_columns3(pa, n, d);
-  // print_array(pa);
-  // exit(1);
-  hill_climb(pa, P, n, d);
+  auto pots = resume_computation3(n, d);
+  pa_t pa;
 
-  char filename[1024];
-  bool verified = verify(pa, d);
-  save_pa3(pa, n, d, verified);
+  for(ssize_t x = 0; x < pots.size(); x++) {
+    pa.push_back(pots[x]);
+    yoink_t P = yoink_columns3(pa, n, d);
+    hill_climb(pa, P, n, d);
+    printf("\n");
+
+    print_array(pa);
+
+    bool verified = verify(pa, d);
+    printf(verified ? "verified" : "failed");
+    printf("Exited %li\n", x);
+    save_pa3(pa, n, d, verified);
+
+    if (ctrl_c_pressed) {
+      break;
+    }
+  }
 }
+
+
+// void driver3(int n, int d) {
+//   auto pa = resume_computation3(n, d);
+//   yoink_t P = yoink_columns3(pa, n, d);
+//   // exit(1);
+//   hill_climb(pa, P, n, d);
+//   print_array(pa);
+
+//   // char filename[1024];
+//   bool verified = verify(pa, d);
+//   printf(verified ? "verified" : "failed");
+//   // save_pa3(pa, n, d, verified);
+// }
 
 
 //////////////////////////////////////////////////////////////////////////////
