@@ -25,7 +25,8 @@ typedef vector<num_t> perm_t;
 typedef vector<perm_t> pa_t;
 typedef vector<vector<bool>> sep_t;
 typedef vector<ssize_t> vec_ssize_t;
-typedef vector<vector<vector<num_t>>> yoink_t;
+typedef vector<vector<num_t>> yoink_row_t;
+typedef vector<yoink_row_t> yoink_t;
 
 
 /** Forward declaration */
@@ -903,6 +904,87 @@ void driver3(int n, int d) {
 
 
 //////////////////////////////////////////////////////////////////////////////
+/** Construct (2k+1, k+1) as (2k+1 choose k) settings of lower symbols */
+//////////////////////////////////////////////////////////////////////////////
+
+
+perm_t fill_row4(const num_t n, const yoink_row_t& yrow) {
+  perm_t t(n);
+
+  num_t cur = 0;
+  for (auto& ps : yrow) {
+    perm_t qs = list_range(cur, cur + static_cast<num_t>(ps.size()));
+    random_shuffle(qs);
+    for (ssize_t i = 0; i < ps.size(); i++) {
+      t[ps[i]] = qs[i];
+    }
+    cur += qs.size();
+  }
+
+  return t;
+}
+
+
+yoink_row_t yoink_row4(const perm_t& row, num_t twists) {
+  vector<vector<num_t>> buckets(twists);
+
+  for (size_t i = 0; i+1 < row.size(); i++) {
+    buckets[row[i]].push_back(i);
+  }
+
+  return buckets;
+}
+
+void save_pa4(const pa_t& pa, int n, int d, bool verified) {
+  char filename[1024];
+  if (verified) {
+    sprintf(filename, "pa_%d_%d_type_four_verified.txt", n, d);
+    printf("Verified %s\n", filename);
+  } else {
+    sprintf(filename, "pa_%d_%d_type_four_unfinished.txt", n, d);
+    printf("Failed to verify %s\n", filename);
+  }
+  dump_pa(pa, filename);
+}
+
+
+void driver4(int n, int d, const string& filename) {
+  pa_t pots = load_pa(filename);
+  num_t twists = 0;
+  for(auto e : pots[0]) {
+    twists = e > twists ? e : twists;
+  }
+  twists++;
+
+  yoink_t P;
+  pa_t pa;
+
+  for(ssize_t x = 0; x < pots.size(); x++) {
+    yoink_row_t yrow = yoink_row4(pots[x], twists);
+    pa.push_back(fill_row4(n, yrow));
+    P.push_back(std::move(yrow));
+
+    hill_climb(pa, P, n, d);
+    printf("\n");
+
+    print_array(pa);
+
+    bool verified = verify(pa, d);
+    printf(verified ? "verified" : "failed");
+    printf("Exited %li\n", x);
+    save_pa4(pa, n, d, verified);
+
+    string usr;
+    cin >> usr;
+
+    if (ctrl_c_pressed) {
+      break;
+    }
+  }
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
 /** Main */
 //////////////////////////////////////////////////////////////////////////////
 
@@ -910,15 +992,12 @@ int main(int argc, char* argv[]) {
   // Register SIGINT handler
   signal(SIGINT, signal_handler);
 
-  // parse args
-  int n = std::stoi(argv[1]);
-  int d = std::stoi(argv[2]);
-
   // options go here
   vector<string> pots;
   pots.push_back("P(n,d) >= (n choose d) * P(n-d, d)");
   pots.push_back("P(n,d) >= (n choose 2) * P(n-2, d-1)");
   pots.push_back("P(9,5) >= (9 choose 5)");
+  pots.push_back("Fill a PA");
 
   // make the user pick an option
   int usr = -1;
@@ -935,9 +1014,15 @@ int main(int argc, char* argv[]) {
   }
 
   printf("You chose %s\n", pots[usr-1].c_str());
+
   // you don't need a license to drive a sandwich
+  int n, d;
+  char filename[1024];
   switch(usr) {
     case 1:
+      // parse args
+      n = std::stoi(argv[1]);
+      d = std::stoi(argv[2]);
       driver(n, d);
       break;
     case 2:
@@ -946,13 +1031,23 @@ int main(int argc, char* argv[]) {
         exit(1);
       }
       driver2(n, d);
+      n = std::stoi(argv[1]);
+      d = std::stoi(argv[2]);
       break;
     case 3:
-    if (2*d-1 != n) {
-      printf("FATAL: You must have n = 2d-1.\n");
-      exit(1);
-    }
-    driver3(n, d);
+      n = std::stoi(argv[1]);
+      d = std::stoi(argv[2]);
+      if (2*d-1 != n) {
+        printf("FATAL: You must have n = 2d-1.\n");
+        exit(1);
+      }
+      driver3(n, d);
+      break;
+    case 4:
+      n = std::stoi(argv[1]);
+      d = std::stoi(argv[2]);
+      strcpy(filename, argv[3]);
+      driver4(n, d, filename);
       break;
   }
 
