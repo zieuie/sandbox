@@ -27,6 +27,7 @@ typedef vector<vector<bool>> sep_t;
 typedef vector<ssize_t> vec_ssize_t;
 typedef vector<vector<num_t>> yoink_row_t;
 typedef vector<yoink_row_t> yoink_t;
+typedef vector<vector<vector<num_t>>> yeet_t;
 
 
 /** Forward declaration */
@@ -160,6 +161,8 @@ pa_t load_pa(const string& filename) {
     for (char ch : line) {
       if (ch == '#') {
         break;
+      } else if (ch == '%') {
+        return data;
       } else if (isdigit(ch) || ch == '-' || ch == ' ') {
         ss << ch;
       } else {
@@ -904,7 +907,7 @@ void driver3(int n, int d) {
 
 
 //////////////////////////////////////////////////////////////////////////////
-/** Construct (2k+1, k+1) as (2k+1 choose k) settings of lower symbols */
+/** Fill a R(n,s,t) PA using hill climbing */
 //////////////////////////////////////////////////////////////////////////////
 
 
@@ -948,39 +951,200 @@ void save_pa4(const pa_t& pa, int n, int d, bool verified) {
 }
 
 
+yeet_t unyeet4(const pa_t& pa, int n) {
+  yeet_t ret;
+  for (ssize_t ux = 0; ux < pa.size(); ux++) {
+    const perm_t& u = pa[ux];
+
+    vector<vector<num_t>> vecv;
+    for (ssize_t vx = ux+1; vx < pa.size(); vx++) {
+      const perm_t& v = pa[vx];
+      vector<num_t> vece;
+      for (num_t ex = 0; ex < n; ex++) {
+        if (u[ex] == 0 && v[ex] == 2 || u[ex] == 2 && v[ex] == 0) {
+          // printf("%li %li %d\n", ux, vx, ex);
+          vece.push_back(ex);
+        }
+      }
+      vecv.push_back(vece);
+    }
+    ret.push_back(vecv);
+  }
+
+  // printf("\n\n----------\n");
+  // for (ssize_t ux = 0; ux < ret.size(); ux++) {
+  //   printf("ux = %li\n", ux);
+  //   for (ssize_t vx = 0; vx < ret[ux].size(); vx++) {
+  //     if (0 == ret[ux][vx].size()) {
+  //       continue;
+  //     }
+  //     cout << ux << " " << (ux+vx+1) << " | ";
+  //     for (auto e : ret[ux][vx]) {
+  //       printf("%d ", e);
+  //     }
+  //     cout << "\n";
+  //   }
+  // }
+
+  return ret;
+}
+
+bool solve_u(pa_t& A, pa_t& B, const pa_t& R, const yeet_t& Y, num_t n, num_t d, num_t u);
+
+bool solve_v(pa_t& A, pa_t& B, const pa_t& R, const yeet_t& Y, num_t n, num_t d, num_t u, num_t v) {
+  // printf("solve_v u=%d v=%d\n", u, v);
+  if (v >= A.size()) {
+    return solve_u(A, B, R, Y, n, d, u-1);
+  }
+
+  vector<num_t> case1;
+  vector<num_t> case2;
+  vector<num_t> case3;
+
+  // classify things
+  for (num_t x : Y[u][v-u-1]) {
+    if (A[u][x] < 0) {
+      if (A[v][x] < 0) {
+        // case 1, we need a separable pair
+        case1.push_back(x);
+      } else {
+        // case 2, we need a ux separated from vx
+        case2.push_back(x);
+      }
+    } else {
+      if (A[v][x] < 0) {
+        // case 3, we need a vx separated from ux
+        case3.push_back(x);
+      } else if ( abs(A[u][x] - A[v][x]) >= d ) {
+        // case 4/5? The symbols are bound
+        if (solve_v(A, B, R, Y, n, d, u, v+1)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  // ux is free, vx is bound
+  for (auto x : case2) {
+    for (int upot = 0; upot < n; upot++) {
+      if (B[u][upot] < 0 && abs(A[v][x] - upot) >= d) {
+        A[u][x] = upot;
+        B[u][upot] = x;
+        if(solve_v(A, B, R, Y, n, d, u, v+1)) {
+          return true;
+        }
+        A[u][x] = -1;
+        B[u][upot] = -1;
+      }
+    }
+  }
+
+  // ux is bound, vx is free
+  for (auto x : case3) {
+    for (int vpot = 0; vpot < n; vpot++) {
+      if (B[v][vpot] < 0 && abs(A[u][x] - vpot) >= d) {
+        A[v][x] = vpot;
+        B[v][vpot] = x;
+        if(solve_v(A, B, R, Y, n, d, u, v+1)) {
+          return true;
+        }
+        A[v][x] = -1;
+        B[v][vpot] = -1;
+      }
+    }
+  }
+
+  
+  // ux is free, vx is free
+  for (auto x : case1) {
+    for (int upot = 0; upot < n; upot++) {
+      if (B[u][upot] >= 0) {
+        continue;
+      }
+      for (int vpot = 0; vpot < n; vpot++) {
+        if (B[v][vpot] < 0 && abs(vpot - upot) >= d) {
+          A[u][x] = upot;
+          A[v][x] = vpot;
+
+          B[u][upot] = x;
+          B[v][vpot] = x;
+
+          if(solve_v(A, B, R, Y, n, d, u, v+1)) {
+            return true;
+          }
+
+          A[u][x] = -1;
+          A[v][x] = -1;
+
+          B[u][upot] = -1;
+          B[v][vpot] = -1;
+
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+bool solve_u(pa_t& A, pa_t& B, const pa_t& R, const yeet_t& Y, num_t n, num_t d, num_t u) {
+  // printf("solve_u u=%d\n", u);
+  if (u < 0) {
+    return true;
+  }
+
+  return solve_v(A, B, R, Y, n, d, u, u+1);
+}
+
 void driver4(int n, int d, const string& filename) {
-  pa_t pots = load_pa(filename);
+  pa_t R = load_pa(filename);
   num_t twists = 0;
-  for(auto e : pots[0]) {
+  for(auto e : R[0]) {
     twists = e > twists ? e : twists;
   }
   twists++;
 
-  yoink_t P;
-  pa_t pa;
-
-  for(ssize_t x = 0; x < pots.size(); x++) {
-    yoink_row_t yrow = yoink_row4(pots[x], twists);
-    pa.push_back(fill_row4(n, yrow));
-    P.push_back(std::move(yrow));
-
-    hill_climb(pa, P, n, d);
-    printf("\n");
-
-    print_array(pa);
-
-    bool verified = verify(pa, d);
-    printf(verified ? "verified" : "failed");
-    printf("Exited %li\n", x);
-    save_pa4(pa, n, d, verified);
-
-    string usr;
-    cin >> usr;
-
-    if (ctrl_c_pressed) {
-      break;
-    }
+  yeet_t Y = unyeet4(R, n);
+  pa_t A;
+  pa_t B;
+  for (auto row : R) {
+    A.push_back(vector<num_t>(n, -1));
+    B.push_back(vector<num_t>(n, -1));
   }
+
+  if (solve_u(A, B, R, Y, n, d, A.size()-2)) {
+    printf("Done!!\n\n");
+  }
+
+  for (int r = 0; r < A.size(); r++) {
+    printf("%3d | ", r+1);
+    for (auto e : A[r]) {
+      printf("%d ", e);
+    }
+    printf("\n");
+  }
+
+  // for(ssize_t x = 0; x < pots.size(); x++) {
+  //   yoink_row_t yrow = yoink_row4(pots[x], twists);
+  //   pa.push_back(fill_row4(n, yrow));
+  //   P.push_back(std::move(yrow));
+
+  //   printf("\n");
+
+  //   print_array(pa);
+
+  //   bool verified = verify(pa, d);
+  //   printf(verified ? "verified" : "failed");
+  //   printf("Exited %li\n", x);
+  //   save_pa4(pa, n, d, verified);
+
+  //   string usr;
+  //   cin >> usr;
+
+  //   if (ctrl_c_pressed) {
+  //     break;
+  //   }
+  // }
 }
 
 
@@ -997,7 +1161,7 @@ int main(int argc, char* argv[]) {
   pots.push_back("P(n,d) >= (n choose d) * P(n-d, d)");
   pots.push_back("P(n,d) >= (n choose 2) * P(n-2, d-1)");
   pots.push_back("P(9,5) >= (9 choose 5)");
-  pots.push_back("Fill a PA");
+  // pots.push_back("Fill a PA");
 
   // make the user pick an option
   int usr = -1;
