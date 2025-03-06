@@ -32,6 +32,7 @@ typedef vector<vector<vector<num_t>>> yeet_t;
 
 /** Forward declaration */
 void driver(int n, int d);
+bool verify(const pa_t& A, int d);
 
 
 /** Initialization of RNG */
@@ -184,14 +185,36 @@ pa_t load_pa(const string& filename) {
 }
 
 
-void dump_pa(const pa_t& pa, const string& filename) {
+void dump_pa(const pa_t& pa, const string& filename, ssize_t score) {
   ofstream f(filename);
+  f << "# score: " << score << "\n";
   for (auto row : pa) {
     for (int num : row) {
       f << num << " ";
     }
     f << "\n";
   }
+  // printf("Saved to %s\n", filename.c_str());
+}
+
+
+void maybe_dump(const pa_t& pa, char* filename, ssize_t score) {
+  if (filename == NULL) {
+    return;
+  }
+  ifstream infile(filename);
+
+  ssize_t old_score = 0;
+  string sLine;
+  infile.good() && getline(infile, sLine) && sscanf(sLine.c_str(), "# score: %li", &old_score);
+
+  // don't dump
+  if (0 < old_score && old_score < score) {
+    return;
+  }
+
+  // do dump
+  dump_pa(pa, filename, score);
 }
 
 
@@ -274,7 +297,7 @@ void report_s(const pa_t& A, const sep_t& s) {
   }
 }
 
-void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
+void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d, char* mid_filename, char* final_filename) {
   // height of the permutation array
   ssize_t N = A.size();
 
@@ -324,7 +347,7 @@ void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
     if (score < best_score) {
       best_score = score;
       should_print = true;
-      // todo backup pa
+      maybe_dump(A, mid_filename, score);
     }
 
     // i'm gonna call a hundred times
@@ -339,7 +362,7 @@ void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
     // are we really over now?
     if (score == 0 || ctrl_c_pressed) {
       report_s(A, s);
-      return;
+      break;
     }
 
     // maybe i can change your mind
@@ -397,6 +420,15 @@ void hill_climb(pa_t& A, yoink_t& P, num_t n, num_t d) {
       s[x][i] = 0;
     }
 
+  }
+
+
+  if (score == 0 && verify(A, d)) {
+    printf("Verified\n");
+    dump_pa(A, final_filename, score);
+  } else {
+    printf("Unfinished with score %li\n", score);
+    maybe_dump(A, mid_filename, score);
   }
 }
 
@@ -565,27 +597,16 @@ yoink_t yoink_columns(const pa_t& A, int n, int d) {
 }
 
 
-void save_pa(const pa_t& pa, int n, int d, bool verified) {
-  char filename[1024];
-  if (verified) {
-    sprintf(filename, "pa_%d_choose_%d_verified.txt", n, d);
-    printf("Verified %s\n", filename);
-  } else {
-    sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
-    printf("Failed to verify %s\n", filename);
-  }
-  dump_pa(pa, filename);
-}
-
-
 void driver(int n, int d) {
+  char mid_filename[1024];
+  sprintf(mid_filename, "pa_%d_choose_%d_unfinished.txt", n, d);
+  char final_filename[1024];
+  sprintf(final_filename, "pa_%d_choose_%d_verified.txt", n, d);
+
   auto pa = resume_computation(n, d);
   yoink_t P = yoink_columns(pa, n, d);
-  hill_climb(pa, P, n, d);
 
-  char filename[1024];
-  bool verified = verify(pa, d);
-  save_pa(pa, n, d, verified);
+  hill_climb(pa, P, n, d, mid_filename, final_filename);
 }
 
 
@@ -710,27 +731,15 @@ yoink_t yoink_columns2(const pa_t& A, int n, int d) {
 }
 
 
-void save_pa2(const pa_t& pa, int n, int d, bool verified) {
-  char filename[1024];
-  if (verified) {
-    sprintf(filename, "pa_%d_%d_plus_2_verified.txt", n, d);
-    printf("Verified %s\n", filename);
-  } else {
-    sprintf(filename, "pa_%d_%d_plus_2_unfinished.txt", n, d);
-    printf("Failed to verify %s\n", filename);
-  }
-  dump_pa(pa, filename);
-}
-
-
 void driver2(int n, int d) {
+  char mid_filename[1024];
+  sprintf(mid_filename, "pa_%d_%d_plus_2_verified.txt", n, d);
+  char final_filename[1024];
+  sprintf(final_filename, "pa_%d_%d_plus_2_unfinished.txt", n, d);
+
   auto pa = resume_computation2(n, d);
   yoink_t P = yoink_columns2(pa, n, d);
-  hill_climb(pa, P, n, d);
-
-  char filename[1024];
-  bool verified = verify(pa, d);
-  save_pa2(pa, n, d, verified);
+  hill_climb(pa, P, n, d, mid_filename, final_filename);
 }
 
 
@@ -855,36 +864,24 @@ yoink_t yoink_columns3(const pa_t& A, int n, int d) {
 }
 
 
-void save_pa3(const pa_t& pa, int n, int d, bool verified) {
-  char filename[1024];
-  if (verified) {
-    sprintf(filename, "pa_%d_%d_experimental_verified.txt", n, d);
-    printf("Verified %s\n", filename);
-  } else {
-    sprintf(filename, "pa_%d_%d_experimental_unfinished.txt", n, d);
-    printf("Failed to verify %s\n", filename);
-  }
-  dump_pa(pa, filename);
-}
-
-
 void driver3(int n, int d) {
+  char mid_filename[1024];
+  sprintf(mid_filename, "pa_%d_%d_experimental_verified.txt", n, d);
+  char final_filename[1024];
+  sprintf(final_filename, "pa_%d_%d_experimental_unfinished.txt", n, d);
+
   auto pots = resume_computation3(n, d);
   pa_t pa;
 
   for(ssize_t x = 0; x < pots.size(); x++) {
     pa.push_back(pots[x]);
     yoink_t P = yoink_columns3(pa, n, d);
-    hill_climb(pa, P, n, d);
+    hill_climb(pa, P, n, d, mid_filename, final_filename);
     printf("\n");
 
     print_array(pa);
 
-    bool verified = verify(pa, d);
-    printf(verified ? "verified" : "failed");
     printf("Exited %li\n", x);
-    save_pa3(pa, n, d, verified);
-
     if (ctrl_c_pressed) {
       break;
     }
@@ -947,7 +944,7 @@ void save_pa4(const pa_t& pa, int n, int d, bool verified) {
     sprintf(filename, "pa_%d_%d_type_four_unfinished.txt", n, d);
     printf("Failed to verify %s\n", filename);
   }
-  dump_pa(pa, filename);
+  dump_pa(pa, filename, -1);
 }
 
 
@@ -1161,10 +1158,10 @@ int main(int argc, char* argv[]) {
   pots.push_back("P(n,d) >= (n choose d) * P(n-d, d)");
   pots.push_back("P(n,d) >= (n choose 2) * P(n-2, d-1)");
   pots.push_back("P(9,5) >= (9 choose 5)");
-  // pots.push_back("Fill a PA");
+  pots.push_back("Fill a PA");
 
   // make the user pick an option
-  int usr = -1;
+  int usr = 1;
   while (! (0 < usr && usr <= pots.size())) {
     for (ssize_t x = 0; x < pots.size(); x++) {
       printf("  %3li: %s\n", x+1, pots[x].c_str());
