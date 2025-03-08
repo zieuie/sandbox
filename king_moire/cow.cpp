@@ -1149,6 +1149,55 @@ void driver4(int n, int d, const string& filename) {
 /** [Greedily] Turn (n-d,d) into (n,d) by putting the top (n-d to n) symbols into the (n choose d) positions */
 //////////////////////////////////////////////////////////////////////////////
 
+pa_t enweave_base(const num_t n, const num_t d) {
+  pa_t ret;
+  perm_t highs = list_range(n - d, n);
+  perm_t row = list_range(0, n-d);
+
+  auto elements = list_range(n);
+  // Binary selection mask: first r elements are 1 (selected), rest are 0
+  vector<bool> mask(n, false);
+  fill(mask.begin(), mask.begin() + d, true);
+
+  vector<ssize_t> ps;
+  do {
+    ps.clear();
+    for (int i = 0; i < n; i++) {
+      if (mask[i]) {
+        ps.push_back(elements[i]);
+      }
+    }
+
+    int l = 0;
+    int h = 0;
+    perm_t t;
+    for (int i = 0; i < n; i++) {
+      if (find(ps.begin(), ps.end(), i) != ps.end()) {
+        t.push_back(highs[h]);
+        h += 1;
+      } else {
+        t.push_back(row[l]);
+        l += 1;
+      }
+    }
+
+    bool keep = true;
+    for (auto& s : ret) {
+      if (!separated(s, t, d)) {
+        keep = false;
+        break;
+      }
+    }
+
+    if (keep) {
+      ret.push_back(t);
+    }
+
+  } while (prev_permutation(mask.begin(), mask.end()));
+
+  return ret;
+}
+
 pa_t enweave_greedy(pa_t const& A, const num_t n, const num_t d) {
   pa_t ret;
   perm_t highs = list_range(n - d, n);
@@ -1170,7 +1219,7 @@ pa_t enweave_greedy(pa_t const& A, const num_t n, const num_t d) {
 
     for (ssize_t x = 0; x < A.size(); x++) {
       const perm_t& row = A[x];
-      printf("%li : %li\n", x, ret.size());
+      // printf("%li : %li\n", x, ret.size());
       // random_shuffle(highs);
       int l = 0;
       int h = 0;
@@ -1204,16 +1253,21 @@ pa_t enweave_greedy(pa_t const& A, const num_t n, const num_t d) {
 }
 
 
+void driver5(int n, int d);
 pa_t resume_computation5(const num_t n, const num_t d) {
+  if (n == 2*d) {
+    return enweave_base(n, d);
+  }
+
   vector<string> pots;
 
   char filename[1024];
-  sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
+  sprintf(filename, "pa_%d_choose_%d_greedy.txt", n-d, d);
   if (!filesystem::exists(filename)) {
-    printf("No existing files can support P(%d, %d).", n, d);
-    exit(1);
-    // printf("No existing files can support P(%d, %d). Constructing a smaller PA first.\n", n, d);
-    // driver(n-d, d);
+    // printf("No existing files can support P(%d, %d).", n, d);
+    // exit(1);
+    printf("No existing files can support P(%d, %d). Constructing a smaller PA first.\n", n, d);
+    driver5(n-d, d);
   }
 
   auto a = load_pa(filename);
@@ -1225,10 +1279,13 @@ pa_t resume_computation5(const num_t n, const num_t d) {
 
 
 void driver5(int n, int d) {
-  auto pa = resume_computation5(n, d);
+  pa_t pa = resume_computation5(n, d);
 
-  char final_filename[1024];
-  sprintf(final_filename, "pa_%d_choose_%d_greedy_%li_verified.txt", n, d, pa.size());
+  char filename[1024];
+  // sprintf(final_filename, "pa_%d_choose_%d_greedy_%li_verified.txt", n, d, pa.size());
+  sprintf(filename, "pa_%d_choose_%d_greedy.txt", n, d);
+  dump_pa(pa, filename, 0);
+  printf("Saved %s of size %li\n", filename, pa.size());
 }
 
 //////////////////////////////////////////////////////////////////////////////
