@@ -220,7 +220,7 @@ void maybe_dump(const pa_t& pa, char* filename, ssize_t score) {
 
 /** Helper functions for manipulating PAs */
 
-inline bool separated(perm_t u, perm_t v, num_t d) {
+inline bool separated(const perm_t& u, const perm_t& v, num_t d) {
   for (ssize_t i = 0; i < u.size(); i++) {
     if (abs(u[i] - v[i]) >= d) {
       return true;
@@ -1146,6 +1146,92 @@ void driver4(int n, int d, const string& filename) {
 
 
 //////////////////////////////////////////////////////////////////////////////
+/** [Greedily] Turn (n-d,d) into (n,d) by putting the top (n-d to n) symbols into the (n choose d) positions */
+//////////////////////////////////////////////////////////////////////////////
+
+pa_t enweave_greedy(pa_t const& A, const num_t n, const num_t d) {
+  pa_t ret;
+  perm_t highs = list_range(n - d, n);
+
+  auto elements = list_range(n);
+  // Binary selection mask: first r elements are 1 (selected), rest are 0
+  vector<bool> mask(n, false);
+  fill(mask.begin(), mask.begin() + d, true);
+
+  vector<ssize_t> ps;
+  do {
+    ps.clear();
+    for (int i = 0; i < n; i++) {
+      if (mask[i]) {
+        ps.push_back(elements[i]);
+      }
+    }
+    // result push back
+
+    for (ssize_t x = 0; x < A.size(); x++) {
+      const perm_t& row = A[x];
+      printf("%li : %li\n", x, ret.size());
+      // random_shuffle(highs);
+      int l = 0;
+      int h = 0;
+      perm_t t;
+      for (int i = 0; i < n; i++) {
+        if (find(ps.begin(), ps.end(), i) != ps.end()) {
+          t.push_back(highs[h]);
+          h += 1;
+        } else {
+          t.push_back(row[l]);
+          l += 1;
+        }
+      }
+
+      bool keep = true;
+      for (auto& s : ret) {
+        if (!separated(s, t, d)) {
+          keep = false;
+          break;
+        }
+      }
+
+      if (keep) {
+        ret.push_back(t);
+      }
+    }
+
+  } while (prev_permutation(mask.begin(), mask.end()));
+
+  return ret;
+}
+
+
+pa_t resume_computation5(const num_t n, const num_t d) {
+  vector<string> pots;
+
+  char filename[1024];
+  sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
+  if (!filesystem::exists(filename)) {
+    printf("No existing files can support P(%d, %d).", n, d);
+    exit(1);
+    // printf("No existing files can support P(%d, %d). Constructing a smaller PA first.\n", n, d);
+    // driver(n-d, d);
+  }
+
+  auto a = load_pa(filename);
+  printf("Loaded from %s\n", filename);
+  auto ret = enweave_greedy(a, n, d);
+  printf("Weaved %li\n", ret.size());
+  return ret;
+}
+
+
+void driver5(int n, int d) {
+  auto pa = resume_computation5(n, d);
+
+  char final_filename[1024];
+  sprintf(final_filename, "pa_%d_choose_%d_greedy_%li_verified.txt", n, d, pa.size());
+}
+
+//////////////////////////////////////////////////////////////////////////////
 /** Main */
 //////////////////////////////////////////////////////////////////////////////
 
@@ -1155,13 +1241,14 @@ int main(int argc, char* argv[]) {
 
   // options go here
   vector<string> pots;
-  pots.push_back("P(n,d) >= (n choose d) * P(n-d, d)");
+  pots.push_back("[Hill Climbing] P(n,d) >= (n choose d) * P(n-d, d)");
   pots.push_back("P(n,d) >= (n choose 2) * P(n-2, d-1)");
   pots.push_back("P(9,5) >= (9 choose 5)");
   pots.push_back("Fill a PA");
+  pots.push_back("[Greedily] P(n,d) >= (n choose d) * P(n-d, d)");
 
   // make the user pick an option
-  int usr = 1;
+  int usr = -1;
   while (! (0 < usr && usr <= pots.size())) {
     for (ssize_t x = 0; x < pots.size(); x++) {
       printf("  %3li: %s\n", x+1, pots[x].c_str());
@@ -1209,6 +1296,11 @@ int main(int argc, char* argv[]) {
       d = std::stoi(argv[2]);
       strcpy(filename, argv[3]);
       driver4(n, d, filename);
+      break;
+    case 5:
+      n = std::stoi(argv[1]);
+      d = std::stoi(argv[2]);
+      driver5(n, d);
       break;
   }
 
