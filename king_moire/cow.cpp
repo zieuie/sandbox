@@ -1288,6 +1288,157 @@ void driver5(int n, int d) {
   printf("Saved %s of size %li\n", filename, pa.size());
 }
 
+
+//////////////////////////////////////////////////////////////////////////////
+/** [Hybrid] Turn (n-d,d) into (n,d) by putting the top (n-d to n) symbols into the (n choose d) positions */
+//////////////////////////////////////////////////////////////////////////////
+
+// bool merp_helper6(const pa_t& pa, const perm_t& row, const perm_t& highs, const vector<ssize_t>& ps, const vector<bool>& s, vector<num_t>& t, int i, int l, int h) {
+//   if (i >= n) {
+//     // if we're separated, we're done!
+
+//     return 
+//   }
+
+//   if (find(ps.begin(), ps.end(), i) != ps.end()) {
+//     t.push_back(highs[h]);
+//     h += 1;
+//   } else {
+//     t.push_back(row[l]);
+//     l += 1;
+//   }
+
+//   bool keep = true;
+//   for (auto& s : ret) {
+//     if (!separated(s, t, d)) {
+//       keep = false;
+//       break;
+//     }
+//   }
+
+// }
+
+// perm_t merp6(const pa_t& pa, const perm_t& row, const perm_t& highs, const vector<ssize_t>& ps) {
+perm_t merp6(int n, int d, const pa_t& pa, perm_t row, perm_t highs, const vector<ssize_t>& ps) {
+
+  do {
+    do {
+      // build t
+      perm_t t;
+      int h = 0;
+      int l = 0;
+      for (ssize_t i = 0; i < n; i++) {
+        if (find(ps.begin(), ps.end(), i) != ps.end()) {
+          t.push_back(highs[h]);
+          h += 1;
+        } else {
+          t.push_back(row[l]);
+          l += 1;
+        }
+      }
+
+      // check t for separation
+      bool keep = true;
+      for (ssize_t x = 0; x < pa.size(); x++) {
+        if (!separated(t, pa[x], d)) {
+          keep = false;
+          break;
+        }
+      }
+
+      if (keep) {
+        return t;
+      }
+    } while (std::next_permutation(highs.begin(), highs.end()));
+  } while (std::next_permutation(row.begin(), row.end()));
+
+  perm_t t;
+  return t;
+}
+
+void complement(int n, pa_t& A) {
+  for (int r = 0; r < A.size(); r++) {
+    for (int c = 0; c < n; c++) {
+      A[r][c] = n - A[r][c] - 1;
+    }
+  }
+}
+
+pa_t enweave_hybrid(pa_t const& A, const num_t n, const num_t d) {
+  pa_t ret;
+  perm_t highs = list_range(n - d, n);
+
+  auto elements = list_range(n);
+  // Binary selection mask: first r elements are 1 (selected), rest are 0
+  vector<bool> mask(n, false);
+  fill(mask.begin(), mask.begin() + d, true);
+
+  vector<ssize_t> ps;
+  do {
+    ps.clear();
+    for (int i = 0; i < n; i++) {
+      if (mask[i]) {
+        ps.push_back(elements[i]);
+      }
+    }
+    // result push back
+    for (ssize_t r = 0; r < A.size(); r++) {
+      auto t = merp6(n, d, ret, A[r], highs, ps);
+      if (t.size() == 0) {
+        auto x = 1 + 1;
+        complement(n, ret);
+        t = merp6(n, d, ret, A[r], highs, ps);
+        if (t.size() == 0) {
+          continue;
+        }
+        ret.push_back(t);
+      } else {
+        ret.push_back(t);
+      }
+    }
+    printf("[Progress %li of %li] P(%d, %d) >= %li\n", r, A.size(), n, d, ret.size());
+
+  } while (prev_permutation(mask.begin(), mask.end()));
+
+  return ret;
+}
+
+
+void driver6(int n, int d);
+pa_t resume_computation6(const num_t n, const num_t d) {
+  if (n == 2*d) {
+    return enweave_base(n, d);
+  } else if (n < 2*d) {
+    printf("FATAL: Please create a file named pa_%d_choose_%d_hybrid.txt as a seed\n", n, d);
+    exit(1);
+  }
+
+  vector<string> pots;
+
+  char filename[1024];
+  sprintf(filename, "pa_%d_choose_%d_hybrid.txt", n-d, d);
+  if (!filesystem::exists(filename)) {
+    printf("No existing files can support P(%d, %d). Constructing a smaller PA first.\n", n, d);
+    driver6(n-d, d);
+  }
+
+  auto a = load_pa(filename);
+  printf("Loaded from %s\n", filename);
+  auto ret = enweave_hybrid(a, n, d);
+  printf("Weaved %li\n", ret.size());
+  return ret;
+}
+
+
+void driver6(int n, int d) {
+  pa_t pa = resume_computation6(n, d);
+
+  char filename[1024];
+  sprintf(filename, "pa_%d_choose_%d_hybrid.txt", n, d);
+  dump_pa(pa, filename, 0);
+  printf("Saved %s of size %li\n", filename, pa.size());
+}
+
 //////////////////////////////////////////////////////////////////////////////
 /** Main */
 //////////////////////////////////////////////////////////////////////////////
@@ -1303,6 +1454,7 @@ int main(int argc, char* argv[]) {
   pots.push_back("P(9,5) >= (9 choose 5)");
   pots.push_back("Fill a PA");
   pots.push_back("[Greedily] P(n,d) >= (n choose d) * P(n-d, d)");
+  pots.push_back("[Hybrid] P(n,d) >= (n choose d) * P(n-d, d)");
 
   // make the user pick an option
   int usr = -1;
@@ -1358,6 +1510,11 @@ int main(int argc, char* argv[]) {
       n = std::stoi(argv[1]);
       d = std::stoi(argv[2]);
       driver5(n, d);
+      break;
+    case 6:
+      n = std::stoi(argv[1]);
+      d = std::stoi(argv[2]);
+      driver6(n, d);
       break;
   }
 
