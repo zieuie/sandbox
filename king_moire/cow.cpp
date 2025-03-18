@@ -577,7 +577,10 @@ pa_t resume_computation(const num_t n, const num_t d) {
 
 yoink_t yoink_columns(const pa_t& A, int n, int d) {
   num_t twists = n / d;
-  num_t offset = n%d;
+  num_t offset = (d - (n%d)) % d;
+  if (offset) {
+    twists += 1;
+  }
   vector<vector<vector<num_t>>> ret(twists);
 
   for (const auto& row : A) {
@@ -585,7 +588,7 @@ yoink_t yoink_columns(const pa_t& A, int n, int d) {
 
     for (size_t i = 0; i < row.size(); i++) {
       num_t e = row[i];
-      buckets[max(0, e-offset) / d].push_back(i);
+      buckets[(e+offset) / d].push_back(i);
     }
 
     for (size_t j = 0; j < twists; j++) {
@@ -1396,7 +1399,8 @@ pa_t enweave_hybrid(pa_t const& A, const num_t n, const num_t d) {
         ret.push_back(t);
       }
     }
-    printf("[Progress %li of %li] P(%d, %d) >= %li\n", r, A.size(), n, d, ret.size());
+    printf("P(%d, %d) >= %li\n", n, d, ret.size());
+    // printf("[Progress %li of %li] P(%d, %d) >= %li\n", r, A.size(), n, d, ret.size());
 
   } while (prev_permutation(mask.begin(), mask.end()));
 
