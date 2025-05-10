@@ -59,6 +59,8 @@ to_delete = []
 while pair_counter:
   u, _ = pair_counter.most_common(1)[0]
   neighbors = pair_map[u]
+  if len(neighbors) == 0:
+    break
   for v in neighbors:
     pair_map[v].discard(u)
     pair_counter.subtract([v])
