@@ -1,3 +1,8 @@
+
+'''
+Given a PA without the distance, remove rows until it does.
+'''
+
 import re
 import sys
 from collections import Counter, defaultdict

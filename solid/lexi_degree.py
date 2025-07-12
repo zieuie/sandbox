@@ -1,5 +1,17 @@
 
+'''
+For length n and distance d = n//2
+
+Given a graph G where V = all permutations and (u,v) \in E when
+  u,v has distance < d and u,v do not have the high symbols in
+  the choice of same columns,
+
+  print the degree of the identity permutation,
+  which supposedly is the same as the degree of any other vertex
+'''
+
 import itertools as it
+
 
 def distance(u, v):
   return max(abs(a-b) for a,b in zip(u,v))
@@ -93,6 +105,6 @@ def smart2(n):
 
 
 for n in range(6, 20, 2):
-  # smart (n)
-  dumb  (n)
+  smart (n)
+  # dumb  (n)
   # dumber(n)

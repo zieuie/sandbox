@@ -1,3 +1,15 @@
+
+'''
+Do hill climbing, but only on half as many permutations.
+As we go, we consider that any permutation must be separated
+from its complement. We also calculate the score such that
+(u,v) are separated only if their complements are also separated
+from each other and from u,v. As in, u,v and u',v and u,v', and u',v'
+must be separated.
+
+It gets stuck. Need to make it smarter
+'''
+
 import itertools as it
 from copy import deepcopy
 from datetime import datetime
