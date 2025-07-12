@@ -8,97 +8,57 @@ the prefixes/suffixes in common.
 
 '''
 
+
 from lib import *
 from collections import *
 import itertools as it
-import networkx as nx
-import matplotlib.pyplot as plt
 
-
-def dump_pa(A,n,d):
-  print (f'Writting array ({n},{d}) with {len(A)} rows')
-  with open(f'pa_experimental_{n}_{d}_{len(A)}.txt', 'w+') as f:
-    for row in A:
-      f.write(' '.join(map(str, row)) + '\n')
 
 
 def make_array(n,d):
   A = []
-  B = []
   for ps in it.combinations(list(range(n)), d):
     t = []
-    r = []
     l, h = 0,n//2
     for x in range(n):
       if x in ps:
         t.append(l)
-        r.append(0)
         l += 1
       else:
         t.append(h)
-        r.append(1)
         h += 1
     A.append(t)
-    B.append(r)
-  return A,B
+  return A
 
 
-def make_distances(A,n,d):
-  D = [[] for _ in range(len(A))]
-  good = 0
-  bad = 0
+# { y: [x1, x2, ...] }
+# where y is the disjoint set key
+# x is an index in 
+# So that y: Xs means there's some connected component y
+# which consists of the rows and indices D
+def make_components(A,d):
+  lut = DisjointSet(list(range(len(A))))
   for x in range(len(A)):
-    for y in range(x):
-      if separated(A[x], A[y], d):
-        good += 1
-      else:
-        bad += 1
-        D[x].append(y)
-        D[y].append(x)
-  return D, good, bad
-
-
-def vis(D,n):
-  # 1. Create a graph
-  G = nx.Graph()
-  for u,vs in enumerate(D):
-    for v in vs:
-      G.add_edge(u,v)
-
-  # 2. Draw the graph
-  nx.draw(G, with_labels=True, node_color='skyblue', node_size=1500, edge_color='gray', font_size=10)
-
-  # 3. Display the plot
-  plt.title(f"Lexicographic P({n}, {n//2})")
-  plt.show()
-
-
-def make_components(D):
-  lut = DisjointSet(list(range(len(D))))
-  for u,vs in enumerate(D):
-    for v in vs:
-      lut.union(u,v)
+    for ccid in range(x):
+      if not separated(A[x], A[ccid], d):
+        lut.union(x,ccid)
   
   components = defaultdict(list)
-  for x in range(len(D)):
-    y = lut.find(x)
-    components[y].append(x)
-  
-  sizes = Counter()
-  sizes.update(map(len,components.values()))
-
-  # for k,v in sizes.items():
-  #   print (f'Connected component size: {k}  Count: {v}')
+  for x in range(len(A)):
+    ccid = lut.find(x)
+    components[ccid].append(x)
   
   return components
 
 
+# { x: (prefix, suffix), ... }
+# x is the index of C
 def make_fixes(C,A,n):
   ret = dict()
-  for x, (vx0, vs) in enumerate(C.items()):
-    v0 = A[vx0]
+  for ccid, vs in C.items():
+    v0 = A[ccid]
     if len(vs) < 2:
-      ret[vx0] = (v0, v0)
+      ret[ccid] = (v0, v0)
     pre, suf = n-1, 0
     for vx in vs:
       v = A[vx]
@@ -117,22 +77,20 @@ def make_fixes(C,A,n):
         else:
           break
       suf = i
-    ret[vx0] = (v0[:pre+1], v0[suf:])
+    ret[ccid] = (v0[:pre+1], v0[suf:])
   return ret
 
-for n in range(4, 16, 2):
+
+def main(n):
   d = n//2
-  print()
-  print()
-  print(f'# {n},{d}')
-  A,B = make_array(n,d)
-  D,good,bad = make_distances(A,n,d)
-  C = make_components(D)
+
+  A = make_array(n,d)
+  C = make_components(A,d)
   F = make_fixes(C,A,n)
 
   ret = []
-  for vx0,(pre,suf) in F.items():
-    l = len(C[vx0])
+  for ccid,(pre,suf) in F.items():
+    l = len(C[ccid])
     if l == 1:
       continue
     mid = sorted(set(range(n)) - set(pre) - set(suf))
@@ -141,3 +99,10 @@ for n in range(4, 16, 2):
 
   for t in ret:
     print(*t)
+
+
+for n in range(4, 16, 2):
+  print()
+  print()
+  print(f'# {n},{n//2}')
+  main(n)
