@@ -75,24 +75,44 @@ def dumber(n=6):
   print(ret)
 
 
-'''
-vvv^^^
-v^^vv^
+def in_identity_block(pot, d):
+  for x,e in enumerate(pot):
+    if x//d != e//d:
+      return False
+  return True
 
-012345
 
-
-'''
-def smart2(n):
-  d = n//2
+def dumb12(n=12, d=3):
   ret = 0
-  for hs in it.combinations(list(range(n)), d):
-    for x in range(n):
-      if x < d and x not in hs:
-        pass
+  for pot in it.permutations(list(range(n))):
+    for x,e in enumerate(pot):
+      if abs(e-x) >= d:
+        break
+    else:
+      if not in_identity_block(pot,d):
+        ret += 1
+        print(ret)
+
+  print('Done:',ret)
 
 
-for n in range(6, 20, 2):
-  # smart (n)
-  dumb  (n)
+dumb12()
+
+# for n in range(6, 20, 2):
+#   smart (n)
+  # dumb  (n)
   # dumber(n)
+
+'''
+start with identity
+keep 1, 2, 3 fixed
+the block is all permutations that have 123 in the first three positions, 456 in the next three, 789 in the third block, 10 11 12 in the last three. 
+
+Can you calculate under distance 2 or less
+Things that are not separated at distance 3
+and are in different blocks.
+
+When you're looking at all possible permutations, then any permutation in the block, don't consider it
+
+
+'''
