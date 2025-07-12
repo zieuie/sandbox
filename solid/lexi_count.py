@@ -1,10 +1,16 @@
 
+'''
+length n, distance d, lexigraphic graph G(V,E).
+
+Print the size of each connected component, along with
+the prefixes/suffixes in common.
+
+
+'''
+
 from lib import *
-import json
-import itertools as it
 from collections import *
-import random
-# from pyvis.network import Network  # pyviz doesn't build today?
+import itertools as it
 import networkx as nx
 import matplotlib.pyplot as plt
 
@@ -32,7 +38,6 @@ def make_array(n,d):
         t.append(h)
         r.append(1)
         h += 1
-    # print(t, r)
     A.append(t)
     B.append(r)
   return A,B
