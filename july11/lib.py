@@ -1,4 +1,5 @@
 from collections import Counter
+from math import factorial
 
 
 class DisjointSet:
@@ -104,3 +105,8 @@ def disagreement_counter(pa, d):
         c.update([ux])
         c.update([vx])
   return c
+
+
+def nCr(n, k):
+  return factorial(n) // factorial(k) // factorial(n-k)
+
