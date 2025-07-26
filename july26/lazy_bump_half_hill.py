@@ -1,9 +1,9 @@
 
 import itertools as it
+import json
+import random
 from copy import deepcopy
 from datetime import datetime
-import random
-from collections import defaultdict
 
 ############################### Utils
 
@@ -57,13 +57,16 @@ def infill(row, highs, ps):
 #   return tuple(e // d for e in p)
 
 
-def load_pa_2(n, d):
-  # try:
-  #   A = load_pa(f'pa_{n}_choose_{d}_lazy_bump_half_unfinished.txt')
-  #   print ('Loaded from unfinished file')
-  #   return A
-  # except:
-  #   pass
+def resume_calculation(n, d):
+  try:
+    A = load_pa(f'pa_{n}_choose_{d}_lazy_bump_half_unfinished.txt')
+    with open(f's_{n}_choose_{d}_lazy_bump_half_unfinished.txt', 'r') as f:
+      s = list(map(set, json.load(f)))
+    print ('Loaded from unfinished file')
+    return A, s
+  except Exception as e:
+    print(e)
+    pass
 
   try:
     if n-d == d:
@@ -73,7 +76,7 @@ def load_pa_2(n, d):
       A = load_pa(f'pa_{n-d}_choose_{d}_verified.txt')
       print ('Loaded from smaller file')
     ret = enweave(A, n, d)
-    return ret
+    return ret, None
   except FileNotFoundError:
     print (f'No smaller file exists. Must create pa_{n-d}_choose_{d}_verified.txt')
     exit(1)
@@ -137,9 +140,9 @@ def preval_separations(A, d, s, vx):
   return s
 
 
-def hill_climb(A, n, d):
+def hill_climb(A, n, d, s=None):
   N = len(A)
-  s = [set() for _ in range(N)]
+  s = s or [set() for _ in range(N)]
   updated = [False]*N
   W = N * (N-1)
 
@@ -164,13 +167,13 @@ def hill_climb(A, n, d):
         # if last_printed_score - best_score > 100 or (it_count - last_printed_it > 1000 and last_printed_score > best_score): 
         #   last_printed_score = best_score
         #   last_printed_it = it_count
-        #   yield deepcopy(best_pa)
+        #   yield deepcopy(best_pa), list(map(list, best_s))
 
       if should_print:
         print(datetime.now(), f'P({n},{d})', 'Iteration:', it_count, 'Score:', score, 'Best:', best_score, 'Coverage:', coverage, 'of', N, 'Last tweak:', last_tweak)
 
       if N == coverage:
-        yield deepcopy(A)
+        yield deepcopy(A), None
         return
 
       force = False
@@ -215,7 +218,7 @@ def hill_climb(A, n, d):
 
 
   except KeyboardInterrupt:
-    yield deepcopy(best_pa)
+    yield deepcopy(best_pa), list(map(list, best_s))
     pass
 
 
@@ -236,8 +239,8 @@ if __name__ == '__main__':
   #   print ('This program only works when d = n/4')
   #   exit(1)
 
-  A = load_pa_2(n, d)
-  for pot in hill_climb(A, n, d):
+  A,s = resume_calculation(n, d)
+  for pot,pots in hill_climb(A, n, d, s):
     pa = list(pot)
     # for row in pot:
     #   pa.append(complement(row, n))
@@ -254,4 +257,8 @@ if __name__ == '__main__':
       with open(filename, 'w+') as f:
         for row in pot:
           f.write(' '.join(map(str, row)) + '\n')
+
+      filename = f's_{n}_choose_{d}_lazy_bump_half_unfinished.txt'
+      with open(filename, 'w+') as f:
+        json.dump(pots, f)
 
