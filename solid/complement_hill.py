@@ -167,6 +167,7 @@ def hill_climb(A, n, d):
   best_pa = deepcopy(A)
   best_s = deepcopy(s)
   last_printed_score = float('inf')
+  last_printed_it = -1
   last_tweak = 0
 
   try:
@@ -182,10 +183,13 @@ def hill_climb(A, n, d):
         # should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
         best_pa = deepcopy(A)
         best_s = deepcopy(s)
+        if last_printed_score - best_score > 100 or (it_count - last_printed_it > 1000 and last_printed_score > best_score): 
+          last_printed_score = best_score
+          last_printed_it = it_count
+          yield deepcopy(best_pa)
 
       if should_print:
         print(datetime.now(), 'Iteration:', it_count, 'Score:', score, 'Best:', best_score, 'Coverage:', coverage, 'of', N, 'Last tweak:', last_tweak)
-        last_printed_score = best_score
 
       if N == coverage:
         yield deepcopy(A)
