@@ -3,6 +3,7 @@ import itertools as it
 from copy import deepcopy
 from datetime import datetime
 import random
+from collections import defaultdict
 
 ############################### Utils
 
@@ -100,18 +101,6 @@ def enweave(A, n, d):
   return ret
 
 
-def init_separations(A, n, d):
-  s = [set() for _ in A]
-  for vx in range(len(A)):
-    # if vx % 1000 == 0:
-    #   print(vx, len(A))
-    for ux in range(vx):
-      if ux != vx and separated(A[ux], A[vx], d):
-        s[ux].add(vx)
-        s[vx].add(ux)
-  return s
-
-
 def update_diffs(A, s, i, row, adders, subers, news):
   A[i] = row
   s[i].update(news)
@@ -139,9 +128,19 @@ def eval_permutation(A, n, pot, s, i, d):
   return adders, subers, news
 
 
+def preval_separations(A, d, s, vx):
+  v = A[vx]
+  for ux, u in enumerate(A):
+    if ux != vx and separated(u, v, d):
+      s[ux].add(vx)
+      s[vx].add(ux)
+  return s
+
+
 def hill_climb(A, n, d):
   N = len(A)
-  s = init_separations(A, n, d)
+  s = [set() for _ in range(N)]
+  updated = [False]*N
   W = N * (N-1)
 
   best_score = float('inf')
@@ -157,11 +156,9 @@ def hill_climb(A, n, d):
       coverage = sum(1 for e in s if len(e) == N-1)
 
       should_print = it_count % 100 == 0
-      # should_print = True
       if score < best_score:
         best_score = score
         should_print = True
-        # should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
         best_pa = deepcopy(A)
         best_s = deepcopy(s)
         # if last_printed_score - best_score > 100 or (it_count - last_printed_it > 1000 and last_printed_score > best_score): 
@@ -170,7 +167,7 @@ def hill_climb(A, n, d):
         #   yield deepcopy(best_pa)
 
       if should_print:
-        print(datetime.now(), 'Iteration:', it_count, 'Score:', score, 'Best:', best_score, 'Coverage:', coverage, 'of', N, 'Last tweak:', last_tweak)
+        print(datetime.now(), f'P({n},{d})', 'Iteration:', it_count, 'Score:', score, 'Best:', best_score, 'Coverage:', coverage, 'of', N, 'Last tweak:', last_tweak)
 
       if N == coverage:
         yield deepcopy(A)
@@ -180,8 +177,12 @@ def hill_climb(A, n, d):
       if score >= best_score and it_count - last_tweak > 10000:
         A, s, last_tweak, force = deepcopy(best_pa), deepcopy(best_s), it_count, True
 
+      i = random.randrange(N)
+      if not updated[i]:
+        preval_separations(A, d, s, i)
+        updated[i] = True
+
       for tries in it.count():
-        i = random.randrange(N)
         k = random.randrange(n//d)
         src = [x for x,e in enumerate(A[i]) if e//d == k]
         dst = deepcopy(src)
@@ -228,9 +229,8 @@ def verify(pa, d):
 
 if __name__ == '__main__':
   from sys import argv
-  # n = int(argv[1])
-  # d = int(argv[2]) if len(argv) > 2 else n//4
-  n, d = 10, 5
+  n = int(argv[1])
+  d = int(argv[2]) if len(argv) > 2 else n//4
 
   # if len(argv) >= 3 and int(argv[2]) != d:
   #   print ('This program only works when d = n/4')
