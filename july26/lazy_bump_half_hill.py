@@ -1,22 +1,4 @@
 
-'''
-Consider 12,3.
-
-Can't we make a mapping that takes a permutation, and
-where we excahnge groups?
-
-e.g.,
-
-01 02 03 04 05 06 07 08 09 10 11 12
-
-07 08 09 10 11 12 01 02 03 04 05 06
-
-
-ABCD
-CDAB
-
-'''
-
 import itertools as it
 from copy import deepcopy
 from datetime import datetime
@@ -66,31 +48,35 @@ def infill(row, highs, ps):
 ############################### Special Utils
 
 
-def complement(p, n):
-  return [(e+n//2) % n for e in p]
+# def complement(p, n):
+#   return [(e+n//2) % n for e in p]
 
-def pull_groups(p, d):
-  return tuple(e // d for e in p)
+
+# def pull_groups(p, d):
+#   return tuple(e // d for e in p)
 
 
 def load_pa_2(n, d):
-  try:
-    A = load_pa(f'pa_{n}_choose_{d}_bump_half_unfinished.txt')
-    print ('Loaded from unfinished file')
-    return A
-  except:
-    pass
+  # try:
+  #   A = load_pa(f'pa_{n}_choose_{d}_lazy_bump_half_unfinished.txt')
+  #   print ('Loaded from unfinished file')
+  #   return A
+  # except:
+  #   pass
 
   try:
-    A = load_pa(f'pa_{n-d}_choose_{d}_verified.txt')
+    if n-d == d:
+      A = [list(range(n-d))]
+      print ('Randomly generating')
+    else:
+      A = load_pa(f'pa_{n-d}_choose_{d}_verified.txt')
+      print ('Loaded from smaller file')
     ret = enweave(A, n, d)
-    print ('Loaded from smaller file')
     return ret
-  except:
+  except FileNotFoundError:
     print (f'No smaller file exists. Must create pa_{n-d}_choose_{d}_verified.txt')
     exit(1)
     pass
-
 
 
 def enweave(A, n, d):
@@ -101,48 +87,24 @@ def enweave(A, n, d):
     for ps in it.combinations(list(range(n)), d):
       random.shuffle(highs)
       u = infill(row, highs, ps)
-      v = complement(u, n)
+      ret.append(u)
 
-      gu = pull_groups(u, d)
-      gv = pull_groups(v, d)
-
-      # print(u, v)
-      # print(gu, gv)
-
-
-      if gu not in seen and gv not in seen:
-        seen.add(gu)
-        seen.add(gv)
-        ret.append(u)
+      # v = complement(u, n)
+      # gu = pull_groups(u, d)
+      # gv = pull_groups(v, d)
+      # if gu not in seen and gv not in seen:
+      #   seen.add(gu)
+      #   seen.add(gv)
+      #   ret.append(u)
 
   return ret
-
-
-# def yoink_row(row, n, d):
-#   buckets = [[] for _ in range(n // d)]
-#   for i,e in enumerate(row):
-#     buckets[e//d].append(i)
-#   yield buckets
-
-
-# def yoink_columns(A, n, d):
-#   twists = n // d
-#   ret = [[] for _ in range(twists)]
-#   for row in A:
-#     buckets = [[] for _ in range(twists)]
-#     for i,e in enumerate(row):
-#       # print (i, e, n, d, e//d, twists)
-#       buckets[e//d].append(i)
-#     for r,b in zip(ret,buckets):
-#       r.append(b)
-#   return ret
 
 
 def init_separations(A, n, d):
   s = [set() for _ in A]
   for vx in range(len(A)):
-    if vx % 1000 == 0:
-      print(vx, len(A))
+    # if vx % 1000 == 0:
+    #   print(vx, len(A))
     for ux in range(vx):
       if ux != vx and separated(A[ux], A[vx], d):
         s[ux].add(vx)
@@ -177,25 +139,17 @@ def eval_permutation(A, n, pot, s, i, d):
   return adders, subers, news
 
 
-
-
 def hill_climb(A, n, d):
   N = len(A)
-  print('a', len(A))
   s = init_separations(A, n, d)
-  print('b')
   W = N * (N-1)
-  # P = yoink_columns(A, n, d)
-  print('c')
 
-  # A = np.array(A)
   best_score = float('inf')
   best_pa = deepcopy(A)
   best_s = deepcopy(s)
   last_printed_score = float('inf')
   last_printed_it = -1
   last_tweak = 0
-  print('d')
 
   try:
     for it_count in it.count():
@@ -210,10 +164,10 @@ def hill_climb(A, n, d):
         # should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
         best_pa = deepcopy(A)
         best_s = deepcopy(s)
-        if last_printed_score - best_score > 100 or (it_count - last_printed_it > 1000 and last_printed_score > best_score): 
-          last_printed_score = best_score
-          last_printed_it = it_count
-          yield deepcopy(best_pa)
+        # if last_printed_score - best_score > 100 or (it_count - last_printed_it > 1000 and last_printed_score > best_score): 
+        #   last_printed_score = best_score
+        #   last_printed_it = it_count
+        #   yield deepcopy(best_pa)
 
       if should_print:
         print(datetime.now(), 'Iteration:', it_count, 'Score:', score, 'Best:', best_score, 'Coverage:', coverage, 'of', N, 'Last tweak:', last_tweak)
@@ -228,8 +182,6 @@ def hill_climb(A, n, d):
 
       for tries in it.count():
         i = random.randrange(N)
-        # src = random.choice(P)[i]
-        # src = random.choice(yoink_row(A[i], n, d))
         k = random.randrange(n//d)
         src = [x for x,e in enumerate(A[i]) if e//d == k]
         dst = deepcopy(src)
@@ -277,18 +229,18 @@ def verify(pa, d):
 if __name__ == '__main__':
   from sys import argv
   # n = int(argv[1])
-  n = 12
-  d = n//4
+  # d = int(argv[2]) if len(argv) > 2 else n//4
+  n, d = 10, 5
 
-  if len(argv) >= 3 and int(argv[2]) != d:
-    print ('This program only works when d = n/4')
-    exit(1)
+  # if len(argv) >= 3 and int(argv[2]) != d:
+  #   print ('This program only works when d = n/4')
+  #   exit(1)
 
   A = load_pa_2(n, d)
   for pot in hill_climb(A, n, d):
     pa = list(pot)
-    for row in pot:
-      pa.append(complement(row, n))
+    # for row in pot:
+    #   pa.append(complement(row, n))
 
     if verify(pa, d):
       filename = f'pa_{n}_choose_{d}_verified.txt'
@@ -297,7 +249,7 @@ if __name__ == '__main__':
         for row in pa:
           f.write(' '.join(map(str, row)) + '\n')
     else:
-      filename = f'pa_{n}_choose_{d}_bump_half_unfinished.txt'
+      filename = f'pa_{n}_choose_{d}_lazy_bump_half_unfinished.txt'
       print ('Failed to verify', filename)
       with open(filename, 'w+') as f:
         for row in pot:
