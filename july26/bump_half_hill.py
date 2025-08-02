@@ -277,8 +277,8 @@ def verify(pa, d):
 if __name__ == '__main__':
   from sys import argv
   # n = int(argv[1])
-  n = 12
-  d = n//4
+  n = int(argv[1])
+  d = int(argv[2]) if len(argv) > 2 else n//4
 
   if len(argv) >= 3 and int(argv[2]) != d:
     print ('This program only works when d = n/4')

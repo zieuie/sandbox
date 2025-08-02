@@ -251,6 +251,17 @@ def bump_half(p, n):
   return [(e+n//2) % n for e in p]
 
 
+def init_separations(A, n, d):
+  s = [set() for _ in A]
+  for vx, v in enumerate(A):
+    for ux, u in enumerate(A):
+      if ux != vx and (not cross_check and separated(u, v, d) or
+          cross_check and symmetric_separated(u, v, n, d)):
+        s[ux].add(vx)
+        s[vx].add(ux)
+  return s
+
+
 if __name__ == '__main__':
   from sys import argv
   n = int(argv[1])
@@ -259,14 +270,20 @@ if __name__ == '__main__':
   # symmetry = None
   # symmetry = complement
   symmetry = bump_half
+  lazy = False
 
-  cross_check = symmetry in (complement,)
+  cross_check = symmetry in (complement,bump_half)
 
   # if len(argv) >= 3 and int(argv[2]) != d:
   #   print ('This program only works when d = n/4')
   #   exit(1)
 
   A,s,ups = resume_calculation(n, d)
+
+  if not lazy:
+    s = init_separations(A, n, d)
+    ups = set(range(n))
+
   final_status = ''
   for pot,pots,ups in hill_climb(A, n, d, s, ups):
     pa = list(pot)
