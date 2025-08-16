@@ -46,6 +46,13 @@ def load_pa(filename):
   return ret
 
 
+def dump_pa(A,filename,verbose=False):
+  verbose and print (f'Writting {len(A)} rows to {filename}')
+  with open(filename, 'w+') as f:
+    for row in A:
+      f.write(' '.join(map(str, row)) + '\n')
+
+
 def apply_permutation(perm, src, dst):
   ret = [e for e in perm]
   for u,v in zip(src, dst):
