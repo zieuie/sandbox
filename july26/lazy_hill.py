@@ -262,7 +262,7 @@ def init_separations(A, n, d):
   return s
 
 
-if __name__ == '__main__':
+def main():
   from sys import argv
   n = int(argv[1])
   d = int(argv[2]) if len(argv) > 2 else n//4
@@ -329,3 +329,44 @@ if __name__ == '__main__':
       break
 
   print(final_status)
+
+if __name__ == '__main__':
+  # main()
+
+  symmetry = bump_half
+  n, d = 8, 2
+
+  A = load_pa(f'pa_{n}_choose_{d}_lazy_bump_half_unfinished.txt')
+  pa = deepcopy(A)
+  for row in A:
+    pa.append(complement(row, n))
+  
+  filename = f'grumble_{n}_choose_{d}.txt'
+  with open(filename, 'w+') as f:
+    for row in pa:
+      f.write(' '.join(map(str, row)) + '\n')
+
+
+  # A = [list(range(n-d))]
+
+  # ret = []
+  # seen = set()
+  # highs = list(range(n-d, n))
+  # for row in A:
+  #   for ps in it.combinations(list(range(n)), d):
+  #     random.shuffle(highs)
+  #     u = infill(row, highs, ps)
+  #     if symmetry:
+  #       v = symmetry(u, n)
+  #       gu = pull_groups(u, d)
+  #       gv = pull_groups(v, d)
+  #       if gu not in seen and gv not in seen:
+  #         seen.add(gu)
+  #         seen.add(gv)
+  #         ret.append(u)
+  #     else:
+  #       ret.append(u)
+
+  # print(len(A))
+  # print(len(ret))
+
