@@ -18,14 +18,10 @@ each row has its d highest symbols in a different of the
 '''
 
 
-
 def dumb_pa(n, k):
   m = n-k
-  sr = set(range(n))
   A = []
-  H = list(it.combinations(list(range(n)), k))
-  L = [sorted(sr-set(e)) for e in H]
-  for ps in H:
+  for ps in it.combinations(list(range(n)), k):
     lows = tuple(range(m))
     highs = tuple(range(m, n))
     h, l = 0, 0
@@ -38,7 +34,7 @@ def dumb_pa(n, k):
         row.append(lows[l])
         l += 1
     A.append(row)
-  return A, H, L
+  return A
 
 
 def apply_permutation(perm, src, dst):
@@ -62,7 +58,7 @@ def verify(pa, d):
       if not separated(pa[ux], pa[vx], d):
         return False
   return True
-       
+
 
 def disagreement_counter(pa, d):
   ret = []
@@ -82,12 +78,11 @@ def disagreement_counter(pa, d):
   return c
 
 
-# def init_separations(A, d, foes):
 def init_problems(A, d, foes):
   s = [set() for _ in A]
   for vx in range(len(A)):
-    for ux in range(vx):
-      if ux != vx and not separated(A[ux], A[vx], d):
+    for ux in foes[vx]:
+      if ux < vx and not separated(A[ux], A[vx], d):
         s[ux].add(vx)
         s[vx].add(ux)
   return s
@@ -99,11 +94,9 @@ def eval_permutation(A, start, target, lut, i, d, foes):
   adders = []
   subers = []
   for x in foes[i]:
-  # for x in range(len(A)):
-    e = A[x]
     if x == i:
       continue
-    if separated(pot, e, d):
+    if separated(pot, A[x], d):
       if x in lut[i]:
         news.append(x)
       if i in lut[x]:
@@ -128,7 +121,6 @@ def pull_group(u,n,d,x):
   return [i for i,e in enumerate(u) if e//d == x]
 
 
-# Mutates A, s
 def gently_disturb(A,n,d, lut, foes):
   while True:
     i = random.randrange(len(A))
@@ -140,13 +132,12 @@ def gently_disturb(A,n,d, lut, foes):
       break
 
   row = apply_permutation(A[i], one, two)
-  update_diffs(A, lut, i, row, adders, subers, news)  
+  update_diffs(A, lut, i, row, adders, subers, news)
   return len(news) + len(adders) > 2*len(subers)
 
 
 def greatly_disturb(A,n,d,lut,foes):
   q = sorted([(len(si), idx) for idx,si in enumerate(lut)])
-  # i = random.randrange(10)
   i = q[0][1]
 
   one, two = [], []
@@ -179,34 +170,14 @@ def init_foes(A,n,d):
         lut[vx].add(ux)
   return lut
 
-# def init_foes(A,n,d):
-#   lut = defaultdict(set)
-#   for vx,v in enumerate(A):
-#     v = [e//d for e in v]
-#     for ux in range(vx):
-#       u = [e//d for e in A[ux]]
-#       if max(abs(x-y) for x,y in zip(u,v)) < 2:
-#         lut[ux].add(vx)
-#         lut[vx].add(ux)
-#   return lut
-
-
 
 def main(n, k, d):
-  A, _, _ = dumb_pa(n, k)
   try:
     A = load_pa(filename)
   except FileNotFoundError:
-    pass
+    A = dumb_pa(n, k)
 
   foes = init_foes(A,n,d)
-  # for ux, vxs in foes.items():
-  #   for vx in vxs:
-  #     print ('---')
-  #     print ([e//d for e in A[ux]])
-  #     print ([e//d for e in A[vx]])
-  # return
-  # s = init_separations(A, d, foes)
   lut = init_problems(A, d, foes)
 
   best_score = float('inf')
@@ -218,12 +189,12 @@ def main(n, k, d):
   try:
     for it_count in it.count():
       w = sum(map(len, lut))
-      coverage = sum(1 for e in lut if len(e) == 0)
+      if not w:
+        print('Done!')
+        return A
 
-      # should_print = it_count % uncoverage == 0
+      coverage = sum(1 for e in lut if len(e) == 0)
       should_print = it_count % 10000 == 0 or len(A) == coverage
-      # should_print = True
-      # should_print = False
       if w < best_score:
         best_score = w
         should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
@@ -237,10 +208,6 @@ def main(n, k, d):
         print(datetime.now(), 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(A), 'Last tweak:', last_tweak)
         last_printed_score = best_score
 
-      if len(A) == coverage:
-        return A
-
-
       if w > best_score and it_count - last_tweak > 100000:
         A = deepcopy(best_pa)
         lut = deepcopy(best_s)
@@ -251,10 +218,6 @@ def main(n, k, d):
         last_tweak = it_count
       elif gently_disturb(A,n,d,lut,foes):
         last_tweak = it_count
-
-
-      # gently_disturb(A, H, L, lut, d, foes)
-      # last_tweak = it_count
 
   except KeyboardInterrupt:
     pass
