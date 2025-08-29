@@ -118,36 +118,33 @@ def pull_group(u,n,d,x):
   return [i for i,e in enumerate(u) if e//d == x]
 
 
+def meep(foes):
+  # oh man i love this part
+  mapping = defaultdict(set)
+  for k,v in enumerate(foes):
+    mapping[len(v)].add(k)
+
+  pop = list(mapping.keys())
+  weights = [(e+1)**2 for e in pop]
+
+  size = random.choices(pop, weights=weights, k=1)[0]
+  return random.choice(list(mapping[size]))
+
+
 def gently_disturb(A,n,d, lut, foes):
   while True:
-    # oh man i love this part
-    mapping = defaultdict(set)
-    for k,v in foes.items():
-      mapping[len(v)].add(k)
-
-    pop = list(mapping.keys())
-    weights = [(e+1)**2 for e in pop]
-
-    size = random.choices(pop, weights=weights, k=1)[0]
-    i = random.choice(list(mapping[size]))
-
+    i = meep(lut)
     one = pull_group(A[i],n,d,random.randrange(n//d))
     two = [e for e in one]
     random.shuffle(two)
-    upot = apply_permutation(A[i], one, two)
-    gain, loss = eval_permutation(A, i, d, upot, lut, foes)
+    row = apply_permutation(A[i], one, two)
+    gain, loss = eval_permutation(A, i, d, row, lut, foes)
     if len(gain) >= len(loss):
-      break
-
-  row = apply_permutation(A[i], one, two)
-  update_diffs(A, lut, i, row, gain, loss)
-  return len(gain) > len(loss)
+      return i, row, gain, loss
 
 
 def greatly_disturb(A,n,d,lut,foes):
-  q = sorted([(len(si), idx) for idx,si in enumerate(lut)])
-  i = q[0][1]
-
+  i = meep(lut)
   one, two = [], []
   for x in range(n//d):
     src = pull_group(A[i], n, d, x)
@@ -158,12 +155,12 @@ def greatly_disturb(A,n,d,lut,foes):
 
   row = apply_permutation(A[i], one, two)
   gain, loss = eval_permutation(A, i, d, row, lut, foes)
-  update_diffs(A, lut, i, row, gain, loss)
+  return i, row, gain, loss
 
 
 from collections import Counter, defaultdict
 def init_foes(A,n,d):
-  lut = defaultdict(set)
+  lut = [set() for _ in A]
   for vx,v in enumerate(A):
     v = [e//d for e in v]
     for ux in range(vx):
@@ -218,13 +215,16 @@ def main(n, k, d):
       if w > best_score and it_count - last_tweak > 100000:
         A = deepcopy(best_pa)
         lut = deepcopy(best_s)
-        greatly_disturb(A,n,d,lut,foes)
+        i, row, gain, loss = greatly_disturb(A,n,d,lut,foes)
         last_tweak = it_count
       elif w == best_score and it_count - last_tweak > 1000:
-        greatly_disturb(A,n,d,lut,foes)
+        i, row, gain, loss = greatly_disturb(A,n,d,lut,foes)
         last_tweak = it_count
-      elif gently_disturb(A,n,d,lut,foes):
-        last_tweak = it_count
+      else:
+        i, row, gain, loss = gently_disturb(A,n,d,lut,foes)
+        if len(gain) > len(loss):
+          last_tweak = it_count
+      update_diffs(A, lut, i, row, gain, loss)
 
   except KeyboardInterrupt:
     pass
