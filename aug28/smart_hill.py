@@ -226,45 +226,33 @@ def main(n, d):
 
 
   best_score = float('inf')
-  # best_pa = deepcopy(A)
-  # best_s = deepcopy(lut)
   last_printed_score = float('inf')
   last_tweak = 0
 
   try:
-    # for it_count in it.count():
-    for it_count in range(10000) if PROFILE else it.count():
-    # for it_count in range(1000):
+    for it_count in (range(5000) if PROFILE else it.count()):
       w = sum(map(len, lut))
       if not w:
         print('Done!')
         return A
 
-      # coverage = sum(1 for e in lut if len(e) == 0)
-      # should_print = it_count % 10000 == 0 or len(A) == coverage
       should_print = it_count % 10000 == 0
       if w < best_score:
         best_score = w
         should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
-        # best_pa = deepcopy(A)
-        # best_s = deepcopy(lut)
-      # elif w == best_score and random.random() < 2:
-        # best_pa = deepcopy(A)
-        # best_s = deepcopy(lut)
 
       if should_print:
         print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Last tweak:', last_tweak)
-        # print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(A), 'Last tweak:', last_tweak)
         last_printed_score = best_score
 
       if w > best_score and it_count - last_tweak > 100000:
-        break
-        # A = deepcopy(best_pa)
-        # lut = deepcopy(best_s)
+        if PROFILE:
+          break
         i, row, gain, loss = greatly_disturb(A,n,d,lut,foes,lutmap)
         last_tweak = it_count
-      elif w == best_score and it_count - last_tweak > 1000:
-        break
+      elif w == best_score and it_count - last_tweak > 10000:
+        if PROFILE:
+          break
         i, row, gain, loss = greatly_disturb(A,n,d,lut,foes,lutmap)
         last_tweak = it_count
       else:
@@ -281,7 +269,8 @@ def main(n, d):
 
 
 import cProfile
-PROFILE = True
+PROFILE = False
+
 if __name__ == '__main__':
   from sys import argv
   try:
@@ -292,8 +281,6 @@ if __name__ == '__main__':
 
   # The original PA is size m
   filename = f'pa_{n}_choose_{d}.txt'
-
-
   if PROFILE:
     # cProfile.run(f"main({n},{d})", sort="cumtime")
     cProfile.run(f"main({n},{d})", sort="tottime")
