@@ -123,7 +123,17 @@ def pull_group(u,n,d,x):
 
 def gently_disturb(A,n,d, lut, foes):
   while True:
-    i = random.randrange(len(A))
+    # oh man i love this part
+    mapping = defaultdict(set)
+    for k,v in foes.items():
+      mapping[len(v)].add(k)
+
+    pop = list(mapping.keys())
+    weights = [(e+1)**2 for e in pop]
+
+    size = random.choices(pop, weights=weights, k=1)[0]
+    i = random.choice(list(mapping[size]))
+
     one = pull_group(A[i],n,d,random.randrange(n//d))
     two = [e for e in one]
     random.shuffle(two)
