@@ -74,10 +74,10 @@ def apply_permutation(perm, src, dst):
 
 def separated(u, v, d):
   dd = d*d
-  for a,b in zip(u,v):
-    if (a-b)**2 >= dd:
-      return True
-  return False
+  i = 0
+  while i < len(u) and (u[i]-v[i])**2 < dd:
+    i += 1
+  return i < len(u)
 
 
 def verify(pa, d):
@@ -132,36 +132,38 @@ def eval_permutation(A, ux, d, upot, lut, foes):
   return gain, loss
 
 
-def update_diffs(A, lut, i, row, gain, loss):
+def update_diffs(A, lut, i, row, gain, loss, lutmap):
   A[i] = row
+
+  lutmap[len(lut[i])].discard(i)
+  lutmap[len(lut[i]) - len(gain) + len(loss)].add(i)
+
   for x in gain:
+    lutmap[len(lut[x])].discard(x)
+    lutmap[len(lut[x])-1].add(x)
     lut[i].discard(x)
     lut[x].discard(i)
   for x in loss:
+    lutmap[len(lut[x])].discard(x)
+    lutmap[len(lut[x])+1].add(x)
     lut[i].add(x)
     lut[x].add(i)
-
 
 def pull_group(u,n,d,x):
   return [i for i,e in enumerate(u) if e//d == x]
 
 
-def meep(foes):
-  # oh man i love this part
-  mapping = defaultdict(set)
-  for k,v in enumerate(foes):
-    mapping[len(v)].add(k)
-
-  pop = list(mapping.keys())
+def meep(mapping):
+  pop = [k for k,v in mapping.items() if v]
   weights = [(e+1)**2 for e in pop]
 
   size = random.choices(pop, weights=weights, k=1)[0]
   return random.choice(list(mapping[size]))
 
 
-def gently_disturb(A,n,d, lut, foes):
+def gently_disturb(A,n,d, lut, foes, lutmap):
   while True:
-    i = meep(lut)
+    i = meep(lutmap)
     one = pull_group(A[i],n,d,random.randrange(n//d))
     two = [e for e in one]
     random.shuffle(two)
@@ -171,8 +173,8 @@ def gently_disturb(A,n,d, lut, foes):
       return i, row, gain, loss
 
 
-def greatly_disturb(A,n,d,lut,foes):
-  i = meep(lut)
+def greatly_disturb(A,n,d,lut,foes, lutmap):
+  i = meep(lutmap)
   one, two = [], []
   for x in range(n//d):
     src = pull_group(A[i], n, d, x)
@@ -218,58 +220,68 @@ def main(n, d):
 
   foes = init_foes(A,n,d)
   lut = init_problems(A, d, foes)
+  lutmap = defaultdict(set)
+  for k,v in enumerate(foes):
+    lutmap[len(v)].add(k)
+
 
   best_score = float('inf')
-  best_pa = deepcopy(A)
-  best_s = deepcopy(lut)
+  # best_pa = deepcopy(A)
+  # best_s = deepcopy(lut)
   last_printed_score = float('inf')
   last_tweak = 0
 
   try:
     # for it_count in it.count():
-    for it_count in range(2000):
+    for it_count in range(10000) if PROFILE else it.count():
+    # for it_count in range(1000):
       w = sum(map(len, lut))
       if not w:
         print('Done!')
         return A
 
-      coverage = sum(1 for e in lut if len(e) == 0)
-      should_print = it_count % 10000 == 0 or len(A) == coverage
+      # coverage = sum(1 for e in lut if len(e) == 0)
+      # should_print = it_count % 10000 == 0 or len(A) == coverage
+      should_print = it_count % 10000 == 0
       if w < best_score:
         best_score = w
         should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
-        best_pa = deepcopy(A)
-        best_s = deepcopy(lut)
-      elif w == best_score and random.random() < 2:
-        best_pa = deepcopy(A)
-        best_s = deepcopy(lut)
+        # best_pa = deepcopy(A)
+        # best_s = deepcopy(lut)
+      # elif w == best_score and random.random() < 2:
+        # best_pa = deepcopy(A)
+        # best_s = deepcopy(lut)
 
       if should_print:
-        print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(A), 'Last tweak:', last_tweak)
+        print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Last tweak:', last_tweak)
+        # print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(A), 'Last tweak:', last_tweak)
         last_printed_score = best_score
 
       if w > best_score and it_count - last_tweak > 100000:
-        A = deepcopy(best_pa)
-        lut = deepcopy(best_s)
-        i, row, gain, loss = greatly_disturb(A,n,d,lut,foes)
+        break
+        # A = deepcopy(best_pa)
+        # lut = deepcopy(best_s)
+        i, row, gain, loss = greatly_disturb(A,n,d,lut,foes,lutmap)
         last_tweak = it_count
       elif w == best_score and it_count - last_tweak > 1000:
-        i, row, gain, loss = greatly_disturb(A,n,d,lut,foes)
+        break
+        i, row, gain, loss = greatly_disturb(A,n,d,lut,foes,lutmap)
         last_tweak = it_count
       else:
-        i, row, gain, loss = gently_disturb(A,n,d,lut,foes)
+        i, row, gain, loss = gently_disturb(A,n,d,lut,foes,lutmap)
         if len(gain) > len(loss):
           last_tweak = it_count
-      update_diffs(A, lut, i, row, gain, loss)
+      update_diffs(A, lut, i, row, gain, loss, lutmap)
 
   except KeyboardInterrupt:
     pass
 
-  return best_pa
+  return A
+  # return best_pa
 
 
 import cProfile
-
+PROFILE = True
 if __name__ == '__main__':
   from sys import argv
   try:
@@ -281,9 +293,13 @@ if __name__ == '__main__':
   # The original PA is size m
   filename = f'pa_{n}_choose_{d}.txt'
 
-  # pa = main(n, d)
-  cProfile.run(f"main({n},{d})")
-  exit(0)
+
+  if PROFILE:
+    # cProfile.run(f"main({n},{d})", sort="cumtime")
+    cProfile.run(f"main({n},{d})", sort="tottime")
+    exit(0)
+  else:
+    pa = main(n, d)
 
 
   if verify(pa, d):
