@@ -88,31 +88,28 @@ def init_problems(A, d, foes):
   return s
 
 
-def eval_permutation(A, start, target, lut, i, d, foes):
-  pot = apply_permutation(A[i], start, target)
-  news = []
-  adders = []
-  subers = []
-  for x in foes[i]:
-    if x == i:
+def eval_permutation(A, ux, d, upot, lut, foes):
+  gain = []
+  loss = []
+  umad = lut[ux]
+  for vx in foes[ux]:
+    if ux == vx:
       continue
-    if separated(pot, A[x], d):
-      if x in lut[i]:
-        news.append(x)
-      if i in lut[x]:
-        adders.append(x)
-    elif x not in lut[i]:
-      subers.append(x)
-  return adders, subers, news
+    v = A[vx]
+    sep = separated(upot, v, d)
+    if sep and vx in umad:
+      gain.append(vx)
+    elif not sep and vx not in umad:
+      loss.append(vx)
+  return gain, loss
 
 
-def update_diffs(A, lut, i, row, adders, subers, news):
+def update_diffs(A, lut, i, row, gain, loss):
   A[i] = row
-  for x in news:
+  for x in gain:
     lut[i].discard(x)
-  for x in adders:
     lut[x].discard(i)
-  for x in subers:
+  for x in loss:
     lut[i].add(x)
     lut[x].add(i)
 
@@ -137,13 +134,14 @@ def gently_disturb(A,n,d, lut, foes):
     one = pull_group(A[i],n,d,random.randrange(n//d))
     two = [e for e in one]
     random.shuffle(two)
-    adders, subers, news = eval_permutation(A, one, two, lut, i, d, foes)
-    if len(news) + len(adders) >= 2*len(subers):
+    upot = apply_permutation(A[i], one, two)
+    gain, loss = eval_permutation(A, i, d, upot, lut, foes)
+    if len(gain) >= len(loss):
       break
 
   row = apply_permutation(A[i], one, two)
-  update_diffs(A, lut, i, row, adders, subers, news)
-  return len(news) + len(adders) > 2*len(subers)
+  update_diffs(A, lut, i, row, gain, loss)
+  return len(gain) > len(loss)
 
 
 def greatly_disturb(A,n,d,lut,foes):
@@ -158,10 +156,9 @@ def greatly_disturb(A,n,d,lut,foes):
     one.extend(src)
     two.extend(dst)
 
-  adders, subers, news = eval_permutation(A, one, two, lut, i, d, foes)
-
   row = apply_permutation(A[i], one, two)
-  update_diffs(A, lut, i, row, adders, subers, news)
+  gain, loss = eval_permutation(A, i, d, row, lut, foes)
+  update_diffs(A, lut, i, row, gain, loss)
 
 
 from collections import Counter, defaultdict
