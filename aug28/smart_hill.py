@@ -5,8 +5,6 @@ from collections import Counter
 import itertools as it
 import random
 
-from lib import *
-
 
 HELP_STR = '''
 Usage:
@@ -16,6 +14,36 @@ Creates an (n,d)-PA of size (n choose d), where
 each row has its d highest symbols in a different of the
 (n choose d) positions that they could be arranged in.
 '''
+
+
+def load_pa(filename):
+  ret = []
+  with open(filename, 'r') as f:
+    for line in f:
+      line = line.strip()
+      if not line or line[0] == '#':
+        continue
+      ret.append(list(map(int, line.split())))
+  return ret
+
+
+def enweave(A, n, k):
+  ret = []
+  highs = list(range(n-k, n))
+  for row in A:
+    for ps in it.combinations(list(range(n)), k):
+      random.shuffle(highs)
+      l, h = 0, 0
+      new = []
+      for i in range(n):
+        if i in ps:
+          new.append(highs[h])
+          h += 1
+        else:
+          new.append(row[l])
+          l += 1
+      ret.append(new)
+  return ret
 
 
 def dumb_pa(n, k):
@@ -175,11 +203,18 @@ def init_foes(A,n,d):
   return lut
 
 
-def main(n, k, d):
+def main(n, d):
+  # try:
+  #   A = load_pa(f'pa_{n}_choose_{d}.txt')
+  #   print ('Resuming')
+  # except FileNotFoundError:
   try:
-    A = load_pa(filename)
+    A = load_pa(f'pa_{n-d}_choose_{d}.txt')
+    print ('Loading from smaller')
+    A = enweave(A, n, n%d or d)
   except FileNotFoundError:
-    A = dumb_pa(n, k)
+    A = dumb_pa(n, d)
+    print ('Dumb PA')
 
   foes = init_foes(A,n,d)
   lut = init_problems(A, d, foes)
@@ -191,7 +226,8 @@ def main(n, k, d):
   last_tweak = 0
 
   try:
-    for it_count in it.count():
+    # for it_count in it.count():
+    for it_count in range(2000):
       w = sum(map(len, lut))
       if not w:
         print('Done!')
@@ -209,7 +245,7 @@ def main(n, k, d):
         best_s = deepcopy(lut)
 
       if should_print:
-        print(datetime.now(), 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(A), 'Last tweak:', last_tweak)
+        print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(A), 'Last tweak:', last_tweak)
         last_printed_score = best_score
 
       if w > best_score and it_count - last_tweak > 100000:
@@ -232,6 +268,8 @@ def main(n, k, d):
   return best_pa
 
 
+import cProfile
+
 if __name__ == '__main__':
   from sys import argv
   try:
@@ -242,7 +280,12 @@ if __name__ == '__main__':
 
   # The original PA is size m
   filename = f'pa_{n}_choose_{d}.txt'
-  pa = main(n, d, d)
+
+  # pa = main(n, d)
+  cProfile.run(f"main({n},{d})")
+  exit(0)
+
+
   if verify(pa, d):
     print ('Verified')
   else:
@@ -253,3 +296,15 @@ if __name__ == '__main__':
     f.write(f'# Disagreements: {len(disagreements)} {disagreements}\n\n')
     for row in pa:
       f.write(' '.join(map(str, row)) + '\n')
+
+
+'''
+9,3 
+Smart
+ - pypy 2m34.776s, 2m53.507s
+ - C++  3m24.568s, 9m13.269s
+
+Basic
+ - pypy 
+ - C++  8m43.477s, 5m19.633s
+'''

@@ -160,12 +160,38 @@ def greatly_disturb(A, H, L, s, d):
   update_diffs(A, s, i, row, adders, subers, news)
 
 
+def enweave(A, n, k):
+  ret = []
+  highs = list(range(n-k, n))
+  for row in A:
+    for ps in it.combinations(list(range(n)), k):
+      random.shuffle(highs)
+      l, h = 0, 0
+      new = []
+      for i in range(n):
+        if i in ps:
+          new.append(highs[h])
+          h += 1
+        else:
+          new.append(row[l])
+          l += 1
+      ret.append(new)
+  return ret
+
+
 def main(n, k, d):
   A, H, L = dumb_pa(n, k)
   try:
-    A = load_pa(filename)
+    A = load_pa(f'pa_{n}_choose_{d}.txt')
+    print ('Resuming')
   except FileNotFoundError:
-    pass
+    try:
+      A = load_pa(f'pa_{n-d}_choose_{d}.txt')
+      print ('Loading from smaller')
+      A = enweave(A, n, n%d or d)
+    except FileNotFoundError:
+      A = dumb_pa(n, d)
+      print ('Dumb PA')
 
   s = init_separations(A, d)
   W = len(A) * (len(A)-1)
