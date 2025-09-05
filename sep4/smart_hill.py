@@ -224,25 +224,27 @@ def main(n, d):
   try:
     for it_count in (range(5000) if PROFILE else it.count()):
       w = sum(map(len, lut))
-      should_print = it_count % 10000 == 0
+      should_print = it_count % 10000000 == 0
       if w < best_score:
         best_pa = deepcopy(A)
         best_lut = deepcopy(lut)
         best_foes = deepcopy(foes)
         best_lutmap = deepcopy(lutmap)
-        best_score = w
         should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
-        yield A, w
+        if best_score != float('inf'):
+          yield A, w
+        best_score = w
 
       if should_print:
         coverage = sum(1 for v in lut if not v)
+        print()
         print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(lut), 'Last tweak:', last_tweak)
         last_printed_score = best_score
 
       if w > best_score and it_count - last_tweak > 50000:
         if PROFILE:
           break
-        print ('Backtracking')
+        print ('.', end='')
         A = deepcopy(best_pa)
         lut = deepcopy(best_lut)
         foes = deepcopy(best_foes)
@@ -282,6 +284,9 @@ if __name__ == '__main__':
 
   for A, w in main(n, d):
     with open(f'pa_{n}_choose_{d}.txt', 'w+') as f:
+      for row in A:
+        f.write(' '.join(map(str, row)) + '\n')
+    with open(f'pa_{n}_choose_{d}_{w}.txt', 'w+') as f:
       for row in A:
         f.write(' '.join(map(str, row)) + '\n')
 
