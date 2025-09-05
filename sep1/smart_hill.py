@@ -195,17 +195,17 @@ def init_foes(A,n,d):
 
 
 def main(n, d):
-  # try:
-  #   A = load_pa(f'pa_{n}_choose_{d}.txt')
-  #   print ('Resuming')
-  # except FileNotFoundError:
   try:
-    A = load_pa(f'pa_{n-d}_choose_{d}.txt')
-    print ('Loading from smaller')
-    A = enweave(A, n, d)
+    A = load_pa(f'pa_{n}_choose_{d}.txt')
+    print ('Resuming')
   except FileNotFoundError:
-    A = dumb_pa(n, d)
-    print ('Dumb PA')
+    try:
+      A = load_pa(f'pa_{n-d}_choose_{d}.txt')
+      print ('Loading from smaller')
+      A = enweave(A, n, d)
+    except FileNotFoundError:
+      A = dumb_pa(n, d)
+      print ('Dumb PA')
 
   foes = init_foes(A,n,d)
   lut = init_problems(A, d, foes)
@@ -213,7 +213,10 @@ def main(n, d):
   for k,v in enumerate(foes):
     lutmap[len(v)].add(k)
 
-
+  best_pa = deepcopy(A)
+  best_lut = deepcopy(lut)
+  best_foes = deepcopy(foes)
+  best_lutmap = deepcopy(lutmap)
   best_score = float('inf')
   last_printed_score = float('inf')
   last_tweak = 0
@@ -221,25 +224,31 @@ def main(n, d):
   try:
     for it_count in (range(5000) if PROFILE else it.count()):
       w = sum(map(len, lut))
-      if not w:
-        print('Done!')
-        return A
-
       should_print = it_count % 10000 == 0
       if w < best_score:
+        best_pa = deepcopy(A)
+        best_lut = deepcopy(lut)
+        best_foes = deepcopy(foes)
+        best_lutmap = deepcopy(lutmap)
         best_score = w
         should_print = should_print or last_printed_score - best_score > 100 or best_score < 100
+        yield A, w
 
       if should_print:
-        print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Last tweak:', last_tweak)
+        coverage = sum(1 for v in lut if not v)
+        print(datetime.now(), f'P({n}, {d})', 'Iteration:', it_count, 'Score:', w, 'Best:', best_score, 'Coverage:', coverage, 'of', len(lut), 'Last tweak:', last_tweak)
         last_printed_score = best_score
 
-      if w > best_score and it_count - last_tweak > 1000000:
+      if w > best_score and it_count - last_tweak > 50000:
         if PROFILE:
           break
-        i, row, gain, loss = greatly_disturb(A,n,d,lut,foes,lutmap)
+        print ('Backtracking')
+        A = deepcopy(best_pa)
+        lut = deepcopy(best_lut)
+        foes = deepcopy(best_foes)
+        lutmap = deepcopy(best_lutmap)
         last_tweak = it_count
-      elif w == best_score and it_count - last_tweak > 100000:
+      elif w == best_score and it_count - last_tweak > 10000:
         if PROFILE:
           break
         i, row, gain, loss = greatly_disturb(A,n,d,lut,foes,lutmap)
@@ -253,9 +262,7 @@ def main(n, d):
   except KeyboardInterrupt:
     pass
 
-  return A
-  # return best_pa
-
+  yield best_pa, best_score
 
 import cProfile
 PROFILE = False
@@ -269,23 +276,21 @@ if __name__ == '__main__':
     exit(1)
 
   # The original PA is size m
-  filename = f'pa_{n}_choose_{d}.txt'
-  if PROFILE:
-    # cProfile.run(f"main({n},{d})", sort="cumtime")
-    cProfile.run(f"main({n},{d})", sort="tottime")
-    exit(0)
-  else:
-    pa = main(n, d)
+  # if PROFILE:
+  #   cProfile.run(f"main({n},{d})", sort="tottime")
+  #   exit(0)
 
+  for A, w in main(n, d):
+    with open(f'pa_{n}_choose_{d}.txt', 'w+') as f:
+      for row in A:
+        f.write(' '.join(map(str, row)) + '\n')
 
-  if verify(pa, d):
-    print ('Verified')
-  else:
-    print ('Failed to verify')
-
-  with open(filename, 'w+') as f:
-    for row in pa:
-      f.write(' '.join(map(str, row)) + '\n')
+    print(f'Wrote score {w}')
+    if w == 0:
+      if verify(A, d):
+        print ('Verified')
+      else:
+        print ('Failed to verify')
 
 
 # n,d = 8,3
