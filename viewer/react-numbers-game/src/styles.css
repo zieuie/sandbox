@@ -141,3 +141,20 @@ body {
     background: #94a3b8;
     cursor: not-allowed;
 }
+
+/* styles.css — add/adjust these for the row index button */
+.row-index-btn {
+  font-size: 12px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 4px 6px;
+  margin-right: 6px;
+  cursor: pointer;
+  line-height: 1;
+  min-width: 24px;
+}
+.row-index-btn:hover {
+  background: #f8fafc;
+}

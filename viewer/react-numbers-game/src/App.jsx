@@ -1,9 +1,8 @@
-import React, { useMemo, useState } from "react";
-import Grid from "./components/Grid";
+import { useCallback, useMemo, useState } from "react";
 import ControlPanel from "./components/ControlPanel";
+import Grid from "./components/Grid";
 
 // Color mapping helper — tweak as you like
-// Color mapping helper — now receives D and N
 function defaultGetColor(value, _row, _col, D, N) {
   const palette = [
     "#ff5757ff", // red
@@ -15,16 +14,12 @@ function defaultGetColor(value, _row, _col, D, N) {
     "#ff84ffff", // magenta
     "#c0c0c0ff", // black
   ];
-  // const idx = Math.abs(Math.floor(value)) % palette.length;
-  // Simple example: shift color index by D (and touch N to show availability)
-  // Feel free to replace with your own mapping.
   // const idx = Math.abs(Math.floor(value + D)) % palette.length;
   const idx = Math.floor(value / D) % palette.length;
   return palette[idx];
 }
 
 export default function App() {
-  // Example starting data — replace with your own 2D array
   const initialData = useMemo(
     () => [
       [1, 2, 3, 4, 5, 6, 7],
@@ -37,86 +32,60 @@ export default function App() {
   );
 
   const [data, setData] = useState(initialData);
-  const [N, setN] = useState(initialData[0]?.length ?? 0); // row length (auto)
-  const [D, setD] = useState(0); // user-provided parameter for coloring
-
-  const [hiddenRows, setHiddenRows] = useState([]); // array of row indices
-  const [history, setHistory] = useState([]); // stack of previous states
-  const [message, setMessage] = useState("Click a cell to play the game — or drag within a row to reorder.");
-
-  const [dragging, setDragging] = useState(null); // { rowIndex, colIndex }
-  const [dragOver, setDragOver] = useState(null); // { rowIndex, colIndex }
+  const [hiddenRows, setHiddenRows] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [message, setMessage] = useState("Click a cell to select, then another in the same row to swap.");
+  const [N, setN] = useState(initialData[0]?.length ?? 0);
+  const [D, setD] = useState(0);
+  const [selected, setSelected] = useState(null);
   const [showHidden, setShowHidden] = useState(false);
-  const [clickedRow, setClickedRow] = useState(null); // { rowIndex, colIndex }
-  const [clickedCol, setClickedCol] = useState(null); // { rowIndex, colIndex }
 
-
-  // Helper to push current state to history for undo
-  const pushHistory = () => {
+  const pushHistory = useCallback(() => {
     setHistory((prev) => [
       ...prev,
-      {
-        data: data.map((r) => [...r]), // deep-ish copy for 2D array
-        hiddenRows: [...hiddenRows],
-        message
-      }
+      { data: data.map((r) => [...r]), hiddenRows: [...hiddenRows], message }
     ]);
-  };
+  }, [data, hiddenRows, message]);
 
-  const isSeparated = (u, v) => {
-    var ret = false;
-    u.forEach((e,i) => {
-      if (Math.abs(e-v[i]) >= D) {
-        ret = true;
-      }
-    })
-    return ret;
-  }
+  // Click-to-swap within the same row
+  const handleCellClick = useCallback((rowIndex, colIndex) => {
+    if (!selected) {
+      setSelected({ rowIndex, colIndex });
+      setMessage(`Selected (${rowIndex}, ${colIndex}). Click another in row ${rowIndex} to swap.`);
+      return;
+    }
+    if (selected.rowIndex === rowIndex && selected.colIndex === colIndex) {
+      setSelected(null);
+      setMessage("Selection cleared.");
+      return;
+    }
+    if (selected.rowIndex !== rowIndex) {
+      setSelected(null);
+      setMessage(`Row mismatch. Only swap within row ${selected.rowIndex}.`);
+      return;
+    }
 
-  // Click logic: sample rule — hide all rows containing the clicked value
-  const handleCellClick = (rowIndex, colIndex) => {
+    const fromCol = selected.colIndex;
+    const toCol = colIndex;
+    if (fromCol === toCol) {
+      setSelected(null);
+      setMessage("Selection cleared.");
+      return;
+    }
+
     pushHistory();
-
-    const u = data[rowIndex];
-    const newHidden = data.map((v,x) => {
-      return isSeparated(u,v) ? -1 : x;
-        // var ret = false;
-        // v.forEach((e,i) => {
-        //   if (Math.abs(e-u[i]) >= D) {
-        //     ret = true;
-        //   }
-        // })
-        // return ret ? -1 : x
-    });
-    console.log(newHidden);
-
-    setClickedRow(rowIndex);
-    setClickedCol(colIndex);
-    setHiddenRows(newHidden);
-    setMessage(`Clicked row ${rowIndex} - hiding ${newHidden.length} separated`);
-  };
-
-  // Reorder values within a row via drag & drop
-  const handleReorder = (rowIndex, fromCol, toCol) => {
-    if (fromCol === toCol) return;
-    pushHistory();
-
-
     setData((prev) =>
       prev.map((row, i) => {
         if (i !== rowIndex) return row;
         const newRow = [...row];
-        // swap values (no shifting of other cells)
         [newRow[fromCol], newRow[toCol]] = [newRow[toCol], newRow[fromCol]];
         return newRow;
       })
     );
-
-
+    setSelected(null);
     setMessage(`Swapped row ${rowIndex}: ${fromCol} ↔ ${toCol}`);
-  };
+  }, [selected, pushHistory]);
 
-  // Undo last action
   const handleUndo = () => {
     if (history.length === 0) return;
     const prev = history[history.length - 1];
@@ -126,63 +95,87 @@ export default function App() {
     setHistory(history.slice(0, -1));
   };
 
-  // Export current grid as text file
-  const handleExport = () => {
-    const text = data.map(row => row.join(" ")).join("\n");
-    const blob = new Blob([text], { type: "text/plain" });
+  const getColor = useCallback((v, r, c) => defaultGetColor(v, r, c, D, N), [D, N]);
+
+  const isSeparated = (u, v) => {
+    var ret = false;
+    u.forEach((e, i) => {
+      if (Math.abs(e - v[i]) >= D) {
+        ret = true;
+      }
+    })
+    return ret;
+  }
+
+  // Row index button → hide rows containing that value
+  const handleRowIndexClick = useCallback((rowIndex) => {
+    const col = (selected && selected.rowIndex === rowIndex) ? selected.colIndex : 0;
+    const clickedValue = data[rowIndex]?.[col];
+    if (clickedValue === undefined) return;
+
+    pushHistory();
+    const u = data[rowIndex];
+    const newHidden = data.map((v, x) => {
+      return isSeparated(u, v) ? x : -1;
+    }).filter(e => e >= 0);
+    console.log(newHidden);
+
+    setHiddenRows(newHidden);
+    setMessage(`Row ${rowIndex} button → hiding rows containing value ${clickedValue}`);
+  }, [data, selected, pushHistory]);
+
+  // --- Import/Export helpers ---
+  const serializeGrid = useCallback(
+    (grid) => grid.map((row) => row.join(" ")).join("\n"),
+    []
+  );
+
+  const parseGridText = useCallback((text) => {
+    const rows = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) =>
+        line.split(/\s+/).map((tok) => {
+          const n = Number(tok);
+          if (!Number.isFinite(n) || !Number.isInteger(n)) {
+            throw new Error(`Invalid integer token: "${tok}"`);
+          }
+          return n;
+        })
+      );
+    if (rows.length === 0) throw new Error("File had no rows");
+    const detectedN = rows[0].length;
+    if (!rows.every((r) => r.length === detectedN)) {
+      throw new Error("Inconsistent row lengths (N must be constant)");
+    }
+    return { rows, detectedN };
+  }, []);
+
+  const handleExport = useCallback(() => {
+    const blob = new Blob([serializeGrid(data)], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = "grid.txt";
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
-  };
+  }, [data, serializeGrid]);
 
-  // Import grid from file (robust + no hoisting on pushHistory)
-  const handleImport = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handleImportFile = useCallback((file) => {
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = () => {
       try {
-        const text = String(event.target?.result ?? "");
-        const rows = text
-          .trim()
-          .split(/\r?\n/)
-          .filter((line) => line.trim().length > 0)
-          .map((line) =>
-            line.trim().split(/\s+/).map((tok) => {
-              const n = Number(tok);
-              if (!Number.isFinite(n) || !Number.isInteger(n)) {
-                throw new Error(`Invalid integer: ${tok}`);
-              }
-              return n;
-            })
-          );
-
-        // Validate consistent row length and set N
-        const detectedN = rows[0].length;
-        if (!rows.every((row) => row.length === detectedN)) {
-          setMessage("Inconsistent row lengths in file (N is not constant)");
-          throw new Error("Inconsistent row lengths in file (N is not constant)");
-        }
-
-
-        // push history inline (avoid reliance on pushHistory order)
-        setHistory((prev) => [
-          ...prev,
-          { data: data.map((r) => [...r]), hiddenRows: [...hiddenRows], message },
-        ]);
+        const text = String(reader.result || "");
+        const { rows, detectedN } = parseGridText(text);
+        pushHistory();
         setData(rows);
         setHiddenRows([]);
-        setMessage(`Imported new grid from "${file.name}"`);
-
+        setSelected(null);
         setN(detectedN);
         setMessage(`Imported ${rows.length} rows (N=${detectedN}) from "${file.name}"`);
-
-
-        // allow importing the same file again
-        e.target.value = "";
       } catch (err) {
         console.error(err);
         alert(`Import failed: ${err.message || err}`);
@@ -190,34 +183,29 @@ export default function App() {
     };
     reader.onerror = () => alert("Failed to read file");
     reader.readAsText(file);
-  };
-
+  }, [parseGridText, pushHistory]);
 
   return (
     <div className="app">
       <Grid
         data={data}
         hiddenRows={showHidden ? [] : hiddenRows}
-        getColor={(v, r, c) => defaultGetColor(v, r, c, D, N)}
+        getColor={getColor}
         onCellClick={handleCellClick}
-        onReorder={handleReorder}
-        dragging={dragging}
-        dragOver={dragOver}
-        setDragging={setDragging}
-        setDragOver={setDragOver}
+        onRowIndexClick={handleRowIndexClick}
+        selected={selected}
       />
       <ControlPanel
         message={message}
         onUndo={handleUndo}
         canUndo={history.length > 0}
         onExport={handleExport}
-        onImport={handleImport}
+        onImportFile={handleImportFile}
         N={N}
         D={D}
-        onDChange={setD}
         setD={setD}
         showHidden={showHidden}
-        toggleShowHidden={() => setShowHidden(!showHidden)}
+        onToggleShowHidden={() => setShowHidden((s) => !s)}
       />
     </div>
   );
