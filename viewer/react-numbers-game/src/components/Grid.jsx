@@ -37,48 +37,52 @@ export default function Grid({
                             exit={rowExit}
                             transition={{ type: "spring", stiffness: 300, damping: 30 }}
                             className="row"
+                            style={{ justifyContent: "space-between", alignItems: "center" }}
                         >
-                            {row.map((value, colIndex) => {
-                                const isDragging =
-                                    dragging &&
-                                    dragging.rowIndex === rowIndex &&
-                                    dragging.colIndex === colIndex;
+                            <div className="row-cells" style={{ display: "flex", gap: "6px" }}>
+                                <span className="row-index">{rowIndex}</span>
+                                {row.map((value, colIndex) => {
+                                    const isDragging =
+                                        dragging &&
+                                        dragging.rowIndex === rowIndex &&
+                                        dragging.colIndex === colIndex;
 
 
-                                const isDragOver =
-                                    dragOver &&
-                                    dragOver.rowIndex === rowIndex &&
-                                    dragOver.colIndex === colIndex;
+                                    const isDragOver =
+                                        dragOver &&
+                                        dragOver.rowIndex === rowIndex &&
+                                        dragOver.colIndex === colIndex;
 
 
-                                return (
-                                    <Cell
-                                        key={`cell-${rowIndex}-${colIndex}`}
-                                        value={value}
-                                        color={getColor(value, rowIndex, colIndex)}
-                                        onClick={() => onCellClick(rowIndex, colIndex)}
-                                        draggable
-                                        isDragging={isDragging}
-                                        isDragOver={isDragOver}
-                                        onDragStart={() => setDragging({ rowIndex, colIndex })}
-                                        onDragOver={(e) => {
-                                            e.preventDefault();
-                                            setDragOver({ rowIndex, colIndex });
-                                        }}
-                                        onDrop={() => {
-                                            if (dragging && dragging.rowIndex === rowIndex) {
-                                                onReorder(rowIndex, dragging.colIndex, colIndex);
-                                            }
-                                            setDragging(null);
-                                            setDragOver(null);
-                                        }}
-                                        onDragEnd={() => {
-                                            setDragging(null);
-                                            setDragOver(null);
-                                        }}
-                                    />
-                                );
-                            })}
+                                    return (
+                                        <Cell
+                                            key={`cell-${rowIndex}-${colIndex}`}
+                                            value={value}
+                                            color={getColor(value, rowIndex, colIndex)}
+                                            onClick={() => onCellClick(rowIndex, colIndex)}
+                                            draggable
+                                            isDragging={isDragging}
+                                            isDragOver={isDragOver}
+                                            onDragStart={() => setDragging({ rowIndex, colIndex })}
+                                            onDragOver={(e) => {
+                                                e.preventDefault();
+                                                setDragOver({ rowIndex, colIndex });
+                                            }}
+                                            onDrop={() => {
+                                                if (dragging && dragging.rowIndex === rowIndex) {
+                                                    onReorder(rowIndex, dragging.colIndex, colIndex);
+                                                }
+                                                setDragging(null);
+                                                setDragOver(null);
+                                            }}
+                                            onDragEnd={() => {
+                                                setDragging(null);
+                                                setDragOver(null);
+                                            }}
+                                        />
+                                    );
+                                })}
+                            </div>
                         </motion.div>
                     );
                 })}

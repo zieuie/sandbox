@@ -1,6 +1,6 @@
 import React, { useRef } from "react";
 
-export default function ControlPanel({ message, onUndo, canUndo, onExport, onImport, N, D, onDChange }) {
+export default function ControlPanel({ message, onUndo, canUndo, onExport, onImport, N, D, onDChange, setD, showHidden, toggleShowHidden }) {
     const fileInputRef = useRef(null);
     return (
         <div className="panel">
@@ -24,6 +24,9 @@ export default function ControlPanel({ message, onUndo, canUndo, onExport, onImp
             </div>
 
             <div className="panel__actions">
+                <button className="btn" onClick={toggleShowHidden}>
+                    {showHidden ? "Hide Hidden Rows" : "Show Hidden Rows"}
+                </button>
                 <button className="btn" onClick={onUndo} disabled={!canUndo}>Undo</button>
                 <button className="btn" onClick={onExport}>Export Grid</button>
                 <input

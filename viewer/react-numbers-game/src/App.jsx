@@ -6,14 +6,14 @@ import ControlPanel from "./components/ControlPanel";
 // Color mapping helper — now receives D and N
 function defaultGetColor(value, _row, _col, D, N) {
   const palette = [
-    "#666666", // black
-    "#ffffff", // white
-    "#ff0000", // red
-    "#00ff00", // green
-    "#0000ff", // blue
-    "#ffff00", // yellow
-    "#ff00ff", // magenta
-    "#00ffff" // cyan
+    "#ff5757ff", // red
+    "#ff902fff", // orange
+    "#ffff47ff", // yellow
+    "#97ff97ff", // green
+    "#5151ffff", // blue
+    "#98ffffff", // cyan
+    "#ff84ffff", // magenta
+    "#c0c0c0ff", // black
   ];
   // const idx = Math.abs(Math.floor(value)) % palette.length;
   // Simple example: shift color index by D (and touch N to show availability)
@@ -46,7 +46,9 @@ export default function App() {
 
   const [dragging, setDragging] = useState(null); // { rowIndex, colIndex }
   const [dragOver, setDragOver] = useState(null); // { rowIndex, colIndex }
-
+  const [showHidden, setShowHidden] = useState(false);
+  const [clickedRow, setClickedRow] = useState(null); // { rowIndex, colIndex }
+  const [clickedCol, setClickedCol] = useState(null); // { rowIndex, colIndex }
 
 
   // Helper to push current state to history for undo
@@ -61,16 +63,37 @@ export default function App() {
     ]);
   };
 
+  const isSeparated = (u, v) => {
+    var ret = false;
+    u.forEach((e,i) => {
+      if (Math.abs(e-v[i]) >= D) {
+        ret = true;
+      }
+    })
+    return ret;
+  }
+
   // Click logic: sample rule — hide all rows containing the clicked value
   const handleCellClick = (rowIndex, colIndex) => {
     pushHistory();
-    const clickedValue = data[rowIndex][colIndex];
-    const newHidden = data
-      .map((row, i) => (row.includes(clickedValue) ? i : null))
-      .filter((i) => i !== null);
 
+    const u = data[rowIndex];
+    const newHidden = data.map((v,x) => {
+      return isSeparated(u,v) ? -1 : x;
+        // var ret = false;
+        // v.forEach((e,i) => {
+        //   if (Math.abs(e-u[i]) >= D) {
+        //     ret = true;
+        //   }
+        // })
+        // return ret ? -1 : x
+    });
+    console.log(newHidden);
+
+    setClickedRow(rowIndex);
+    setClickedCol(colIndex);
     setHiddenRows(newHidden);
-    setMessage(`Clicked (${rowIndex}, ${colIndex}) → hiding rows with value ${clickedValue}`);
+    setMessage(`Clicked row ${rowIndex} - hiding ${newHidden.length} separated`);
   };
 
   // Reorder values within a row via drag & drop
@@ -174,7 +197,7 @@ export default function App() {
     <div className="app">
       <Grid
         data={data}
-        hiddenRows={hiddenRows}
+        hiddenRows={showHidden ? [] : hiddenRows}
         getColor={(v, r, c) => defaultGetColor(v, r, c, D, N)}
         onCellClick={handleCellClick}
         onReorder={handleReorder}
@@ -183,7 +206,6 @@ export default function App() {
         setDragging={setDragging}
         setDragOver={setDragOver}
       />
-
       <ControlPanel
         message={message}
         onUndo={handleUndo}
@@ -193,6 +215,9 @@ export default function App() {
         N={N}
         D={D}
         onDChange={setD}
+        setD={setD}
+        showHidden={showHidden}
+        toggleShowHidden={() => setShowHidden(!showHidden)}
       />
     </div>
   );
