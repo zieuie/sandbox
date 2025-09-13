@@ -124,11 +124,7 @@ def smart_hill(B, n, d):
     if v:
       b_lutmap[len(v)].add(k)
 
-  while True:
-    b_score = sum(map(len, b_lut))
-    if b_score == 0:
-      yield B,b_score
-
+  for x in it.count():
     while True:
       i = meep(b_lutmap)
       one = pull_group(B[i],n,d,random.randrange(ceildiv(n,d)))
@@ -141,6 +137,11 @@ def smart_hill(B, n, d):
 
     # i,row,gain,loss = quick_disturb(B,b_lut,b_foes,b_lutmap)
     update_diffs(B, n, d, b_lut, i, row, gain, loss)
+    b_score = sum(map(len, b_lut))
+    if b_score > 0:
+      continue
+
+    yield B,b_score
 
 
 def weave_template(n,d):
@@ -207,18 +208,18 @@ def main(A,T,n,d):
 
         lastx = -1
         lastscore = float('inf')
-        for x, (newb, smallw) in enumerate(smart_hill(B,n,d)):
-          if smallw > 0:
+        for x, (B, b_score) in enumerate(smart_hill(B,n,d)):
+          if b_score > 0:
             continue
           if x-lastx > 100:
             break
 
-          for i,b in zip(bidxs, newb):
+          for i,b in zip(bidxs, B):
             A[i] = b
           a_problems = init_problems(A,d,a_foes)
           score = sum(map(len, a_problems))
           if score < lastscore:
-            B = deepcopy(newb)
+            B = deepcopy(B)
             lastscore = score
             lastx = x
             if lastscore < a_score:
