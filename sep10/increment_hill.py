@@ -255,8 +255,8 @@ def smart_hill(A, n, d):
         if w == 0:
           return
 
-      if not it_count % 10000:
-        print(it_count, w, it_count-last_tweak, ', '.join(f'({k}:{",".join(map(str, v))})' for k,v in enumerate(lut) if v), lutmap)
+      # if not it_count % 10000:
+      #   print(it_count, w, it_count-last_tweak, ', '.join(f'({k}:{",".join(map(str, v))})' for k,v in enumerate(lut) if v), lutmap)
 
       if should_print:
         coverage = sum(1 for v in lut if not v)
