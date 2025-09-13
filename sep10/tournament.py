@@ -108,45 +108,6 @@ def pull_group(u,n,d,x):
   return [i for i,e in enumerate(u) if e//d == x]
 
 
-def meep(mapping):
-  pop = [k for k,v in mapping.items() if v]
-  weights = [(e+1)**2 for e in pop]
-
-  size = random.choices(pop, weights=weights, k=1)[0]
-  return random.choice(list(mapping[size]))
-
-
-def init_hill(B, n, d):
-  b_foes = init_foes(B,n,d)
-  b_lut = init_problems(B, d, b_foes)
-  b_lutmap = defaultdict(set)
-  for k,v in enumerate(b_foes):
-    if v:
-      b_lutmap[len(v)].add(k)
-
-  return b_foes, b_lut, b_lutmap
-
-def smart_hill(B, n, d, b_foes, b_lut, b_lutmap):
-  for x in it.count():
-    while True:
-      i = meep(b_lutmap)
-      one = pull_group(B[i],n,d,random.randrange(ceildiv(n,d)))
-      two = [e for e in one]
-      random.shuffle(two)
-      row = apply_permutation(B[i], one, two)
-      gain, loss = eval_permutation(B, i, d, row, b_lut, b_foes[i])
-      if len(gain) >= len(loss):
-        break
-
-    # i,row,gain,loss = quick_disturb(B,b_lut,b_foes,b_lutmap)
-    update_diffs(B, n, d, b_lut, i, row, gain, loss)
-    b_score = sum(map(len, b_lut))
-    if b_score > 0:
-      continue
-
-    yield B,b_score
-
-
 def weave_template(n,d):
   # weave template
   A = [[ceildiv(n,d)-1]*(n%d or d)]
@@ -212,14 +173,30 @@ def main(A,T,n,d):
         lastx = -1
         lastscore = float('inf')
         best_b = deepcopy(B)
-        b_foes, b_lut, b_lutmap = init_hill(B,n,d)
 
-        for x, (B, b_score) in enumerate(smart_hill(B,n,d,b_foes, b_lut, b_lutmap)):
-          if b_score > 0:
-            continue
+        b_foes = init_foes(B,n,d)
+        b_lut = init_problems(B, d, b_foes)
+        x = 0
+        while True:
           if x-lastx > 100:
             break
+          while True:
+            i = random.randrange(len(b_foes))
+            one = pull_group(B[i],n,d,random.randrange(ceildiv(n,d)))
+            two = [e for e in one]
+            random.shuffle(two)
+            row = apply_permutation(B[i], one, two)
+            gain, loss = eval_permutation(B, i, d, row, b_lut, b_foes[i])
+            if len(gain) >= len(loss):
+              break
 
+          # i,row,gain,loss = quick_disturb(B,b_lut,b_foes,b_lutmap)
+          update_diffs(B, n, d, b_lut, i, row, gain, loss)
+          b_score = sum(map(len, b_lut))
+          if b_score > 0:
+            continue
+
+          x += 1
           for i,b in zip(bidxs, B):
             A[i] = b
           a_problems = init_problems(A,d,a_foes)
@@ -238,6 +215,7 @@ def main(A,T,n,d):
           for i,b in zip(bidxs, best_b):
             A[i] = b
           ANODE = deepcopy(A)
+
     except KeyboardInterrupt:
       print('Cancelling')
       break
