@@ -332,7 +332,9 @@ for x,u in enumerate(A):
 
 # C = []
 for x,u in enumerate(B):
-  if u is None:
+  if u:
+    print(' '.join(map(str, u)))
+  else:
     pots = [iter(range(e*d, (e+1)*d)) for e in range(n//d + int(bool(n%d)))]
     row = [next(pots[e]) for e in T[x]]
     # C.append(row)

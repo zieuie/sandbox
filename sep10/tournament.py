@@ -163,6 +163,7 @@ def main(A,T,n,d):
   while a_score:
     try:
       for u, kvs in colin.items():
+        print(u)
         B = [A[u]]
         bidxs = [u]
         for k, vs in kvs.items():
@@ -176,6 +177,7 @@ def main(A,T,n,d):
 
         b_foes = init_foes(B,n,d)
         b_lut = init_problems(B, d, b_foes)
+        b_score = sum(map(len, b_lut))
         x = 0
         while True:
           if x-lastx > 100:
@@ -187,12 +189,21 @@ def main(A,T,n,d):
             random.shuffle(two)
             row = apply_permutation(B[i], one, two)
             gain, loss = eval_permutation(B, i, d, row, b_lut, b_foes[i])
-            if len(gain) >= len(loss):
-              break
+            if len(gain) < len(loss):
+              continue
 
-          # i,row,gain,loss = quick_disturb(B,b_lut,b_foes,b_lutmap)
-          update_diffs(B, n, d, b_lut, i, row, gain, loss)
-          b_score = sum(map(len, b_lut))
+            if b_score > 0:
+              update_diffs(B, n, d, b_lut, i, row, gain, loss)
+              b_score = sum(map(len, b_lut))
+              break
+            else:
+              gain, loss = eval_permutation(A, bidxs[i], d, row, a_problems, a_foes[bidxs[i]])
+              if len(gain) >= len(loss):
+                B[i] = row
+                b_lut = init_problems(B, d, b_foes)
+                b_score = sum(map(len, b_lut))
+                break
+
           if b_score > 0:
             continue
 
@@ -223,7 +234,8 @@ def main(A,T,n,d):
   dump_pa(ANODE, f'pa_tournament_{n}_{d}.txt')
 
 
-if True:
+scratch = True
+if scratch:
   n,d = 8,3
   T = weave_template(n,d)
   A = [quick_fill(t,n,d) for t in T]
