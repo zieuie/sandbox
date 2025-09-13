@@ -162,8 +162,11 @@ def main(A,T,n,d):
 
   while a_score:
     try:
-      for u, kvs in colin.items():
-        print(u)
+      while True:
+        u = random.randrange(len(colin))
+        kvs = colin[u]
+      # for u, kvs in colin.items():
+        print(a_score, u)
         B = [A[u]]
         bidxs = [u]
         for k, vs in kvs.items():
@@ -234,7 +237,8 @@ def main(A,T,n,d):
   dump_pa(ANODE, f'pa_tournament_{n}_{d}.txt')
 
 
-scratch = True
+# scratch = True
+scratch = False
 if scratch:
   n,d = 8,3
   T = weave_template(n,d)
