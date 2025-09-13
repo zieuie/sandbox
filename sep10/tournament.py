@@ -116,7 +116,7 @@ def meep(mapping):
   return random.choice(list(mapping[size]))
 
 
-def smart_hill(B, n, d):
+def init_hill(B, n, d):
   b_foes = init_foes(B,n,d)
   b_lut = init_problems(B, d, b_foes)
   b_lutmap = defaultdict(set)
@@ -124,6 +124,9 @@ def smart_hill(B, n, d):
     if v:
       b_lutmap[len(v)].add(k)
 
+  return b_foes, b_lut, b_lutmap
+
+def smart_hill(B, n, d, b_foes, b_lut, b_lutmap):
   for x in it.count():
     while True:
       i = meep(b_lutmap)
@@ -208,7 +211,10 @@ def main(A,T,n,d):
 
         lastx = -1
         lastscore = float('inf')
-        for x, (B, b_score) in enumerate(smart_hill(B,n,d)):
+        best_b = deepcopy(B)
+        b_foes, b_lut, b_lutmap = init_hill(B,n,d)
+
+        for x, (B, b_score) in enumerate(smart_hill(B,n,d,b_foes, b_lut, b_lutmap)):
           if b_score > 0:
             continue
           if x-lastx > 100:
@@ -219,7 +225,7 @@ def main(A,T,n,d):
           a_problems = init_problems(A,d,a_foes)
           score = sum(map(len, a_problems))
           if score < lastscore:
-            B = deepcopy(B)
+            best_b = deepcopy(B)
             lastscore = score
             lastx = x
             if lastscore < a_score:
@@ -229,7 +235,7 @@ def main(A,T,n,d):
 
         if lastscore <= a_score:
           a_score = lastscore
-          for i,b in zip(bidxs, B):
+          for i,b in zip(bidxs, best_b):
             A[i] = b
           ANODE = deepcopy(A)
     except KeyboardInterrupt:
