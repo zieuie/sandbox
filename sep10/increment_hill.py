@@ -400,7 +400,7 @@ def main():
     if pa is None:
       print ('Cancelled')
       break
-    with open(f'partial_{n}_{d}_{len(pa)}_{w}.txt', 'w+') as f:
+    with open(f'mow/partial_{n}_{d}_{len(pa)}_{w}.txt', 'w+') as f:
       for row in pa:
         f.write(' '.join(map(str, row)) + '\n')
     print(f'Wrote score {w}')
