@@ -1,0 +1,92 @@
+
+Case 1:
+L L L L L 8 H H - a
+L L L L 8 H L H - c
+L L L L H L 8 H - b
+L L L L 8 H H L - d
+
+Case 1a.
+1 2 3 4 5 6 7 8
+---------------
+L L L L 6 L 8 7 - b
+L L L L 8 7 6 L - d
+
+L L L L x L x 7 - b
+L L L L x 7 x L - d
+
+
+1 4 L L 6 5 8 7 - b1
+L L L L 6 5 8 7 - b2
+L L L L 8 7 6 5 - d1
+L L L L 8 7 6 5 - d2
+
+
+
+
+1234
+
+12345678
+8: 12345 (same as L)
+
+
+2 3 4 0 1
+4 2 0 3 1
+3 4 1 0 2
+2 1 3 4 0
+4 0 3 1 2
+3 1 0 2 4
+1 4 2 3 0
+0 3 2 1 4
+0 2 1 4 3
+1 0 4 2 3
+
+
+
+
+
+
+
+
+
+WLOG 1,4 will be the first two columns of a
+
+Case 1. ab separated in col 1
+1 4 L L - a
+4 L L L - b
+L L L L - c
+L L L L - d
+
+Case 1.1 ab separated in col 1, and ac separated in col 1
+1 4 L L - a
+4 L L L - b
+4 L L L - c
+L L L L - d
+
+Dead end. bc cannot be separated
+
+Case 1.2 ab separated in col 1, and ac separated in col 2
+1 4 L L - a
+4 L L L - b
+L 1 L L - c
+L L L L - d
+
+Dead end. bc cannot be sepatated
+
+
+Case 2. ab separated in col 2
+1 4 L L - a
+L 1 L L - b
+L L L L - c
+L L L L - d
+
+Case 2a. ab separated in col 2, ac separated in col 1
+1 4 L L - a
+L 1 L L - b
+4 L L L - c
+L L L L - d
+
+Case 2b. ab separated in col 2, ac separated in col 2
+1 4 L L - a
+L 1 L L - b
+L 1 L L - c
+L L L L - d

@@ -1,0 +1,58 @@
+Just consider these four
+- 2 2 2 2 2 1 1 1 (56)
+- 2 2 2 2 1 2 1 1 (55)
+- 2 2 2 2 1 1 2 1 (54)
+- 2 2 2 2 1 1 1 2 (53)
+
+
+WLOG pick col 6 for 56. It forces 54 and 53. Then you can't separate 55 from 53 AND 54.
+- 2 2 2 2 2 7 1 1 (56)
+- 2 2 2 2 1 2 1 1 (55)
+- 2 2 2 2 7 1 2 1 (54)
+- 2 2 2 2 7 1 1 2 (53)
+
+WLOG pick col 7 to separate 55 from 54. Now 53 is unseparated from 54 and 55.
+- 2 2 2 2 2 7 1 1 (56)
+- 2 2 2 2 1 2 7 1 (55) a
+- 2 2 2 2 7 1 2 1 (54) b
+- 2 2 2 2 7 1 1 2 (53) c
+
+Really, you're separating here:
+    H L 7 H (a)
+    7 H L H (b)
+    7 H H L (c)
+
+You have to pick columns to separate ac and bc.
+ac can only be separated in column 2 or 4.
+
+Case 1. Put a 6 as the last column of a, like so:
+    5 L 7 6 (a)
+    7 H L H (b)
+    7 H H L (c)
+
+6 is separated from 0,1,2,3, but not 4.
+So two rows cannot be separated in ac in col 4.
+Those two rows must be separted in col 2 somehow.
+Generously, give 6 as col 2 of c:
+    5 L 7 6 (a)
+    7 H L H (b)
+    7 6 5 L (c)
+
+But again, 4 isn't separated. So there are two rows in a that aren't separated 
+from those two rows in c. So we have to throw out at least two such rows.
+
+unless of course they're separated in the other low columns.
+Let's try that:
+
+    0 3 L L 5 4 7 6 (a1)
+    L L 3 0 5 4 7 6 (a2)
+
+    3 L 0 L 7 6 5 4 (c1)
+    L 0 L 3 7 6 5 4 (c2)
+
+Oops I got it. That sucks. Also, any choice of blob can do this.
+
+This does limit the 4s though right? I don't even know.
+So what can I do by hand?
+
+---

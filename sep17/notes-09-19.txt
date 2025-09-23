@@ -1,0 +1,197 @@
+Just consider these four
+- 2 2 2 2 2 1 1 1 (56)
+- 2 2 2 2 1 2 1 1 (55)
+- 2 2 2 2 1 1 2 1 (54)
+- 2 2 2 2 1 1 1 2 (53)
+
+WLOG pick col 6 for 56. It forces 54 and 53.
+WLOG pick col 7 to separate 55 from 54.
+Now 53 is unseparated from 54 and 55.
+- 2 2 2 2 2 7 1 1 (56)
+- 2 2 2 2 1 2 7 1 (55) a
+- 2 2 2 2 7 1 2 1 (54) b
+- 2 2 2 2 7 1 1 2 (53) c
+
+Really, you're separating here:
+    H L 7 H (a)
+    7 H L H (b)
+    7 H H L (c)
+
+You have to pick columns to separate ac and bc.
+ac can only be separated in column 2 or 4.
+
+Case 1. Put a 6 as the last column of a, like so:
+    5 L 7 6 (a)
+    7 H L H (b)
+    7 H H L (c)
+
+6 is separated from 0,1,2,3, but not 4.
+So two rows cannot be separated in ac in col 4.
+Those two rows must be separted in col 2 somehow.
+Generously, give 6 as col 2 of c:
+    5 L 7 6 (a)
+    7 H L H (b)
+    7 6 5 L (c)
+
+But again, 4 isn't separated. So there are two rows in a that aren't separated 
+from those two rows in c. So we have to throw out at least two such rows.
+
+unless of course they're separated in the other low columns.
+Let's try that:
+
+    0 3 L L 5 4 7 6 (a1)
+    L L 3 0 5 4 7 6 (a2)
+
+    3 L 0 L 7 6 5 4 (c1)
+    L 0 L 3 7 6 5 4 (c2)
+
+Oops I got it. That sucks. Also, any choice of blob can do this.
+
+This does limit the 4s though right? I don't even know.
+So what can I do by hand?
+
+---
+
+
+Let's try to separate these three:
+- 2 2 2 1 2 2 1 1 (52) d
+- 2 2 2 1 2 1 2 1 (51) e
+- 2 2 2 1 2 1 1 2 (50) f
+
+z forces 7 in col 4. This solves abc, but screws de, df, ef pairs.
+
+Try it like this:
+    L L 6 5  d
+    L 6 L 5  e
+    L 5 6 L  f
+
+separating d from e involves the same trick from ac:
+    0 3 L L (a1)
+    L L 3 0 (a2)
+    3 L 0 L (c1)
+    L 0 L 3 (c2)
+
+But ef requires something special. 
+Actually so does bc, which I skipped before. let's do bc now.
+
+
+bc:
+    H L H (b)
+    6 5 L (c)
+
+let's try 56 first.
+- L L L L 7 5 L 6 (b)
+- L L L L 7 6 5 L (c)
+
+
+6 separated from 0,1,2,3 (not 4)
+5 separated from 0,1,2 (not 3,4)
+
+    c has two rows with 4 in col 2.
+    b has four rows in 3/4 in col 1.
+
+- 0 1 2 3 7 5 4 6 (b1) 0123
+- L 1 L 0 7 5 4 6 (b2) 0123
+- L 4 L L 7 5 3 6 (b3) 0124
+- L L L L 7 5 3 6 (b4) 0124
+- L L L L 7 6 5 4 (c1) 0123
+- L L L L 7 6 5 4 (c2) 0123
+
+
+
+---
+
+- 2 2 2 2 2 1 1 1 (56)
+
+- 2 2 2 2 5 L 7 6 (55)
+
+- 2 2 2 2 7 H L H (54)
+
+- 2 2 2 2 7 6 5 L (53)
+
+
+# Okay, I think ac only gets 3/4
+# And bc can only have 4/6
+
+---
+
+H L L L L L H H
+H L L L L H L H
+H L L L L H H L
+
+L H L L L L H H
+L H L L L H L H
+L H L L L H H L
+
+L L H L L L H H
+L L H L L H L H
+L L H L L H H L
+
+L L L H L L H H
+L L L H L H L H
+L L L H L H H L
+
+L L L L H L H H
+L L L L H H L H
+L L L L H H H L
+
+
+
+L H H L L L L H
+H L H L L L L H
+H H L L L L L H
+
+L H H L L L H L
+H L H L L L H L
+H H L L L L H L
+
+L H H L L H L L
+H L H L L H L L
+H H L L L H L L
+
+L H H L H L L L
+H L H L H L L L
+H H L L H L L L
+
+L H H H L L L L
+H L H H L L L L
+H H L H L L L L
+
+
+
+
+H L L H L L L H
+H L L H L L H L
+H L L H L H L L
+
+H L L L H L L H
+H L L L H L H L
+H L L L H H L L
+
+L H L H L L L H
+L H L H L L H L
+L H L H L H L L
+
+L H L L H L L H
+L H L L H L H L
+L H L L H H L L
+
+L L H H L L L H
+L L H H L L H L
+L L H H L H L L
+
+L L H L H L L H
+L L H L H L H L
+L L H L H H L L
+
+L L L H H L L H
+L L L H H L H L
+L L L H H H L L
+
+
+
+H H H L L L L L
+H L L H H L L L
+L H L H H L L L
+L L H H H L L L
+L L L L L H H H
