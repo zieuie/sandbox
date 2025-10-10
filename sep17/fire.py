@@ -18,17 +18,14 @@ def block(A):
 
   for u in A:
     print(u)
-  input()
+  # input()
   return True
 
 U = list(it.permutations([0,1,2,3]))
 V = list(it.permutations([0,1,2,4]))
 
-for uu in it.combinations(U, 2):
-  for vv in it.combinations(V, 2):
-    # print([*uu, *vv])
-    block([*uu, *vv])
+for a,b in ((2,2), (1,3), ())
+  for uu in it.combinations(U, 2):
+    for vv in it.combinations(V, 2):
+      block([*uu, *vv])
 
-# for uu in it.combinations(U, 3):
-#   # print([*uu])
-#   block([*uu])

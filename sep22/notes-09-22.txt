@@ -1,0 +1,360 @@
+
+L L L L H L H H
+L L L L H H L H
+L L L L H H H L
+
+L L L H L H H L
+L L L H H L H L
+L L L H H H L L
+
+L L H L H H L L
+L L H H L H L L
+L L H H H L L L
+
+L H L H H L L L
+L H H L H L L L
+L H H H L L L L
+
+H L H H L L L L
+H H L H L L L L
+H H H L L L L L
+
+L H H L L L L H
+H L H L L L L H
+H H L L L L L H
+
+H H L L L L H L
+L H L L L L H H
+H L L L L L H H
+
+H L L L L H L H
+H L L L L H H L
+L L L L L H H H
+
+---
+
+H L L L L L H H - x
+H L L L L H L H - y -
+H L L L L H H L - z
+L L L L L H H H -
+L L L L H L H H - a -
+L L L L H H L H - b
+L L L L H H H L - c
+
+ab - 8L
+ac -
+ad -
+bc - 8L
+bd -
+cd - 8L
+
+
+6 L L L L L 7 8 - x
+8 L L L L 6 L 7 - y
+8 L L L L 6 7 L - z
+L L L L L 7 6 8 - k
+L L L L 8 L 6 7 - a
+L L L L 7 8 L 6 - b
+L L L L 6 7 8 L - c
+
+
+
+---
+
+Cross 1: -2 (4 of 6 rows at most)
+  6L xx LLLL
+  L7 xx LLLL
+
+Cross 2: -1 (3 of 4 rows at most)
+  7L xx LLLL
+  L7 xx LLLL
+
+Cross 3: -4 (4 of 8 rows at most)
+  6L xx LLLL
+  L6 xx LLLL
+
+
+8 - [76]
+7 - [6] 5
+6 - 54
+
+
+---
+
+Case 1: 67, 67, 67 (minus 3)
+L L L L 6 L 8 7 - a
+L L L L 8 6 L 7 - b
+L L L L 8 6 7 L - c
+
+
+ab - all separated
+ac - 67 -> 4 of 6 rows
+bc - 77 -> 3 of 4 rows
+---
+
+Case 2: 67, 67, 76 (minus 3)
+L L L L 6 L 8 7 - a
+L L L L 8 6 L 7 - b
+L L L L 8 7 6 L - c
+
+ab - all separated
+ac - 77 -> 3 of 4 rows
+bc - 67 -> 4 of 6 rows
+
+---
+
+Case 3: 67, 76, 67 (minus 4)
+L L L L 6 L 8 7 - a
+L L L L 8 7 L 6 - b
+L L L L 8 6 7 L - c
+
+ab - all separated
+ac - 67 minus 2
+bc - 67 minus 2
+---
+
+Case 4: 67, 76, 76 (minus 5)
+L L L L 6 L 8 7 - a
+L L L L 8 7 L 6 - b
+L L L L 8 7 6 L - c
+
+ab - all separated
+ac - 77 -> 3 of 4 rows
+bc - 66 -> 4 of 8 rows
+---
+
+Case 5: 76, 67, 67 (minus 6)
+L L L L 7 L 8 6 - a
+L L L L 8 6 L 7 - b
+L L L L 8 6 7 L - c
+
+ab - all separated
+ac - 66 -> minus 5
+bc - 77 -> minus 1
+---
+
+Case 6: 76, 67, 76 (minus 4)
+L L L L 7 L 8 6 - a
+L L L L 8 6 L 7 - b
+L L L L 8 7 6 L - c
+
+ab - all separated
+ac - 67 -> minus 2
+bc - 67 -> minus 2
+---
+
+Case 7: 76, 76, 67 (minus 7)
+L L L L 7 L 8 6 - a
+L L L L 8 7 L 6 - b
+L L L L 8 6 7 L - c
+
+ab - all separated
+ac - 66 -> minus 5
+bc - 67 -> minus 2
+---
+
+Case 8: 76, 76, 76 (minus 7)
+L L L L 7 L 8 6 - a
+L L L L 8 7 L 6 - b
+L L L L 8 7 6 L - c
+
+ab - all separated
+ac - 67 -> minus 2
+bc - 66 -> minus 5
+
+---
+
+You can have four of these at most:
+L L L L 8 6 5 7 - b - 1234
+L L L L 8 6 5 7 - b - 1234
+L L L L 8 6 4 7 - b - 1235
+L L L L 8 6 4 7 - b - 1235
+L L L L 8 6 6 5 - c - 1234
+L L L L 8 6 6 5 - c - 1234
+
+
+
+---
+
+
+-27
+L L L L 6 L 7 8 - 1
+L L L L 6 7 L 8 - 2
+L L L L 6 7 8 L - 3
+
+L L L 7 L 6 8 L - 4
+L L L 6 7 L 8 L - 5
+L L L 6 7 8 L L - 6
+
+L L 7 L 6 8 L L - 7
+L L 6 7 L 8 L L - 8
+L L 6 7 8 L L L - 9
+
+L 7 L 6 8 L L L - 10
+L 6 7 L 8 L L L - 11
+L 6 7 8 L L L L - 12
+
+7 L 6 8 L L L L - 13
+6 8 L 7 L L L L - 14
+6 7 8 L L L L L - 15
+
+L 6 8 L L L L 7 - 16
+8 L 6 L L L L 7 - 17
+6 8 L L L L L 7 - 18
+
+
+
+77
+L L L L 6 L 7 8 - 1
+L L L L 6 7 L 8 - 2
+
+67
+L L L L 6 7 8 L - 3
+L L L 7 L 6 8 L - 4
+
+67
+L L L L 6 7 8 L - 3
+L L L 6 7 L 8 L - 5
+
+67
+L L L 7 L 6 8 L - 4
+L L L 6 7 L 8 L - 5
+
+67
+L L L 6 7 8 L L - 6
+L L 7 L 6 8 L L - 7
+
+67
+L L L 6 7 8 L L - 6
+L L 6 7 L 8 L L - 8
+
+67
+L L 7 L 6 8 L L - 7
+L L 6 7 L 8 L L - 8
+
+67
+L L 6 7 8 L L L - 9
+L 7 L 6 8 L L L - 10
+
+67
+L L 6 7 8 L L L - 9
+L 6 7 L 8 L L L - 11
+
+67
+L 7 L 6 8 L L L - 10
+L 6 7 L 8 L L L - 11
+
+67
+L 6 7 8 L L L L - 12
+7 L 6 8 L L L L - 13
+
+67
+L 6 7 8 L L L L - 12
+6 8 L 7 L L L L - 14
+
+67
+6 7 8 L L L L L - 15
+L 6 8 L L L L 7 - 16
+
+77
+6 7 8 L L L L L - 15
+8 L 6 L L L L 7 - 17
+
+
+---
+
+L L L [L  6] 7  8 L - 3
+L L L [7 [L] 6] 8 L - 4
+L L L  6 [7  L] 8 L - 5
+
+
+---------------
+
+L L L L H H H L
+L L L H L H H L
+L L L H H L H L
+
+---------------
+
+L L L 4 6 7 8 L - 3 - 1235
+L L L 4 6 7 8 L - 3
+L L L 5 6 7 8 L - 3 - 1234
+L L L 5 6 7 8 L - 3
+
+---------------
+L L L 7 5 6 8 L - 4 - 1234
+L L L 7 5 6 8 L - 4
+L L L 7 4 6 8 L - 4 - 1235
+L L L 7 4 6 8 L - 4
+
+---------------
+L L L 6 7 5 8 L - 5 - 1234
+L L L 6 7 5 8 L - 5
+L L L 6 7 4 8 L - 5 - 1235
+L L L 6 7 4 8 L - 5
+
+###
+
+3 1 4[5 6 7 8]2 - 3 - 1234
+1 4 2[5 6 7 8]3 - 3
+5 2 1[4 6 7 8]3 - 3 - 1235
+2 1 3[4 6 7 8]5 - 3
+
+---------------
+3 1 4[7 5 6 8]2 - 4 - 1234
+1 4 2[7 5 6 8]3 - 4
+5 2 1[7 4 6 8]3 - 4 - 1235
+2 1 3[7 4 6 8]5 - 4
+
+---------------
+3 1 4[6 7 5 8]2 - 5 - 1234
+1 4 2[6 7 5 8]3 - 5
+5 2 1[6 7 4 8]3 - 5 - 1235
+2 1 3[6 7 4 8]5 - 5
+
+
+5 3 1 4 2
+5 1 4 2 3
+4 5 2 1 3
+4 2 1 3 5
+
+3 4 1 0 2
+3 1 0 2 4
+4 2 0 3 1
+4 0 3 1 2
+
+2 3 4 0 1
+2 1 3 4 0
+1 4 2 3 0
+0 3 2 1 4
+0 2 1 4 3
+1 0 4 2 3
+
+--------------------
+
+5 2 1[4 6 7 8]3 - 3 - 1235
+2 1 3[4 6 7 8]5 - 3
+3 1 4[5 6 7 8]2 - 3 - 1234
+1 4 2[5 6 7 8]3 - 3
+
+---------------
+3 1 4[7 5 6 8]2 - 4 - 1234
+1 4 2[7 5 6 8]3 - 4
+5 2 1[7 4 6 8]3 - 4 - 1235
+2 1 3[7 4 6 8]5 - 4
+
+---------------
+3 1 4[6 7 5 8]2 - 5 - 1234
+1 4 2[6 7 5 8]3 - 5
+5 2 1[6 7 4 8]3 - 5 - 1235
+2 1 3[6 7 4 8]5 - 5
+
+---
+
+
+L L L 5 6 7 8 L - 3 - 1234
+L L L 5 6 7 8 L - 3 - 1234
+L L L 7 4 6 8 L - 4 - 1235
+L L L 7 4 6 8 L - 4 - 1235
+L L L 7 5 6 8 L - 4 - 1234
+L L L 7 5 6 8 L - 4 - 1234
