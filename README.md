@@ -3,4 +3,5 @@ This is scratch paper for Sudborough's research.
 
 - Solid programs are in `solid/`
 - Some results are in `results/`
-- The others are scratch paper.
+- Old things are in `archive/`
+- Some quick ideas are implemented in `poc/`
