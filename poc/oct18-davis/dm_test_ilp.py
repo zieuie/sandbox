@@ -59,6 +59,7 @@ for ux, u in enumerate(A):
             pair_map[vx].add(ux)
             pair_counter.update((ux, vx))
 
+print("done counting pairs")
 
 # ILP SOLVER START
 import pulp
