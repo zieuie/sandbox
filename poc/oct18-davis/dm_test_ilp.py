@@ -1,0 +1,103 @@
+"""
+Given a PA without the distance, remove rows until it does.
+"""
+
+import re
+import sys
+from collections import Counter, defaultdict
+
+
+def distance(a, b):
+    ret = 0
+    for u, v in zip(a, b):
+        ret = max(abs(u - v), ret)
+    return ret
+
+
+# get args
+filename = sys.argv[1]
+goald = int(sys.argv[2])
+
+# read PA
+A = []
+with open(filename, "r") as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = re.sub(r"[^\d\s]", "", line)
+        A.append(list(map(int, line.split())))
+
+# validate rows
+n = None
+for x, row in enumerate(A):
+    if n is None:
+        n = len(row)
+
+    if len(row) != n:
+        print(f"Invalid length of row {x+1}")
+        exit(1)
+    if len(set(row)) != n:
+        print(f"Duplicate in row {x+1}")
+        exit(1)
+    if max(row) != n - 1:
+        print(f"Invalid max in row {x+1}")
+        exit(1)
+    if min(row) != 0:
+        print(f"Invalid min in row {x+1}")
+        exit(1)
+
+
+# get pairs
+pair_map = defaultdict(set)
+pair_counter = Counter()
+for ux, u in enumerate(A):
+    for vx in range(ux):
+        d = distance(u, A[vx])
+        if d < goald:
+            pair_map[ux].add(vx)
+            pair_map[vx].add(ux)
+            pair_counter.update((ux, vx))
+
+print("done counting pairs")
+
+# ILP SOLVER START
+import pulp
+
+prob = pulp.LpProblem("MaxIndependentSet", pulp.LpMaximize)
+x = [pulp.LpVariable(f"x_{i}", cat="Binary") for i in range(len(A))]
+
+# Objective: maximize number of vertices in independent set
+prob += pulp.lpSum(x)
+constraint_count = 0
+for ux, u in enumerate(A):
+    for vx in range(ux):
+        if distance(u, A[vx]) < goald:
+            prob += x[ux] + x[vx] <= 1
+            constraint_count += 1
+    if ux % 100 == 0:
+        print(f"    Processed {ux}/{len(A)} vertices, {constraint_count} constraints")
+print(f"  Total constraints: {constraint_count}")
+prob.solve(pulp.PULP_CBC_CMD())
+print(f"  Solver status: {pulp.LpStatus[prob.status]}")
+# Extract solution
+solution = []
+for i in range(len(A)):
+    if x[i].varValue == 1:
+        solution.append(i)
+A = [A[i] for i in solution]
+print(f"ILP solver: final size = {len(A)}")
+# ILP SOLVER END
+
+for ux, u in enumerate(A):
+    for vx in range(ux):
+        d = distance(u, A[vx])
+        if d < goald:
+            print("Somehow, trimming failed. Send this PA to Zooey.")
+            exit(1)
+
+with open(f"trimmed_{goald}_from_{filename}", "w+") as f:
+    for row in A:
+        f.write(" ".join(map(str, row)) + "\n")
+
+print(f"Verified new ({n},{goald})-PA of size {len(A)}")
