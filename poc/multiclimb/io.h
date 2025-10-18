@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// A cell in a PA. We can change this
+// A cell in a PA. Make sure this is signed!
 typedef int8_t cell_t;
 
 // The permutation array and its data
@@ -18,6 +18,14 @@ typedef struct {
   int m;
   cell_t* cells;
 } pa_t;
+
+inline cell_t pa_get(const pa_t* pa, const int r, const int c) {
+  return pa->cells[ pa->n * r + c ];
+}
+
+inline void pa_set(const pa_t* pa, const int r, const int c, const cell_t val) {
+  pa->cells[ pa->n * r + c ] = val;
+}
 
 void print_pa(const pa_t* pa);
 int load_row(const char* line, const int line_limit, cell_t* cell_buffer, const int buffer_limit);

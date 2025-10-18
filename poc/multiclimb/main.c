@@ -25,6 +25,9 @@ int main(int argc, char* argv[]) {
   // print pa
   print_pa(&pa);
 
+  bool sep = pa_separated(&pa, 3);
+  printf("Separated is %d\n", sep);
+
   // free resources
   free(pa.cells);
 }
