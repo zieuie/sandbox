@@ -27,8 +27,18 @@ inline void pa_set(const pa_t* pa, const int r, const int c, const cell_t val) {
   pa->cells[ pa->n * r + c ] = val;
 }
 
+inline void pa_row_copy_out(const pa_t* pa, cell_t* dst, const int row_idx) {
+  memcpy(dst, &pa->cells[ pa->n * row_idx ], sizeof(cell_t) * pa->n);
+}
+
+inline void pa_row_copy_in(const pa_t* pa, cell_t* src, const int row_idx) {
+  memcpy(&pa->cells[ pa->n * row_idx ], src, sizeof(cell_t) * pa->n);
+}
+
 void print_pa(const pa_t* pa);
 int load_row(const char* line, const int line_limit, cell_t* cell_buffer, const int buffer_limit);
 void load_pa(const char* filename, pa_t * pa);
+void cur_time(char* buffer, size_t bufsize);
+void dump_pa(const pa_t* pa, const char* filename);
 
 #endif

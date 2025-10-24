@@ -1,4 +1,5 @@
 #include "io.h"
+#include <time.h>
 
 #define FILE_LINE_MAX 1024
 
@@ -104,4 +105,42 @@ void load_pa(const char* filename, pa_t * pa) {
   pa->n = n;
   pa->m = m;
   pa->cells = cells;
+}
+
+void dump_pa(const pa_t* pa, const char* filename) {
+  FILE* fp = fopen(filename, "w+");
+  if (fp == NULL) {
+    printf("Unable to open file %s! Exiting.", filename);
+    exit(1);
+  }
+
+  cell_t* ptr = pa->cells;
+  for (int r = 0; r < pa->m; r++) {
+    for (int c = 0; c < pa->n; c++) {
+      fprintf(fp, "%d ", *ptr++);
+    }
+    fprintf(fp, "\n");
+  }
+}
+
+void cur_time(char* buffer, size_t bufsize) {
+  time_t rawtime;
+  struct tm *info;
+
+  // Get the current raw time
+  if (time(&rawtime) == (time_t)-1) {
+      fprintf(stderr, "Error: Could not get raw time.\n");
+      return;
+  }
+
+  // Convert raw time to local time structure
+  info = localtime(&rawtime);
+  if (info == NULL) {
+      fprintf(stderr, "Error: Could not convert to local time.\n");
+      return;
+  }
+
+  // Format the time using strftime
+  // Example format: "YYYY-MM-DD HH:MM:SS"
+  strftime(buffer, bufsize, "%Y-%m-%d %H:%M:%S", info);
 }

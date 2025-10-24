@@ -4,7 +4,7 @@
 CC      := cc
 CFLAGS  := -std=c99 -O3 -Wall -Wextra -pthread
 LDFLAGS := -pthread
-OBJ     := main.o io.o chebyshev.o
+OBJ     := main.o bitmap.o chebyshev.o io.o
 TARGET  := multihill
 
 ASAN_CFLAGS := -fsanitize=address -g
@@ -18,14 +18,17 @@ all: $(TARGET)
 $(TARGET): $(OBJ)
 	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LDFLAGS)
 
-main.o: main.c io.h
+main.o: main.c bitmap.o chebyshev.o io.o
 	$(CC) $(CFLAGS) -c main.c
 
-io.o: io.c io.h
-	$(CC) $(CFLAGS) -c io.c
+bitmap.o: bitmap.c bitmap.h
+	$(CC) $(CFLAGS) -c bitmap.c
 
 chebyshev.o: chebyshev.c chebyshev.h
 	$(CC) $(CFLAGS) -c chebyshev.c
+
+io.o: io.c io.h
+	$(CC) $(CFLAGS) -c io.c
 
 clean:
 	rm -f $(OBJ) $(TARGET)
