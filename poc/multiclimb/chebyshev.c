@@ -84,7 +84,7 @@ void hill_climb(const pa_t* pa, const cell_t d) {
       best_score = score;
     }
 
-    if (it_count % 100000 == 0 || (score <= last_score && score < 200)) {
+    if (it_count % 100000 == 0 || (score < last_score && score < 200)) {
       char time_str[80];
       cur_time(time_str, 80);
       printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Coverage: %li of %d Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, coverage, pa->m, last_tweak);
