@@ -1,10 +1,10 @@
-# Makefile for multihill project (main.c + io.c)
+# Makefile for multihill project
 # Works on Linux (gcc) and macOS (clang)
 
 CC      := cc
-CFLAGS  := -std=c99 -O3 -Wall -Wextra -pthread
+CFLAGS  := -std=c99 -O3 -Wall -Wextra -pthread -Werror -Wpedantic
 LDFLAGS := -pthread
-OBJ     := main.o bitmap.o chebyshev.o io.o
+OBJ     := main.o lib.o chebyshev.o pa.o
 TARGET  := multihill
 
 ASAN_CFLAGS := -fsanitize=address -g
@@ -18,17 +18,17 @@ all: $(TARGET)
 $(TARGET): $(OBJ)
 	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LDFLAGS)
 
-main.o: main.c bitmap.o chebyshev.o io.o
+main.o: main.c lib.o chebyshev.o pa.o
 	$(CC) $(CFLAGS) -c main.c
 
-bitmap.o: bitmap.c bitmap.h
-	$(CC) $(CFLAGS) -c bitmap.c
+lib.o: lib.c lib.h
+	$(CC) $(CFLAGS) -c lib.c
 
 chebyshev.o: chebyshev.c chebyshev.h
 	$(CC) $(CFLAGS) -c chebyshev.c
 
-io.o: io.c io.h
-	$(CC) $(CFLAGS) -c io.c
+pa.o: pa.c pa.h
+	$(CC) $(CFLAGS) -c pa.c
 
 clean:
 	rm -f $(OBJ) $(TARGET)

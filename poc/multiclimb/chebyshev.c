@@ -2,7 +2,7 @@
 #include <unistd.h>
 
 #include "chebyshev.h"
-#include "bitmap.h"
+#include "lib.h"
 
 #define BIT_SET_2D(map, r, c) bit_set(map, r*pa->m + c)
 #define BIT_GET_2D(map, r, c) bit_get(map, r*pa->m + c)
@@ -39,7 +39,7 @@ void hill_climb(const pa_t* pa, const cell_t d) {
   }
 
   // make problems
-  int score = 0;
+  size_t score = 0;
   unsigned char* problems = (unsigned char*) calloc(pa->m * pa->m, sizeof(unsigned char));
   for(int v = 0; v < pa->m; v++) {
     for (int u = 0; u < v; u++) {
@@ -51,22 +51,22 @@ void hill_climb(const pa_t* pa, const cell_t d) {
     }
   }
 
-  // the indices within the row of those symbols in the chosen group
-  cell_t *sanity = (cell_t*) malloc(sizeof(cell_t) * pa->n);
-
   // the potential row to change
   cell_t *pot = (cell_t*) malloc(sizeof(cell_t) * pa->n);
 
   // the indices within the row of those symbols in the chosen group
-  cell_t *digit_indices = (cell_t*) malloc(sizeof(cell_t) * pa->n);
+  cell_t sanity[1024];
+
+  // the indices within the row of those symbols in the chosen group
+  cell_t digit_indices[1024];
   int len_group = 0;
 
   // a list of those rows which are separated from pot but not from the original row
-  cell_t *added   = (cell_t*) malloc(sizeof(cell_t) * pa->m);
+  long long *added = (long long*) malloc(sizeof(long long) * pa->m);
   int num_added = 0;
 
   // a list of those rows which are separated from the original row but not from pot
-  cell_t *removed = (cell_t*) malloc(sizeof(cell_t) * pa->m);
+  long long *removed = (long long*) malloc(sizeof(long long) * pa->m);
   int num_removed = 0;
 
   cell_t num_groups = (pa->n/d) + !!(pa->n%d);
@@ -79,10 +79,10 @@ void hill_climb(const pa_t* pa, const cell_t d) {
       best_score = score;
     }
 
-    if (it_count % 100 == 0 || score <= 0) {
+    if (it_count % 1000 == 0 || score <= 0) {
       char time_str[80];
       cur_time(time_str, 80);
-      printf("[%s] P(%d,%d) Iteration: %lu Score: %d Best: %li Coverage: %li of %d Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, coverage, pa->m, last_tweak);
+      printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Coverage: %li of %d Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, coverage, pa->m, last_tweak);
     }
 
     if (score == 0) {
@@ -145,11 +145,11 @@ void hill_climb(const pa_t* pa, const cell_t d) {
       // was it good enough?
       if (num_added > num_removed) {
         break;
-      } else if (num_added == num_removed && tries > 10000) {
+      } else if (num_added == num_removed && tries > 10) {
         break;
-      } else if (tries > 10000000 && (num_removed - num_added < 2)) {
-        printf("backtracking...\n");
-        break;
+      // } else if (tries > 10000000 && (num_removed - num_added < 2)) {
+      //   printf("backtracking...\n");
+      //   break;
       }
     } // end of choosing a disturbance
 
@@ -163,7 +163,7 @@ void hill_climb(const pa_t* pa, const cell_t d) {
       }
       sanity[pot[c]] = 1;
     }
-    
+
     if (!sane) {
       printf("NOT SANE!\n");
     // }
@@ -197,18 +197,23 @@ void hill_climb(const pa_t* pa, const cell_t d) {
         }
         printf("\n");
       }
-  
+
       getchar();
     }
 
     // apply the change
     pa_row_copy_in(pa, pot, r);
     score -= 2*(num_added - num_removed);
+    // printf("added: %d, removed: %d\n", num_added, num_removed);
     for (int x = 0; x < num_added; x++) {
+      // printf("Clear added[%d] = %lli (r = %d)\n", x, added[x], r);
+      // fflush(stdout);
       BIT_CLR_2D(problems, added[x], r);
       BIT_CLR_2D(problems, r, added[x]);
     }
     for (int x = 0; x < num_removed; x++) {
+      // printf("Clear removed[%d] = %lli (r = %d)\n", x, removed[x], r);
+      // fflush(stdout);
       BIT_SET_2D(problems, removed[x], r);
       BIT_SET_2D(problems, r, removed[x]);
     }
@@ -217,7 +222,6 @@ void hill_climb(const pa_t* pa, const cell_t d) {
   free(foes);
   free(problems);
   free(pot);
-  free(digit_indices);
   free(added);
   free(removed);
 }

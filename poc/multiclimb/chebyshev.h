@@ -1,7 +1,7 @@
 #ifndef CHEBYSHEV_H
 #define CHEBYSHEV_H
 
-#include "io.h"
+#include "pa.h"
 
 inline bool pair_separated(const pa_t* pa, const cell_t d, const int u, const int v) {
   for (int x = 0; x < pa->n; x++) {

@@ -1,4 +1,5 @@
-#include "io.h"
+#include "pa.h"
+#include "lib.h"
 #include <time.h>
 
 #define FILE_LINE_MAX 1024
@@ -47,22 +48,19 @@ int load_row(const char* line, const int line_limit, cell_t* cell_buffer, const 
 
 // load a PA from a file.
 // ! Be sure to free that pa.cells pointer!
-void load_pa(const char* filename, pa_t * pa) {
+int load_pa(const char* filename, pa_t * pa) {
   // open the file
   FILE* fp = fopen(filename, "r");
   if (fp == NULL) {
-    printf("Unable to open file %s! Exiting.", filename);
-    exit(1);
+    return 1;
   }
 
   // find the size of the PA
   int n = 0;
   int m = 0;
-  char* line = (char*) malloc(sizeof(char) * FILE_LINE_MAX);
+  char line[FILE_LINE_MAX];
   cell_t* cell_buffer = (cell_t*) malloc(sizeof(cell_t) * FILE_LINE_MAX);
-  size_t line_size = FILE_LINE_MAX;
-
-  while (getline(&line, &line_size, fp) >= 0) {
+  while (fgets(line, sizeof line, fp) != NULL) {
     if (strlen(line) && line[0] != '#') {
       // see if this is a valid line
       int tmp = load_row(line, FILE_LINE_MAX, cell_buffer, FILE_LINE_MAX);
@@ -79,7 +77,7 @@ void load_pa(const char* filename, pa_t * pa) {
   // allocate and parse the PA
   cell_t* cells = (cell_t*) malloc(sizeof(cell_t) * n * m);
   int row_idx = 0;
-  while (getline(&line, &line_size, fp) >= 0) {
+  while (fgets(line, sizeof line, fp) != NULL) {
     if (strlen(line) && line[0] != '#') {
       // see if this is a valid line
       int tmp = load_row(line, FILE_LINE_MAX, cell_buffer, FILE_LINE_MAX);
@@ -98,13 +96,14 @@ void load_pa(const char* filename, pa_t * pa) {
 
   // free resources
   free(cell_buffer);
-  free(line);
   fclose(fp);
 
   // set the return parameter
   pa->n = n;
   pa->m = m;
   pa->cells = cells;
+
+  return 0;
 }
 
 void dump_pa(const pa_t* pa, const char* filename) {
@@ -121,6 +120,97 @@ void dump_pa(const pa_t* pa, const char* filename) {
     }
     fprintf(fp, "\n");
   }
+}
+
+void weave_pa(pa_t* pa, cell_t d) {
+  // allocate new PA's resources
+  long long n = pa->n + d;
+  long long m = pa->m * nCr(n, d);
+  cell_t* cells = (cell_t*) calloc(n*m, sizeof(cell_t));
+
+  // prepare to iterate over combinations
+  int comb[1024];
+  for (int c = 0; c < d; c++) {
+    comb[c] = c;
+  }
+
+  // fill the PA
+  cell_t* cell = cells;
+  
+  // for every combination...
+  do {
+    // for every row of old...  
+    for (int oldr = 0; oldr < pa->m; oldr++) {
+      int l = 0;
+      int h = 0;
+      // for every column of new...
+      for (int c = 0; c < n; c++) {
+        // check if we're using one of the "chosen" symbols
+        bool chosen = false;
+        for (int x = 0; x < d; x++) {
+          if (c == comb[x]) {
+            chosen = true;
+            break;
+          }
+        }
+
+        // add the next symbol
+        if (chosen) {
+          *cell = h++;
+        } else {
+          *cell = pa_get(pa, oldr, l++) + d;
+        }
+        cell++;
+      }
+    }
+  } while (next_combination(comb, n, d));
+
+  // free resources
+  free(pa->cells);
+  pa->n = n;
+  pa->m = m;
+  pa->cells = cells;
+}
+
+void random_pa(pa_t* pa, cell_t n, cell_t d) {
+  int m = nCr(n, d);
+  cell_t* cells = (cell_t*) calloc(n*m, sizeof(cell_t));
+  int comb[1024];
+  for (int c = 0; c < d; c++) {
+    comb[c] = c;
+  }
+
+  // fill the PA
+  cell_t* cell = cells;
+  
+  // for every combination...
+  do {
+    int l = 0;
+    int h = 0;
+    // for every column of new...
+    for (int c = 0; c < n; c++) {
+      // check if we're using one of the "chosen" symbols
+      bool chosen = false;
+      for (int x = 0; x < d; x++) {
+        if (c == comb[x]) {
+          chosen = true;
+          break;
+        }
+      }
+
+      // add the next symbol
+      if (chosen) {
+        *cell = h++;
+      } else {
+        *cell = d + l++;
+      }
+      cell++;
+    }
+  } while (next_combination(comb, n, d));
+
+  pa->n = n;
+  pa->m = m;
+  pa->cells = cells;
 }
 
 void cur_time(char* buffer, size_t bufsize) {

@@ -1,7 +1,7 @@
 #ifndef IO_H
 #define IO_H
 
-#define _POSIX_C_SOURCE 200809L
+// #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <ctype.h>
 #include <stdint.h>
@@ -28,17 +28,19 @@ inline void pa_set(const pa_t* pa, const int r, const int c, const cell_t val) {
 }
 
 inline void pa_row_copy_out(const pa_t* pa, cell_t* dst, const int row_idx) {
-  memcpy(dst, &pa->cells[ pa->n * row_idx ], sizeof(cell_t) * pa->n);
+  memcpy(dst, pa->cells + pa->n * row_idx, sizeof(cell_t) * (unsigned int) pa->n);
 }
 
 inline void pa_row_copy_in(const pa_t* pa, cell_t* src, const int row_idx) {
-  memcpy(&pa->cells[ pa->n * row_idx ], src, sizeof(cell_t) * pa->n);
+  memcpy(&pa->cells[ pa->n * row_idx ], src, sizeof(cell_t) * (unsigned int) pa->n);
 }
 
 void print_pa(const pa_t* pa);
 int load_row(const char* line, const int line_limit, cell_t* cell_buffer, const int buffer_limit);
-void load_pa(const char* filename, pa_t * pa);
+int load_pa(const char* filename, pa_t * pa);
 void cur_time(char* buffer, size_t bufsize);
 void dump_pa(const pa_t* pa, const char* filename);
+void weave_pa(pa_t* pa, cell_t d);
+void random_pa(pa_t* pa, cell_t n, cell_t d);
 
 #endif
