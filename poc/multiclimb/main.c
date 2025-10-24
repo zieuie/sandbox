@@ -59,13 +59,6 @@ int main(int argc, char* argv[]) {
   pa_t pa;
   resume_computation(&pa, n, d);
 
-  // print pa
-  print_pa(&pa);
-
-  // check separation
-  bool sep = pa_separated(&pa, 3);
-  printf("Separated is %d\n", sep);
-
   // seed RNG
   srand((unsigned) time(NULL));
 

@@ -1,21 +1,79 @@
+#include "lib.h"
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <stdint.h>
+
+typedef struct { uint8_t *p; size_t off, len, ps; } task_t;
+
+static void *touch_range(void *arg) {
+    task_t *t = (task_t*)arg;
+    for (size_t i = 0; i < t->len; i += t->ps) t->p[t->off + i] = 0;
+    if (t->len) t->p[t->off + t->len - 1] = 0;
+    return NULL;
+}
+
+void prefault_parallel(void *p, size_t bytes, int nthr) {
+    size_t ps = (size_t)sysconf(_SC_PAGESIZE);
+    pthread_t th[nthr];
+    task_t    td[nthr];
+    size_t chunk = (bytes + nthr - 1) / nthr;
+    for (int t = 0; t < nthr; ++t) {
+        size_t off = (size_t)t * chunk;
+        size_t len = off >= bytes ? 0 : (bytes - off < chunk ? bytes - off : chunk);
+        td[t] = (task_t){ .p = (uint8_t*)p, .off = off, .len = len, .ps = ps };
+        pthread_create(&th[t], NULL, touch_range, &td[t]);
+    }
+    for (int t = 0; t < nthr; ++t) pthread_join(th[t], NULL);
+}
+
+void prefault(void *p, size_t bytes) {
+    size_t ps = (size_t)sysconf(_SC_PAGESIZE);
+    volatile uint8_t *q = (uint8_t*)p;
+    for (size_t i = 0; i < bytes; i += ps) q[i] = 0;  // write = faults page in
+    if (bytes) q[bytes-1] = 0;                        // touch last page
+}
+
+// Function to get the size of a bit array
+bitset_t* make_bitset(size_t num_bits) {
+    size_t bytes = 1 + (num_bits >> 3);
+    printf("%lu bits is %lu bytes\n", num_bits, bytes);
+    fflush(stdout);
+
+    void* buf = calloc(bytes, sizeof(bitset_t));
+
+    // void *buf = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                    //  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    // if (buf == MAP_FAILED) { perror("mmap failed"); exit(1); }
+
+    // madvise(buf, bytes, MADV_HUGEPAGE);
+    // prefault_parallel(buf, bytes, /*nthr=*/(int)sysconf(_SC_NPROCESSORS_ONLN));
+    prefault(buf, bytes);
+    return (bitset_t*) buf;
+}
+
 // Function to set a bit in a bit array
-void bit_set(unsigned char *bit_array, int bit_index) {
-    int byte_index = bit_index / 8;
-    int bit_offset = bit_index % 8;
+void bit_set(bitset_t *bit_array, long long bit_index) {
+    long long byte_index = bit_index >> 3;
+    long long bit_offset = bit_index & 7;
     bit_array[byte_index] |= (1 << bit_offset);
 }
 
 // Function to clear a bit in a bit array
-void bit_clear(unsigned char *bit_array, int bit_index) {
-    int byte_index = bit_index / 8;
-    int bit_offset = bit_index % 8;
+void bit_clear(bitset_t *bit_array, long long bit_index) {
+    long long byte_index = bit_index >> 3;
+    long long bit_offset = bit_index & 7;
     bit_array[byte_index] &= ~(1 << bit_offset);
 }
 
 // Function to check a bit in a bit array
-int bit_get(unsigned char *bit_array, int bit_index) {
-    int byte_index = bit_index / 8;
-    int bit_offset = bit_index % 8;
+bool bit_get(bitset_t *bit_array, long long bit_index) {
+    long long byte_index = bit_index >> 3;
+    long long bit_offset = bit_index & 7;
     return (bit_array[byte_index] >> bit_offset) & 1;
 }
 

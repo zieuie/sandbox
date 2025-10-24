@@ -2,7 +2,7 @@
 # Works on Linux (gcc) and macOS (clang)
 
 CC      := cc
-CFLAGS  := -std=c99 -O3 -Wall -Wextra -pthread -Werror -Wpedantic
+CFLAGS  := -std=c99 -O3 -Wall -Wextra -pthread -Werror -Wpedantic -D_GNU_SOURCE
 LDFLAGS := -pthread
 OBJ     := main.o lib.o chebyshev.o pa.o
 TARGET  := multihill

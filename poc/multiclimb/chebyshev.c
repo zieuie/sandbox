@@ -4,9 +4,15 @@
 #include "chebyshev.h"
 #include "lib.h"
 
-#define BIT_SET_2D(map, r, c) bit_set(map, r*pa->m + c)
-#define BIT_GET_2D(map, r, c) bit_get(map, r*pa->m + c)
-#define BIT_CLR_2D(map, r, c) bit_clear(map, r*pa->m + c)
+// Index for pair (u,v) with u != v; we normalize so u < v
+static inline size_t sym_idx(size_t u, size_t v) {
+  if (v>u){
+    return v * (v - 1) / 2 + u;
+  } else {
+    return u * (u - 1) / 2 + v;
+  }
+}
+
 
 bool pa_separated(const pa_t* pa, const cell_t d) {
   for (int u = 0; u < pa->m; u++) {
@@ -20,8 +26,12 @@ bool pa_separated(const pa_t* pa, const cell_t d) {
 }
 
 void hill_climb(const pa_t* pa, const cell_t d) {
+  // allocate these huge things up front
+  bitset_t* foes = make_bitset((long) pa->m * (pa->m-1) / 2);
+  bitset_t* problems = make_bitset((long) pa->m * (pa->m-1) / 2);
+  cell_t *pot = (cell_t*) malloc(sizeof(cell_t) * pa->n);
+
   // make foes
-  unsigned char* foes = (unsigned char*) calloc(pa->m * pa->m, sizeof(unsigned char));
   for(int v = 0; v < pa->m; v++) {
     for (int u = 0; u < v; u++) {
       bool sep = false;
@@ -32,27 +42,21 @@ void hill_climb(const pa_t* pa, const cell_t d) {
         }
       }
       if (!sep) {
-        BIT_SET_2D(foes, u, v);
-        BIT_SET_2D(foes, v, u);
+        bit_set(foes, sym_idx(u,v));
       }
     }
   }
 
   // make problems
   size_t score = 0;
-  unsigned char* problems = (unsigned char*) calloc(pa->m * pa->m, sizeof(unsigned char));
   for(int v = 0; v < pa->m; v++) {
     for (int u = 0; u < v; u++) {
-      if (u != v && BIT_GET_2D(foes, u, v) && !pair_separated(pa,d,u,v)) {
-        BIT_SET_2D(problems, u, v);
-        BIT_SET_2D(problems, v, u);
+      if (u != v && bit_get(foes, sym_idx(u, v)) && !pair_separated(pa,d,u,v)) {
+        bit_set(problems, sym_idx(u,v));
         score += 2;
       }
     }
   }
-
-  // the potential row to change
-  cell_t *pot = (cell_t*) malloc(sizeof(cell_t) * pa->n);
 
   // the indices within the row of those symbols in the chosen group
   cell_t sanity[1024];
@@ -71,6 +75,7 @@ void hill_climb(const pa_t* pa, const cell_t d) {
 
   cell_t num_groups = (pa->n/d) + !!(pa->n%d);
   size_t best_score = score;
+  size_t last_score = score;
   size_t last_tweak = 0;
   size_t coverage = 0;
 
@@ -79,10 +84,11 @@ void hill_climb(const pa_t* pa, const cell_t d) {
       best_score = score;
     }
 
-    if (it_count % 1000 == 0 || score <= 0) {
+    if (it_count % 100000 == 0 || (score <= last_score && score < 200)) {
       char time_str[80];
       cur_time(time_str, 80);
       printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Coverage: %li of %d Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, coverage, pa->m, last_tweak);
+      last_score = score;
     }
 
     if (score == 0) {
@@ -119,7 +125,7 @@ void hill_climb(const pa_t* pa, const cell_t d) {
       num_removed = 0;
 
       for (int x = 0; x < pa->m; x++) {
-        if (x == r || !BIT_GET_2D(foes, r, x)) {
+        if (x == r || !bit_get(foes, sym_idx(r, x))) {
           continue;
         }
 
@@ -132,11 +138,11 @@ void hill_climb(const pa_t* pa, const cell_t d) {
         }
 
         if (new_separation) {
-          if (BIT_GET_2D(problems, x, r)) {
+          if (bit_get(problems, sym_idx(x, r))) {
             // you were a problem, now you're not (because you're separated)
             added[num_added++] = x;
           }
-        } else if (!BIT_GET_2D(problems, x, r)) {
+        } else if (!bit_get(problems, sym_idx(x, r))) {
           // you were not a problem, now you are (because you're not separated)
           removed[num_removed++] = x;
         }
@@ -208,14 +214,14 @@ void hill_climb(const pa_t* pa, const cell_t d) {
     for (int x = 0; x < num_added; x++) {
       // printf("Clear added[%d] = %lli (r = %d)\n", x, added[x], r);
       // fflush(stdout);
-      BIT_CLR_2D(problems, added[x], r);
-      BIT_CLR_2D(problems, r, added[x]);
+      bit_clear(problems, sym_idx(added[x], r));
+      bit_clear(problems, sym_idx(r, added[x]));
     }
     for (int x = 0; x < num_removed; x++) {
       // printf("Clear removed[%d] = %lli (r = %d)\n", x, removed[x], r);
       // fflush(stdout);
-      BIT_SET_2D(problems, removed[x], r);
-      BIT_SET_2D(problems, r, removed[x]);
+      bit_set(problems, sym_idx(removed[x], r));
+      bit_set(problems, sym_idx(r, removed[x]));
     }
   }
 
