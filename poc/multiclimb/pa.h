@@ -42,5 +42,7 @@ void cur_time(char* buffer, size_t bufsize);
 void dump_pa(const pa_t* pa, const char* filename);
 void weave_pa(pa_t* pa, cell_t d);
 void random_pa(pa_t* pa, cell_t n, cell_t d);
+void free_pa(pa_t *pa);
+
 
 #endif

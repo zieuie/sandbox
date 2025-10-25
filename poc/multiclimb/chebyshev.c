@@ -40,13 +40,13 @@ void hill_climb(const pa_t* pa, const cell_t d) {
 
 void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, size_t score) {
   // our next row
-  cell_t *pot = (cell_t*) malloc(sizeof(cell_t) * pa->n);
+  cell_t pot[128];
 
   // the indices within the row of those symbols in the chosen group
-  cell_t sanity[1024];
+  cell_t sanity[128];
 
   // the indices within the row of those symbols in the chosen group
-  cell_t digit_indices[1024];
+  cell_t digit_indices[128];
   int len_group = 0;
 
   // a list of those rows which are separated from pot but not from the original row
@@ -62,6 +62,7 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
   size_t last_score = score;
   size_t last_tweak = 0;
   size_t coverage = 0;
+  char time_str[80];
 
   for(size_t it_count = 0;; it_count++) {
     if (score < best_score) {
@@ -69,7 +70,6 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
     }
 
     if (it_count % 100000 == 0 || (score < last_score && score < 100)) {
-      char time_str[80];
       cur_time(time_str, 80);
       printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Coverage: %li of %d Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, coverage, pa->m, last_tweak);
       last_score = score;
@@ -209,7 +209,6 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
     }
   }
 
-  free(pot);
   free(added);
   free(removed);
 }

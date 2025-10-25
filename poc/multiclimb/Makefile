@@ -10,8 +10,8 @@ TARGET  := multihill
 ASAN_CFLAGS := -fsanitize=address -g
 ASAN_LDFLAGS := -fsanitize=address -static-libasan
 
-# CFLAGS := $(CFLAGS) $(ASAN_CFLAGS)
-# LDFLAGS := $(LDFLAGS) $(ASAN_LDFLAGS)
+CFLAGS := $(CFLAGS) $(ASAN_CFLAGS)
+LDFLAGS := $(LDFLAGS) $(ASAN_LDFLAGS)
 
 all: $(TARGET)
 

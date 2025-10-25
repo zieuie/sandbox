@@ -77,7 +77,7 @@ int load_pa(const char* filename, pa_t * pa) {
   rewind(fp);
 
   // allocate and parse the PA
-  cell_t* cells = (cell_t*) malloc(sizeof(cell_t) * n * m);
+  cell_t* cells = (cell_t*) zmalloc(sizeof(cell_t) * n * m);
   int row_idx = 0;
   while (fgets(line, sizeof line, fp) != NULL) {
     if (strlen(line) && line[0] != '#') {
@@ -130,7 +130,7 @@ void weave_pa(pa_t* pa, cell_t d) {
   // allocate new PA's resources
   long long n = pa->n + d;
   long long m = pa->m * nCr(n, d);
-  cell_t* cells = (cell_t*) calloc(n*m, sizeof(cell_t));
+  cell_t* cells = (cell_t*) zcalloc(n*m, sizeof(cell_t));
 
   // prepare to iterate over combinations
   int comb[1024];
@@ -170,7 +170,7 @@ void weave_pa(pa_t* pa, cell_t d) {
   } while (next_combination(comb, n, d));
 
   // free resources
-  free(pa->cells);
+  free_pa(pa);
   pa->n = n;
   pa->m = m;
   pa->cells = cells;
@@ -178,7 +178,7 @@ void weave_pa(pa_t* pa, cell_t d) {
 
 void random_pa(pa_t* pa, cell_t n, cell_t d) {
   int m = nCr(n, d);
-  cell_t* cells = (cell_t*) calloc(n*m, sizeof(cell_t));
+  cell_t* cells = (cell_t*) zcalloc(n*m, sizeof(cell_t));
   int comb[1024];
   for (int c = 0; c < d; c++) {
     comb[c] = c;
@@ -237,4 +237,8 @@ void cur_time(char* buffer, size_t bufsize) {
   // Format the time using strftime
   // Example format: "YYYY-MM-DD HH:MM:SS"
   strftime(buffer, bufsize, "%Y-%m-%d %H:%M:%S", info);
+}
+
+void free_pa(pa_t *pa) {
+    zfree(pa->cells, sizeof(cell_t) * pa->n * pa->m);
 }

@@ -65,6 +65,27 @@ int next_combination(int *comb, int n, int k) {
     return 1;
 }
 
+void* zmalloc(size_t bytes) {
+    void* buf = mmap(
+        NULL,                 // let kernel choose the address
+        bytes,                // length of the mapping in bytes
+        PROT_READ | PROT_WRITE,       // readable + writable
+        MAP_SHARED | MAP_ANONYMOUS,   // visible to children after fork; not backed by a file
+        -1,                   // fd unused with MAP_ANONYMOUS
+        0                     // offset
+    );
+    madvise(buf, bytes, MADV_WILLNEED);
+    #ifdef MADV_HUGEPAGE
+    madvise(buf, bytes, MADV_HUGEPAGE);
+    #endif
+
+    prefault(buf, bytes);
+    return buf;
+}
+
+void* zcalloc(size_t num_elements, size_t num_bytes) {
+    return zmalloc(num_elements * num_bytes);
+}
 
 #if HAVE_CROARING == 1
 
@@ -103,25 +124,7 @@ void bitmap_free(bitlut_t *bit_array) {
 // Function to get the size of a bit array
 bitlut_t* make_bitset(size_t num_bits) {
     size_t bytes = 1 + (num_bits >> 3);
-    printf("%lu bits is %lu bytes\n", num_bits, bytes);
-    fflush(stdout);
-
-    void *buf = mmap(
-        NULL,                 // let kernel choose the address
-        bytes,                // length of the mapping in bytes
-        PROT_READ | PROT_WRITE,       // readable + writable
-        MAP_SHARED | MAP_ANONYMOUS,   // visible to children after fork; not backed by a file
-        -1,                   // fd unused with MAP_ANONYMOUS
-        0                     // offset
-    );
-
-    madvise(buf, bytes, MADV_WILLNEED);
-    #ifdef MADV_HUGEPAGE
-    madvise(buf, bytes, MADV_HUGEPAGE);
-    #endif
-
-    prefault(buf, bytes);
-    return (bitlut_t*) buf;
+    return (bitlut_t*) zmalloc(bytes);
 }
 
 // Function to set a bit in a bit array
@@ -185,6 +188,10 @@ size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
 void bitmap_free(bitlut_t *bit_array, long long num_bits) {
     size_t nbytes = 1 + (num_bits >> 3);
     munmap(bit_array, nbytes);
+}
+
+void zfree(void* p, long long bytes) {
+    munmap(p, bytes);
 }
 
 #endif

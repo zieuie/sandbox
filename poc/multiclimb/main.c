@@ -77,5 +77,5 @@ int main(int argc, char* argv[]) {
   printf("Saved to %s\n", outfile);
 
   // free resources
-  free(pa.cells);
+  free_pa(&pa);
 }
