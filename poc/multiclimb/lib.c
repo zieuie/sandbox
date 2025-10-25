@@ -106,14 +106,20 @@ bitlut_t* make_bitset(size_t num_bits) {
     printf("%lu bits is %lu bytes\n", num_bits, bytes);
     fflush(stdout);
 
-    void* buf = calloc(bytes, sizeof(bitlut_t));
+    void *buf = mmap(
+        NULL,                 // let kernel choose the address
+        bytes,                // length of the mapping in bytes
+        PROT_READ | PROT_WRITE,       // readable + writable
+        MAP_SHARED | MAP_ANONYMOUS,   // visible to children after fork; not backed by a file
+        -1,                   // fd unused with MAP_ANONYMOUS
+        0                     // offset
+    );
 
-    // void *buf = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
-                    //  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    // if (buf == MAP_FAILED) { perror("mmap failed"); exit(1); }
+    madvise(buf, bytes, MADV_WILLNEED);
+    #ifdef MADV_HUGEPAGE
+    madvise(buf, bytes, MADV_HUGEPAGE);
+    #endif
 
-    // madvise(buf, bytes, MADV_HUGEPAGE);
-    // prefault_parallel(buf, bytes, /*nthr=*/(int)sysconf(_SC_NPROCESSORS_ONLN));
     prefault(buf, bytes);
     return (bitlut_t*) buf;
 }
@@ -139,9 +145,22 @@ bool bit_get(const bitlut_t *bit_array, long long bit_index) {
     return (bit_array[byte_index] >> bit_offset) & 1;
 }
 
+// size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
+//     size_t nbytes = 1 + (num_bits >> 3);
+//     size_t sum = 0;
+//     while(nbytes-->0){
+//         bitlut_t c = *buf;
+//         while (c) {
+//             sum += c&1;
+//             c>>=1;
+//         }
+//         buf++;
+//     }
+//     return sum;
+// }
+
 size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
     size_t nbytes = 1 + (num_bits >> 3);
-
     size_t sum = 0;
     size_t i = 0;
     __m256i total = _mm256_setzero_si256();
@@ -152,7 +171,7 @@ size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
         total = _mm256_add_epi64(total, _mm256_sad_epu8(_mm256_popcnt_epi8(x), _mm256_setzero_si256()));
         // (requires AVX512 VPOPCNTDQ or use lookup table for AVX2-only)
     }
-
+    
     // Extract partial sums
     uint64_t tmp[4];
     _mm256_storeu_si256((__m256i*)tmp, total);
@@ -163,8 +182,9 @@ size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
     return sum;
 }
 
-void bitmap_free(bitlut_t *bit_array) {
-    free(bit_array);
+void bitmap_free(bitlut_t *bit_array, long long num_bits) {
+    size_t nbytes = 1 + (num_bits >> 3);
+    munmap(bit_array, nbytes);
 }
 
 #endif

@@ -2,7 +2,7 @@
 # Works on Linux (gcc) and macOS (clang)
 
 CC      := cc
-CFLAGS  := -std=c11 -O3 -Wall -Wextra -pthread -Werror -Wpedantic -D_GNU_SOURCE -I/usr/local/lib -march=native
+CFLAGS  := -std=c11 -O3 -Wall -Wextra -pthread -Werror -Wpedantic -D_GNU_SOURCE -I/usr/local/lib -march=native -g
 LDFLAGS := -pthread -L/usr/local/lib -lroaring
 OBJ     := main.o lib.o chebyshev.o pa.o
 TARGET  := multihill
@@ -10,8 +10,8 @@ TARGET  := multihill
 ASAN_CFLAGS := -fsanitize=address -g
 ASAN_LDFLAGS := -fsanitize=address -static-libasan
 
-CFLAGS := $(CFLAGS) $(ASAN_CFLAGS)
-LDFLAGS := $(LDFLAGS) $(ASAN_LDFLAGS)
+# CFLAGS := $(CFLAGS) $(ASAN_CFLAGS)
+# LDFLAGS := $(LDFLAGS) $(ASAN_LDFLAGS)
 
 all: $(TARGET)
 

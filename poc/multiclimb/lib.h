@@ -32,7 +32,7 @@ bool bit_get(const bitlut_t *bit_array, long long bit_index);
 
 size_t bit_sum(const bitlut_t *buf, size_t nbits);
 
-void bitmap_free(bitlut_t *bit_array);
+void bitmap_free(bitlut_t *bit_array, long long num_bits);
 
 
 long long nCr(long long n, long long k);
