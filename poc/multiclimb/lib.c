@@ -7,7 +7,8 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdint.h>
-#include <roaring/roaring64.h>
+#include <stddef.h>
+
 
 typedef struct { uint8_t *p; size_t off, len, ps; } task_t;
 
@@ -65,7 +66,7 @@ int next_combination(int *comb, int n, int k) {
 }
 
 
-#ifdef HAVE_CROARING
+#if HAVE_CROARING == 1
 
 // Function to get the size of a bit array
 bitlut_t* make_bitset(size_t num_bits) {
@@ -84,8 +85,13 @@ void bit_clear(bitlut_t *bit_array, long long bit_index) {
 }
 
 // Function to check a bit in a bit array
-bool bit_get(bitlut_t *bit_array, long long bit_index) {
+bool bit_get(const bitlut_t *bit_array, long long bit_index) {
     return roaring64_bitmap_contains(bit_array, bit_index);
+}
+
+size_t bit_sum(const bitlut_t *buf, size_t nbits){
+    (void) nbits;
+    return roaring64_bitmap_get_cardinality(buf);
 }
 
 void bitmap_free(bitlut_t *bit_array) {
@@ -127,10 +133,34 @@ void bit_clear(bitlut_t *bit_array, long long bit_index) {
 }
 
 // Function to check a bit in a bit array
-bool bit_get(bitlut_t *bit_array, long long bit_index) {
+bool bit_get(const bitlut_t *bit_array, long long bit_index) {
     long long byte_index = bit_index >> 3;
     long long bit_offset = bit_index & 7;
     return (bit_array[byte_index] >> bit_offset) & 1;
+}
+
+size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
+    size_t nbytes = 1 + (num_bits >> 3);
+
+    size_t sum = 0;
+    size_t i = 0;
+    __m256i total = _mm256_setzero_si256();
+
+    // Process 32 bytes (256 bits) per loop
+    for (; i + 31 < nbytes; i += 32) {
+        __m256i x = _mm256_loadu_si256((const __m256i*)(buf + i));
+        total = _mm256_add_epi64(total, _mm256_sad_epu8(_mm256_popcnt_epi8(x), _mm256_setzero_si256()));
+        // (requires AVX512 VPOPCNTDQ or use lookup table for AVX2-only)
+    }
+
+    // Extract partial sums
+    uint64_t tmp[4];
+    _mm256_storeu_si256((__m256i*)tmp, total);
+    sum = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+
+    // Finish remainder
+    for (; i < nbytes; i++) sum += __builtin_popcount(buf[i]);
+    return sum;
 }
 
 void bitmap_free(bitlut_t *bit_array) {

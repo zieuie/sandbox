@@ -2,7 +2,7 @@
 # Works on Linux (gcc) and macOS (clang)
 
 CC      := cc
-CFLAGS  := -std=c11 -O3 -Wall -Wextra -pthread -Werror -Wpedantic -D_GNU_SOURCE -I/usr/local/lib
+CFLAGS  := -std=c11 -O3 -Wall -Wextra -pthread -Werror -Wpedantic -D_GNU_SOURCE -I/usr/local/lib -march=native
 LDFLAGS := -pthread -L/usr/local/lib -lroaring
 OBJ     := main.o lib.o chebyshev.o pa.o
 TARGET  := multihill

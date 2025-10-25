@@ -34,40 +34,32 @@ void hill_climb(const pa_t* pa, const cell_t d) {
   bitlut_t* problems = make_bitset(lut_size);
 
   // make foes
-  size_t foe_count = 0;
   for(int v = 0; v < pa->m; v++) {
-    if (v % 10000 == 0) {
-      printf("v %d of %d - %lu of %lu\n", v, pa->m, foe_count, sym_idx(0,v));
-    }
-    
     for (int u = 0; u < v; u++) {
+      bool foe = false;
       bool sep = false;
       for (int c = 0; c < pa->n; c++) {
-        if (abs( pa_get(pa,v,c)/d - pa_get(pa,u,c)/d ) > 1) {
-          sep = true;
+        int a = pa_get(pa,u,c);
+        int b = pa_get(pa,v,c);
+        if (abs( a/d - b/d ) > 1) {
+          foe = true;
           break;
+        } else if ( abs(a-b) >= d ) {
+          sep = true;
         }
       }
-      if (!sep) {
-        foe_count++;
+      if (!foe) {
         bit_set(foes, sym_idx(u,v));
+        if (!sep) {
+          bit_set(problems, sym_idx(u,v));
+        }
       }
     }
   }
 
-  // make problems
-  size_t score = 0;
-  printf("problems: %lu, foes: %lu, lut: %lu\n", score/2, foe_count, lut_size);
-  for(int v = 0; v < pa->m; v++) {
-    for (int u = 0; u < v; u++) {
-      if (u != v && bit_get(foes, sym_idx(u, v)) && !pair_separated(pa,d,u,v)) {
-        bit_set(problems, sym_idx(u,v));
-        score += 2;
-      }
-    }
-  }
-
-  printf("problems: %lu, foes: %lu, lut: %lu\n", score/2, foe_count, lut_size);
+  size_t foe_count = bit_sum(foes, lut_size);
+  size_t score = bit_sum(problems, lut_size);
+  printf("problems: %lu, foes: %lu, lut: %lu\n", score, foe_count, lut_size);
 
   do_climb(pa, d, foes, problems, score);
 }
@@ -102,7 +94,7 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
       best_score = score;
     }
 
-    if (it_count % 100000 == 0 || (score < last_score && score < 200)) {
+    if (it_count % 100000 == 0 || (score < last_score && score < 100)) {
       char time_str[80];
       cur_time(time_str, 80);
       printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Coverage: %li of %d Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, coverage, pa->m, last_tweak);
@@ -227,7 +219,7 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
 
     // apply the change
     pa_row_copy_in(pa, pot, r);
-    score -= 2*(num_added - num_removed);
+    score -= num_added - num_removed;
     // printf("added: %d, removed: %d\n", num_added, num_removed);
     for (int x = 0; x < num_added; x++) {
       // printf("Clear added[%d] = %lli (r = %d)\n", x, added[x], r);

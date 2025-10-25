@@ -13,7 +13,7 @@
 #  define HAVE_CROARING 0
 #endif
 
-#ifdef HAVE_CROARING
+#if HAVE_CROARING == 1
 typedef roaring64_bitmap_t bitlut_t;
 #else
 typedef unsigned char bitlut_t;
@@ -28,7 +28,9 @@ void bit_set(bitlut_t *bit_array, long long bit_index);
 void bit_clear(bitlut_t *bit_array, long long bit_index);
 
 // Function to check a bit in a bit array
-bool bit_get(bitlut_t *bit_array, long long bit_index);
+bool bit_get(const bitlut_t *bit_array, long long bit_index);
+
+size_t bit_sum(const bitlut_t *buf, size_t nbits);
 
 void bitmap_free(bitlut_t *bit_array);
 
