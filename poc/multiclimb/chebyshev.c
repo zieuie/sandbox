@@ -138,10 +138,11 @@ void pot_finder(const pa_t* pa, const cell_t d, const bitlut_t* foes, const bitl
 }
 
 void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, ssize_t score) {
+  int num_forks = 8;
+
   // begin lamport's clock
   ssize_t *lamport = (ssize_t*) zmalloc(sizeof(ssize_t));
-
-  int num_forks = 2;
+  disturb_t* changes = malloc(num_forks * sizeof(disturb_t));
 
   // make pipes
   int max_fd = -1;
@@ -199,12 +200,23 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
 
     // wait for a child to respond
     disturb_t change;
+    ssize_t sizes[1024];
+    bool trust[1024];
+
+    for (int x = 0; x < num_forks; x++) {
+      sizes[x] = 0;
+      trust[x] = true;
+    }
+
     for(;;) {
       // set up the select
       timeout.tv_sec = 1;
       timeout.tv_usec = 0;
       FD_ZERO(&readfds);
       for (int x = 0; x < num_forks; x++) {
+        if (!trust[x]) {
+          continue;
+        }
         FD_SET(pipes[2*x], &readfds);
       }
 
@@ -230,14 +242,27 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
       }
 
       // pull the data
-      if (read(pipes[2*chosen], &change, sizeof(disturb_t)) < (ssize_t) sizeof(disturb_t)) {
-        printf("Failed to read chosen %d!\n", chosen);
+      ssize_t bytes_read = read(pipes[2*chosen], ((char*) &changes[chosen]) + sizes[chosen], sizeof(disturb_t) - sizes[chosen]);
+      sizes[chosen] += bytes_read;
+      if (sizes[chosen] < (ssize_t) sizeof(disturb_t)) {
+        // we still need more buffer
+        // printf("Partial buffer %li of %lu for child %d\n", sizes[chosen], sizeof(disturb_t), chosen);
         continue;
-      } else if (change.lamport < it_count) {
+      } else if (sizes[chosen] > (ssize_t) sizeof(disturb_t)) {
+        printf("Buffer overrun in child %d\n", chosen);
+        trust[chosen] = false;
+        continue;
+      }
+      
+      change = changes[chosen];
+      sizes[chosen] = 0;
+      
+      if (change.lamport != it_count) {
         // printf("*");
         // printf("Ignoring stale change from iteration %li of %li\n", change.lamport, it_count);
         continue;
       } else {
+        // printf("Chosen child %d (lamport: %li, row_idx: %i, num_added: %i, num_removed: %i)\n", chosen, change.lamport, change.row_idx, change.num_added, change.num_removed);
         // printf(".");
         // printf("[%li] ", change.lamport);
         // fflush(stdout);
@@ -271,4 +296,6 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
   for (int x = 0; x < num_forks; x++) {
     close(pipes[2*x]);
   }
+  free(changes);
+  zfree(lamport, sizeof(ssize_t));
 }

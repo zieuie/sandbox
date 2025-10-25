@@ -125,7 +125,6 @@ void parallel_populate(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t*
     }
 
     // fork a child to compute
-    printf("Forking from %lu to %lu (total %lu)\n", last_v, end_v, partial);
     pid_t child = fork();
     if (child == 0) {
       worker_body(pa, d, foes, problems, last_v, end_v, j);
