@@ -5,18 +5,33 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-typedef unsigned char bitset_t;
 
-bitset_t* make_bitset(size_t num_bits);
+#if __has_include(<roaring/roaring64.h>)
+#  include <roaring/roaring64.h>
+#  define HAVE_CROARING 0
+#else
+#  define HAVE_CROARING 0
+#endif
+
+#ifdef HAVE_CROARING
+typedef roaring64_bitmap_t bitlut_t;
+#else
+typedef unsigned char bitlut_t;
+#endif
+
+bitlut_t* make_bitset(size_t num_bits);
 
 // Function to set a bit in a bit array
-void bit_set(unsigned char *bit_array, long long bit_index);
+void bit_set(bitlut_t *bit_array, long long bit_index);
 
 // Function to clear a bit in a bit array
-void bit_clear(unsigned char *bit_array, long long bit_index);
+void bit_clear(bitlut_t *bit_array, long long bit_index);
 
 // Function to check a bit in a bit array
-bool bit_get(unsigned char *bit_array, long long bit_index);
+bool bit_get(bitlut_t *bit_array, long long bit_index);
+
+void bitmap_free(bitlut_t *bit_array);
+
 
 long long nCr(long long n, long long k);
 

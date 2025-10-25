@@ -4,6 +4,8 @@
 #include "chebyshev.h"
 #include "lib.h"
 
+void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, size_t score);
+
 // Index for pair (u,v) with u != v; we normalize so u < v
 static inline size_t sym_idx(size_t u, size_t v) {
   if (v>u){
@@ -27,12 +29,17 @@ bool pa_separated(const pa_t* pa, const cell_t d) {
 
 void hill_climb(const pa_t* pa, const cell_t d) {
   // allocate these huge things up front
-  bitset_t* foes = make_bitset((long) pa->m * (pa->m-1) / 2);
-  bitset_t* problems = make_bitset((long) pa->m * (pa->m-1) / 2);
-  cell_t *pot = (cell_t*) malloc(sizeof(cell_t) * pa->n);
+  size_t lut_size = (long) pa->m * (pa->m-1) / 2;
+  bitlut_t* foes = make_bitset(lut_size);
+  bitlut_t* problems = make_bitset(lut_size);
 
   // make foes
+  size_t foe_count = 0;
   for(int v = 0; v < pa->m; v++) {
+    if (v % 10000 == 0) {
+      printf("v %d of %d - %lu of %lu\n", v, pa->m, foe_count, sym_idx(0,v));
+    }
+    
     for (int u = 0; u < v; u++) {
       bool sep = false;
       for (int c = 0; c < pa->n; c++) {
@@ -42,6 +49,7 @@ void hill_climb(const pa_t* pa, const cell_t d) {
         }
       }
       if (!sep) {
+        foe_count++;
         bit_set(foes, sym_idx(u,v));
       }
     }
@@ -49,6 +57,7 @@ void hill_climb(const pa_t* pa, const cell_t d) {
 
   // make problems
   size_t score = 0;
+  printf("problems: %lu, foes: %lu, lut: %lu\n", score/2, foe_count, lut_size);
   for(int v = 0; v < pa->m; v++) {
     for (int u = 0; u < v; u++) {
       if (u != v && bit_get(foes, sym_idx(u, v)) && !pair_separated(pa,d,u,v)) {
@@ -57,6 +66,15 @@ void hill_climb(const pa_t* pa, const cell_t d) {
       }
     }
   }
+
+  printf("problems: %lu, foes: %lu, lut: %lu\n", score/2, foe_count, lut_size);
+
+  do_climb(pa, d, foes, problems, score);
+}
+
+void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, size_t score) {
+  // our next row
+  cell_t *pot = (cell_t*) malloc(sizeof(cell_t) * pa->n);
 
   // the indices within the row of those symbols in the chosen group
   cell_t sanity[1024];
@@ -225,8 +243,8 @@ void hill_climb(const pa_t* pa, const cell_t d) {
     }
   }
 
-  free(foes);
-  free(problems);
+  bitmap_free(foes);
+  bitmap_free(problems);
   free(pot);
   free(added);
   free(removed);
