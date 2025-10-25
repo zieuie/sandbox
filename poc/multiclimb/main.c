@@ -13,7 +13,7 @@ void resume_computation(pa_t* pa, int n, int d) {
   // make a PA from scratch
   if (2*d >= n) {
     random_pa(pa, n, d);
-    printf("Generated a PA\n");
+    printf("Generated a PA (%d * %d)\n", pa->n, pa->m);
     return;
   }
   
@@ -21,15 +21,15 @@ void resume_computation(pa_t* pa, int n, int d) {
   // try to weave a smaller PA
   sprintf(filename, "pa_%d_choose_%d_unfinished.txt", n, d);
   if (!load_pa(filename, pa)) {
-    printf("Loaded %s and continuing\n", filename);
+    printf("Loaded %s (%d * %d) and continuing\n", filename, pa->n, pa->m);
     return;
   }
 
   // weave PA
   sprintf(filename, "pa_%d_choose_%d_verified.txt", n-d, d);
   if (!load_pa(filename, pa)) {
-    printf("Loaded %s and expanding\n", filename);
     weave_pa(pa, d);
+    printf("Loaded %s and expanded (%d * %d)\n", filename, pa->n, pa->m);
     return;
   }
 
