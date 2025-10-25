@@ -1,6 +1,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/select.h> // For select() and fd_set macros
+#include <sys/wait.h>
+#include <fcntl.h>
 
 #include "chebyshev.h"
 #include "lib.h"
@@ -26,7 +28,6 @@ void hill_climb(const pa_t* pa, const cell_t d) {
   bitlut_t* foes = make_bitset(lut_size);
   bitlut_t* problems = make_bitset(lut_size);
 
-  // populate(pa, d, foes, problems);
   parallel_populate(pa, d, foes, problems, lut_size, 16);
 
   ssize_t foe_count = bit_sum(foes, lut_size);
@@ -51,22 +52,18 @@ typedef struct {
 } disturb_t;
 
 void pot_finder(const pa_t* pa, const cell_t d, const bitlut_t* foes, const bitlut_t* problems, const int outfd, const ssize_t* lamport) {
+
   disturb_t ret;
   cell_t* pot = ret.row;
 
   cell_t group[128];
   ssize_t len_group = 0;
-  
+
   cell_t num_groups = (pa->n/d) + !!(pa->n%d);
   cell_t g;
-  ssize_t timestamp = *lamport;
+  ssize_t timestamp;
 
   for(;;) {
-    // while(timestamp != 0 && *lamport <= timestamp) {
-    //   printf("/");
-    //   sleep(1);
-    // }
-
     for (ssize_t tries = 0; ; tries++) {
       timestamp = *lamport;
       // pick a random row to improve
@@ -128,9 +125,12 @@ void pot_finder(const pa_t* pa, const cell_t d, const bitlut_t* foes, const bitl
       }
     } // end of choosing a disturbance
 
+    if (timestamp < 0) {
+      printf("It is a good day to die!\n");
+      break;
+    }
+
     ret.lamport = timestamp;
-    // printf("(%li) ", ret.lamport);
-    // fflush(stdout);
     if (write(outfd, &ret, sizeof(ret)) < (ssize_t) sizeof(ret)) {
       printf("Failed to write!\n");
     }
@@ -140,30 +140,38 @@ void pot_finder(const pa_t* pa, const cell_t d, const bitlut_t* foes, const bitl
 void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, ssize_t score) {
   // begin lamport's clock
   ssize_t *lamport = (ssize_t*) zmalloc(sizeof(ssize_t));
-  *lamport = 0;
 
-  // make a pipe
-  int pipefd[2];
-  if (pipe(pipefd) == -1) {
-      // Handle error
-      printf("Failed to make pipe. Dying.\n");
-      exit(1);
-  }
-  
-  // fork a child
-  pid_t pid = fork();
-  if(pid == 0) {
-    // you are... not the father!
-    close(pipefd[0]);
-    pot_finder(pa, d, foes, problems, pipefd[1], lamport);
-    close(pipefd[1]);
-    exit(0);
+  int num_forks = 2;
+
+  // make pipes
+  int max_fd = -1;
+  int pipes[1024];
+  for (int x = 0; x < num_forks; x++) {
+    if (pipe(&pipes[2*x]) == -1) {
+        printf("Failed to make pipe. Dying.\n");
+        exit(1);
+    }
+    if (pipes[2*x] > max_fd) {
+      max_fd = pipes[2*x];
+    }
   }
 
-  // two wrongs won't make a write
-  close(pipefd[1]);
+  // fork children
+  pid_t pids[1024];
+  for (int x = 0; x < num_forks; x++) {
+    pid_t pid = fork();
+    if(pid == 0) {
+      // you are... not the father!
+      close(pipes[2*x]);
+      pot_finder(pa, d, foes, problems, pipes[2*x+1], lamport);
+      close(pipes[2*x+1]);
+      exit(0);
+    }
+    close(pipes[2*x+1]);
+    pids[x] = pid;
+  }
 
-  int max_fd = pipefd[0]; // Or the largest file descriptor you're monitoring
+
   struct timeval timeout;
   fd_set readfds;
 
@@ -175,7 +183,6 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
 
   for(ssize_t it_count = 0;; it_count++) {
     *lamport = it_count;
-
     if (score < best_score) {
       best_score = score;
     }
@@ -193,38 +200,50 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
     // wait for a child to respond
     disturb_t change;
     for(;;) {
-      FD_ZERO(&readfds);
-      FD_SET(pipefd[0], &readfds);
-      timeout.tv_sec = 5; // 5-second timeout
+      // set up the select
+      timeout.tv_sec = 1;
       timeout.tv_usec = 0;
+      FD_ZERO(&readfds);
+      for (int x = 0; x < num_forks; x++) {
+        FD_SET(pipes[2*x], &readfds);
+      }
 
+      // do the select
       if (select(max_fd + 1, &readfds, NULL, NULL, &timeout) < 0) {
         printf("Failed to select!\n");
         continue;
       }
-      // pull the data
-      if (FD_ISSET(pipefd[0], &readfds)) {
-        // Data is available to read from pipefd[0]
-        // You can now safely call read() on pipefd[0] without blocking
-        if (read(pipefd[0], &change, sizeof(disturb_t)) < (ssize_t) sizeof(disturb_t)) {
-          printf("Failed to read!\n");
-          continue;
-        } else if (change.lamport < it_count) {
-          printf("*");
-          // printf("Ignoring stale change from iteration %li of %li\n", change.lamport, it_count);
-          continue;
-        } else {
-          // printf(".");
-          // printf("[%li] ", change.lamport);
-          // fflush(stdout);
+
+      // find the chosen one
+      int chosen = -1;
+      for (int x = 0; x < num_forks; x++) {
+        if (FD_ISSET(pipes[2*x], &readfds)) {
+          chosen = x;
           break;
         }
+      }
+
+      // no chosen one
+      if (chosen < 0) {
+        printf("No pipes were ready\n");
+        continue;
+      }
+
+      // pull the data
+      if (read(pipes[2*chosen], &change, sizeof(disturb_t)) < (ssize_t) sizeof(disturb_t)) {
+        printf("Failed to read chosen %d!\n", chosen);
+        continue;
+      } else if (change.lamport < it_count) {
+        // printf("*");
+        // printf("Ignoring stale change from iteration %li of %li\n", change.lamport, it_count);
+        continue;
       } else {
-        printf("FD not set\n");
-        // exit(1);
+        // printf(".");
+        // printf("[%li] ", change.lamport);
+        // fflush(stdout);
+        break;
       }
     }
-
 
     pa_row_copy_in(pa, change.row, change.row_idx);
     score -= change.num_added - change.num_removed;
@@ -238,5 +257,18 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
     }
   }
 
-  close(pipefd[0]);
+  *lamport = -1;
+
+  int status;
+  for (int64_t j = 0; j < num_forks; j++) {
+    if (waitpid(pids[j], &status, 0) < 0) {
+      printf("Warning: waitpid %ld failed on pid %u\n", j, pids[j]);
+    } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      printf("Warning: waitpid %ld failed on pid %u with status %d\n", j, pids[j], status);
+    }
+  }
+
+  for (int x = 0; x < num_forks; x++) {
+    close(pipes[2*x]);
+  }
 }
