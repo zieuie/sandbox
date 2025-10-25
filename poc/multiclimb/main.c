@@ -34,6 +34,7 @@ void resume_computation(pa_t* pa, int n, int d) {
   }
 
   printf("Failed to find an appropriate file.\n");
+  exit(1);
 }
 
 int main(int argc, char* argv[]) {
