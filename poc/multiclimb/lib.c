@@ -10,33 +10,33 @@
 #include <stddef.h>
 
 
-typedef struct { uint8_t *p; size_t off, len, ps; } task_t;
+typedef struct { int8_t *p; ssize_t off, len, ps; } task_t;
 
 static void *touch_range(void *arg) {
     task_t *t = (task_t*)arg;
-    for (size_t i = 0; i < t->len; i += t->ps) t->p[t->off + i] = 0;
+    for (ssize_t i = 0; i < t->len; i += t->ps) t->p[t->off + i] = 0;
     if (t->len) t->p[t->off + t->len - 1] = 0;
     return NULL;
 }
 
-void prefault_parallel(void *p, size_t bytes, int nthr) {
-    size_t ps = (size_t)sysconf(_SC_PAGESIZE);
+void prefault_parallel(void *p, ssize_t bytes, int nthr) {
+    ssize_t ps = (ssize_t)sysconf(_SC_PAGESIZE);
     pthread_t th[nthr];
     task_t    td[nthr];
-    size_t chunk = (bytes + nthr - 1) / nthr;
+    ssize_t chunk = (bytes + nthr - 1) / nthr;
     for (int t = 0; t < nthr; ++t) {
-        size_t off = (size_t)t * chunk;
-        size_t len = off >= bytes ? 0 : (bytes - off < chunk ? bytes - off : chunk);
-        td[t] = (task_t){ .p = (uint8_t*)p, .off = off, .len = len, .ps = ps };
+        ssize_t off = (ssize_t)t * chunk;
+        ssize_t len = off >= bytes ? 0 : (bytes - off < chunk ? bytes - off : chunk);
+        td[t] = (task_t){ .p = (int8_t*)p, .off = off, .len = len, .ps = ps };
         pthread_create(&th[t], NULL, touch_range, &td[t]);
     }
     for (int t = 0; t < nthr; ++t) pthread_join(th[t], NULL);
 }
 
-void prefault(void *p, size_t bytes) {
-    size_t ps = (size_t)sysconf(_SC_PAGESIZE);
-    volatile uint8_t *q = (uint8_t*)p;
-    for (size_t i = 0; i < bytes; i += ps) q[i] = 0;  // write = faults page in
+void prefault(void *p, ssize_t bytes) {
+    ssize_t ps = (ssize_t)sysconf(_SC_PAGESIZE);
+    volatile int8_t *q = (int8_t*)p;
+    for (ssize_t i = 0; i < bytes; i += ps) q[i] = 0;  // write = faults page in
     if (bytes) q[bytes-1] = 0;                        // touch last page
 }
 
@@ -65,7 +65,7 @@ int next_combination(int *comb, int n, int k) {
     return 1;
 }
 
-void* zmalloc(size_t bytes) {
+void* zmalloc(ssize_t bytes) {
     void* buf = mmap(
         NULL,                 // let kernel choose the address
         bytes,                // length of the mapping in bytes
@@ -83,14 +83,14 @@ void* zmalloc(size_t bytes) {
     return buf;
 }
 
-void* zcalloc(size_t num_elements, size_t num_bytes) {
+void* zcalloc(ssize_t num_elements, ssize_t num_bytes) {
     return zmalloc(num_elements * num_bytes);
 }
 
 #if HAVE_CROARING == 1
 
 // Function to get the size of a bit array
-bitlut_t* make_bitset(size_t num_bits) {
+bitlut_t* make_bitset(ssize_t num_bits) {
     (void) num_bits;
     return roaring64_bitmap_create();
 }
@@ -110,7 +110,7 @@ bool bit_get(const bitlut_t *bit_array, long long bit_index) {
     return roaring64_bitmap_contains(bit_array, bit_index);
 }
 
-size_t bit_sum(const bitlut_t *buf, size_t nbits){
+ssize_t bit_sum(const bitlut_t *buf, ssize_t nbits){
     (void) nbits;
     return roaring64_bitmap_get_cardinality(buf);
 }
@@ -122,8 +122,8 @@ void bitmap_free(bitlut_t *bit_array) {
 #else
 
 // Function to get the size of a bit array
-bitlut_t* make_bitset(size_t num_bits) {
-    size_t bytes = 1 + (num_bits >> 3);
+bitlut_t* make_bitset(ssize_t num_bits) {
+    ssize_t bytes = 1 + (num_bits >> 3);
     return (bitlut_t*) zmalloc(bytes);
 }
 
@@ -148,9 +148,9 @@ bool bit_get(const bitlut_t *bit_array, long long bit_index) {
     return (bit_array[byte_index] >> bit_offset) & 1;
 }
 
-// size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
-//     size_t nbytes = 1 + (num_bits >> 3);
-//     size_t sum = 0;
+// ssize_t bit_sum(const bitlut_t *buf, ssize_t num_bits) {
+//     ssize_t nbytes = 1 + (num_bits >> 3);
+//     ssize_t sum = 0;
 //     while(nbytes-->0){
 //         bitlut_t c = *buf;
 //         while (c) {
@@ -162,10 +162,10 @@ bool bit_get(const bitlut_t *bit_array, long long bit_index) {
 //     return sum;
 // }
 
-size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
-    size_t nbytes = 1 + (num_bits >> 3);
-    size_t sum = 0;
-    size_t i = 0;
+ssize_t bit_sum(const bitlut_t *buf, ssize_t num_bits) {
+    ssize_t nbytes = 1 + (num_bits >> 3);
+    ssize_t sum = 0;
+    ssize_t i = 0;
     __m256i total = _mm256_setzero_si256();
 
     // Process 32 bytes (256 bits) per loop
@@ -176,7 +176,7 @@ size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
     }
     
     // Extract partial sums
-    uint64_t tmp[4];
+    int64_t tmp[4];
     _mm256_storeu_si256((__m256i*)tmp, total);
     sum = tmp[0] + tmp[1] + tmp[2] + tmp[3];
 
@@ -186,7 +186,7 @@ size_t bit_sum(const bitlut_t *buf, size_t num_bits) {
 }
 
 void bitmap_free(bitlut_t *bit_array, long long num_bits) {
-    size_t nbytes = 1 + (num_bits >> 3);
+    ssize_t nbytes = 1 + (num_bits >> 3);
     munmap(bit_array, nbytes);
 }
 

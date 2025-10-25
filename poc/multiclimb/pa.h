@@ -14,8 +14,8 @@ typedef int8_t cell_t;
 
 // The permutation array and its data
 typedef struct {
-  int n;
-  int m;
+  int16_t n;
+  int32_t m;
   cell_t* cells;
 } pa_t;
 
@@ -38,7 +38,7 @@ inline void pa_row_copy_in(const pa_t* pa, cell_t* src, const int row_idx) {
 void print_pa(const pa_t* pa);
 int load_row(const char* line, const int line_limit, cell_t* cell_buffer, const int buffer_limit);
 int load_pa(const char* filename, pa_t * pa);
-void cur_time(char* buffer, size_t bufsize);
+void cur_time(char* buffer, ssize_t bufsize);
 void dump_pa(const pa_t* pa, const char* filename);
 void weave_pa(pa_t* pa, cell_t d);
 void random_pa(pa_t* pa, cell_t n, cell_t d);

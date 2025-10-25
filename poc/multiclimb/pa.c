@@ -217,7 +217,7 @@ void random_pa(pa_t* pa, cell_t n, cell_t d) {
   pa->cells = cells;
 }
 
-void cur_time(char* buffer, size_t bufsize) {
+void cur_time(char* buffer, ssize_t bufsize) {
   time_t rawtime;
   struct tm *info;
 

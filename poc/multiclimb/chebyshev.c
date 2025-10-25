@@ -1,15 +1,16 @@
 #include <time.h>
 #include <unistd.h>
+#include <sys/select.h> // For select() and fd_set macros
 
 #include "chebyshev.h"
 #include "lib.h"
 #include "populate.h"
 
-void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, size_t score);
+void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, ssize_t score);
 
 bool pa_separated(const pa_t* pa, const cell_t d) {
-  for (int u = 0; u < pa->m; u++) {
-    for (int v = 0; v < u; v++) {
+  for (ssize_t u = 0; u < pa->m; u++) {
+    for (ssize_t v = 0; v < u; v++) {
       if (!pair_separated(pa, d, u, v)) {
         return false;
       }
@@ -21,15 +22,15 @@ bool pa_separated(const pa_t* pa, const cell_t d) {
 
 void hill_climb(const pa_t* pa, const cell_t d) {
   // allocate these huge things up front
-  size_t lut_size = (long) pa->m * (pa->m-1) / 2;
+  ssize_t lut_size = (long) pa->m * (pa->m-1) / 2;
   bitlut_t* foes = make_bitset(lut_size);
   bitlut_t* problems = make_bitset(lut_size);
 
   // populate(pa, d, foes, problems);
   parallel_populate(pa, d, foes, problems, lut_size, 16);
 
-  size_t foe_count = bit_sum(foes, lut_size);
-  size_t score = bit_sum(problems, lut_size);
+  ssize_t foe_count = bit_sum(foes, lut_size);
+  ssize_t score = bit_sum(problems, lut_size);
   printf("problems: %lu, foes: %lu, lut: %lu\n", score, foe_count, lut_size);
 
   do_climb(pa, d, foes, problems, score);
@@ -38,83 +39,67 @@ void hill_climb(const pa_t* pa, const cell_t d) {
   bitmap_free(problems, lut_size);
 }
 
-void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, size_t score) {
-  // our next row
-  cell_t pot[128];
+typedef struct {
+  cell_t row[1024];
+  int32_t row_idx;
+  int32_t added[1024];
+  int32_t num_added;
+  int32_t removed[1024];
+  int32_t num_removed;
+  ssize_t lamport;
+  bool    overflow;
+} disturb_t;
 
-  // the indices within the row of those symbols in the chosen group
-  cell_t sanity[128];
+void pot_finder(const pa_t* pa, const cell_t d, const bitlut_t* foes, const bitlut_t* problems, const int outfd, const ssize_t* lamport) {
+  disturb_t ret;
+  cell_t* pot = ret.row;
 
-  // the indices within the row of those symbols in the chosen group
-  cell_t digit_indices[128];
-  int len_group = 0;
-
-  // a list of those rows which are separated from pot but not from the original row
-  long long *added = (long long*) malloc(sizeof(long long) * pa->m);
-  int num_added = 0;
-
-  // a list of those rows which are separated from the original row but not from pot
-  long long *removed = (long long*) malloc(sizeof(long long) * pa->m);
-  int num_removed = 0;
-
+  cell_t group[128];
+  ssize_t len_group = 0;
+  
   cell_t num_groups = (pa->n/d) + !!(pa->n%d);
-  size_t best_score = score;
-  size_t last_score = score;
-  size_t last_tweak = 0;
-  size_t coverage = 0;
-  char time_str[80];
+  cell_t g;
+  ssize_t timestamp = *lamport;
 
-  for(size_t it_count = 0;; it_count++) {
-    if (score < best_score) {
-      best_score = score;
-    }
+  for(;;) {
+    // while(timestamp != 0 && *lamport <= timestamp) {
+    //   printf("/");
+    //   sleep(1);
+    // }
 
-    if (it_count % 100000 == 0 || (score < last_score && score < 100)) {
-      cur_time(time_str, 80);
-      printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Coverage: %li of %d Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, coverage, pa->m, last_tweak);
-      last_score = score;
-    }
-
-    if (score == 0) {
-      break;
-    }
-
-    // pick a disturbance
-    int r;
-    cell_t group;
-
-    for (size_t tries = 0; ; tries++) {
+    for (ssize_t tries = 0; ; tries++) {
+      timestamp = *lamport;
       // pick a random row to improve
-      r = (int) (rand() % pa->m);
+      ret.row_idx = (int) (rand() % pa->m);
 
       // pick a random group of digits to terrorize
-      group = (cell_t) (rand() % num_groups);
+      g = (cell_t) (rand() % num_groups);
       len_group = 0;
       for (int c = 0; c < pa->n; c++) {
-        if (pa_get(pa,r,c) / d == group) {
-          digit_indices[len_group++] = c;
+        if (pa_get(pa,ret.row_idx,c) / d == g) {
+          group[len_group++] = c;
         }
       }
 
       // shuffle dst - TODO, make sure we don't have the identity
-      pa_row_copy_out(pa, pot, r);
-      for (int right = 1; right < len_group; right++) {
-        int left = (int) (rand() % (right+1));
-        pot[digit_indices[right]] = pot[digit_indices[left]];
-        pot[digit_indices[left ]] = pa_get(pa, r, digit_indices[right]);
+      pa_row_copy_out(pa, ret.row, ret.row_idx);
+      for (ssize_t right = 1; right < len_group; right++) {
+        ssize_t left = (ssize_t) (rand() % (right+1));
+        pot[group[right]] = pot[group[left]];
+        pot[group[left ]] = pa_get(pa, ret.row_idx, group[right]);
       }
 
       // evaluate the permutation
-      num_added = 0;
-      num_removed = 0;
+      ret.num_added = 0;
+      ret.num_removed = 0;
 
-      for (int x = 0; x < pa->m; x++) {
-        if (x == r || !bit_get(foes, sym_idx(r, x))) {
+      for (ssize_t x = 0; x < pa->m; x++) {
+        if (x == ret.row_idx || !bit_get(foes, sym_idx(ret.row_idx, x))) {
           continue;
         }
 
         bool new_separation = false;
-        for (int c = 0; c < pa->n; c++) {
+        for (ssize_t c = 0; c < pa->n; c++) {
           if (abs(pa_get(pa, x, c) - pot[c]) >= d) {
             new_separation = true;
             break;
@@ -122,20 +107,20 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
         }
 
         if (new_separation) {
-          if (bit_get(problems, sym_idx(x, r))) {
+          if (bit_get(problems, sym_idx(x, ret.row_idx))) {
             // you were a problem, now you're not (because you're separated)
-            added[num_added++] = x;
+            ret.added[ret.num_added++] = x;
           }
-        } else if (!bit_get(problems, sym_idx(x, r))) {
+        } else if (!bit_get(problems, sym_idx(x, ret.row_idx))) {
           // you were not a problem, now you are (because you're not separated)
-          removed[num_removed++] = x;
+          ret.removed[ret.num_removed++] = x;
         }
       }
 
       // was it good enough?
-      if (num_added > num_removed) {
+      if (ret.num_added > ret.num_removed) {
         break;
-      } else if (num_added == num_removed && tries > 10) {
+      } else if (ret.num_added == ret.num_removed && tries > 10) {
         break;
       // } else if (tries > 10000000 && (num_removed - num_added < 2)) {
       //   printf("backtracking...\n");
@@ -143,72 +128,115 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
       }
     } // end of choosing a disturbance
 
-    for (int c = 0; c < pa->n; c++) {
-      sanity[c] = 0;
+    ret.lamport = timestamp;
+    // printf("(%li) ", ret.lamport);
+    // fflush(stdout);
+    if (write(outfd, &ret, sizeof(ret)) < (ssize_t) sizeof(ret)) {
+      printf("Failed to write!\n");
     }
-    bool sane = true;
-    for (int c = 0; c < pa->n; c++) {
-      if (sanity[pot[c]]) {
-        sane = false;
-      }
-      sanity[pot[c]] = 1;
+  }
+}
+
+void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, ssize_t score) {
+  // begin lamport's clock
+  ssize_t *lamport = (ssize_t*) zmalloc(sizeof(ssize_t));
+  *lamport = 0;
+
+  // make a pipe
+  int pipefd[2];
+  if (pipe(pipefd) == -1) {
+      // Handle error
+      printf("Failed to make pipe. Dying.\n");
+      exit(1);
+  }
+  
+  // fork a child
+  pid_t pid = fork();
+  if(pid == 0) {
+    // you are... not the father!
+    close(pipefd[0]);
+    pot_finder(pa, d, foes, problems, pipefd[1], lamport);
+    close(pipefd[1]);
+    exit(0);
+  }
+
+  // two wrongs won't make a write
+  close(pipefd[1]);
+
+  int max_fd = pipefd[0]; // Or the largest file descriptor you're monitoring
+  struct timeval timeout;
+  fd_set readfds;
+
+  // start making changes
+  ssize_t best_score = score;
+  ssize_t last_score = score;
+  ssize_t last_tweak = 0;
+  char time_str[80];
+
+  for(ssize_t it_count = 0;; it_count++) {
+    *lamport = it_count;
+
+    if (score < best_score) {
+      best_score = score;
     }
 
-    if (!sane) {
-      printf("NOT SANE!\n");
-    // }
+    if (it_count % 100000 == 0 || (score < last_score && score < 100)) {
+      cur_time(time_str, 80);
+      printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, last_tweak);
+      last_score = score;
+    }
 
-    // if (true) {
-      // display for debug
-      printf("---\n");
-      printf("Mutating row %d\n", r);
-      for (int c = 0; c < pa->n; c++) {
-        printf("%d ", pa_get(pa, r, c));
+    if (score == 0) {
+      break;
+    }
+
+    // wait for a child to respond
+    disturb_t change;
+    for(;;) {
+      FD_ZERO(&readfds);
+      FD_SET(pipefd[0], &readfds);
+      timeout.tv_sec = 5; // 5-second timeout
+      timeout.tv_usec = 0;
+
+      if (select(max_fd + 1, &readfds, NULL, NULL, &timeout) < 0) {
+        printf("Failed to select!\n");
+        continue;
       }
-      printf("\n");
-      for (int c = 0; c < pa->n; c++) {
-        printf("%d ", pot[c]);
-      }
-      printf("\n");
-      printf("\n");
-      printf("Added %d\n", num_added);
-      for (int u = 0; u < num_added; u++) {
-        for (int c =0 ; c < pa->n; c++) {
-          printf("%d ", pa_get(pa, added[u], c));
+      // pull the data
+      if (FD_ISSET(pipefd[0], &readfds)) {
+        // Data is available to read from pipefd[0]
+        // You can now safely call read() on pipefd[0] without blocking
+        if (read(pipefd[0], &change, sizeof(disturb_t)) < (ssize_t) sizeof(disturb_t)) {
+          printf("Failed to read!\n");
+          continue;
+        } else if (change.lamport < it_count) {
+          printf("*");
+          // printf("Ignoring stale change from iteration %li of %li\n", change.lamport, it_count);
+          continue;
+        } else {
+          // printf(".");
+          // printf("[%li] ", change.lamport);
+          // fflush(stdout);
+          break;
         }
-        printf("\n");
+      } else {
+        printf("FD not set\n");
+        // exit(1);
       }
-      printf("\n");
-      printf("Removed %d\n", num_removed);
-      for (int u = 0; u < num_removed; u++) {
-        for (int c = 0; c < pa->n; c++) {
-
-          printf("%d ", pa_get(pa, removed[u], c));
-        }
-        printf("\n");
-      }
-
-      getchar();
     }
 
-    // apply the change
-    pa_row_copy_in(pa, pot, r);
-    score -= num_added - num_removed;
-    // printf("added: %d, removed: %d\n", num_added, num_removed);
-    for (int x = 0; x < num_added; x++) {
-      // printf("Clear added[%d] = %lli (r = %d)\n", x, added[x], r);
-      // fflush(stdout);
-      bit_clear(problems, sym_idx(added[x], r));
-      bit_clear(problems, sym_idx(r, added[x]));
+
+    pa_row_copy_in(pa, change.row, change.row_idx);
+    score -= change.num_added - change.num_removed;
+    for (ssize_t x = 0; x < change.num_added; x++) {
+      bit_clear(problems, sym_idx(change.added[x], change.row_idx));
+      bit_clear(problems, sym_idx(change.row_idx, change.added[x]));
     }
-    for (int x = 0; x < num_removed; x++) {
-      // printf("Clear removed[%d] = %lli (r = %d)\n", x, removed[x], r);
-      // fflush(stdout);
-      bit_set(problems, sym_idx(removed[x], r));
-      bit_set(problems, sym_idx(r, removed[x]));
+    for (ssize_t x = 0; x < change.num_removed; x++) {
+      bit_set(problems, sym_idx(change.removed[x], change.row_idx));
+      bit_set(problems, sym_idx(change.row_idx, change.removed[x]));
     }
   }
 
-  free(added);
-  free(removed);
+  close(pipefd[0]);
 }

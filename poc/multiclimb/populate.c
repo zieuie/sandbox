@@ -3,7 +3,7 @@
 
 
 // Index for pair (u,v) with u != v; we normalize so u < v
-size_t sym_idx(size_t u, size_t v) {
+ssize_t sym_idx(ssize_t u, ssize_t v) {
   if (v>u){
     return v * (v - 1) / 2 + u;
   } else {
@@ -13,11 +13,11 @@ size_t sym_idx(size_t u, size_t v) {
 
 
 // end_v must be greater than 5
-void* worker_body(const pa_t* pa, const int d, bitlut_t *foes, bitlut_t *problems, const uint64_t start_v, const uint64_t end_v, const int thread_idx) {
+void* worker_body(const pa_t* pa, const int d, bitlut_t *foes, bitlut_t *problems, const int64_t start_v, const int64_t end_v, const int thread_idx) {
   {
     // if we're not the first chunk, skip what he bit off
-    size_t u = 0;
-    size_t v = start_v;
+    ssize_t u = 0;
+    ssize_t v = start_v;
     if (thread_idx > 0) {
       while(sym_idx(u,v) % 8 != 0) {
         u++;
@@ -48,8 +48,8 @@ void* worker_body(const pa_t* pa, const int d, bitlut_t *foes, bitlut_t *problem
   }
 
   // middle bytes
-  for(size_t v = start_v+1; v < end_v; v++) {
-    for (size_t u = 0; u < v; u++) {
+  for(ssize_t v = start_v+1; v < end_v; v++) {
+    for (ssize_t u = 0; u < v; u++) {
       bool foe = false;
       bool sep = false;
       for (int c = 0; c < pa->n; c++) {
@@ -72,9 +72,9 @@ void* worker_body(const pa_t* pa, const int d, bitlut_t *foes, bitlut_t *problem
   }
 
   // finish the byte, into the next row, if there is a next row
-  if (end_v < (size_t) pa->m) {
-    size_t v = end_v;
-    for (size_t u = 0; u < v; u++) {
+  if (end_v < (ssize_t) pa->m) {
+    ssize_t v = end_v;
+    for (ssize_t u = 0; u < v; u++) {
       // bail and don't touch the next byte
       if (sym_idx(u,v) % 8 == 0) {
         break;
@@ -103,22 +103,22 @@ void* worker_body(const pa_t* pa, const int d, bitlut_t *foes, bitlut_t *problem
   return NULL;
 }
 
-void parallel_populate(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, const size_t lut_size, const size_t K) {
+void parallel_populate(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, const ssize_t lut_size, const ssize_t K) {
   pid_t pids[1024];
 
   // spawn
-  uint64_t j = 0;
-  size_t partial = 0;
-  size_t last_v = 0;
-  for (size_t v = 0; v < (size_t) pa->m; v++) {
+  int64_t j = 0;
+  ssize_t partial = 0;
+  ssize_t last_v = 0;
+  for (ssize_t v = 0; v < (ssize_t) pa->m; v++) {
     // get the partial sum
     partial += v;
-    if (partial < lut_size/K && v != (size_t) pa->m - 1) {
+    if (partial < lut_size/K && v != (ssize_t) pa->m - 1) {
       continue;
     }
 
     // get the new end
-    size_t end_v = v+1;
+    ssize_t end_v = v+1;
     if (j >= K-1) {
       end_v = pa->m;
       partial = (v * (v+1) / 2) - (last_v * (last_v-1) / 2);
@@ -141,7 +141,7 @@ void parallel_populate(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t*
 
   // join
   int status;
-  for (uint64_t j = 0; j < K; j++) {
+  for (int64_t j = 0; j < K; j++) {
     if (waitpid(pids[j], &status, 0) < 0) {
       printf("Warning: waitpid %ld failed on pid %u\n", j, pids[j]);
     } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
@@ -151,8 +151,8 @@ void parallel_populate(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t*
 }
 
 void populate(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems) {
-  for(int v = 0; v < pa->m; v++) {
-    for (int u = 0; u < v; u++) {
+  for(ssize_t v = 0; v < pa->m; v++) {
+    for (ssize_t u = 0; u < v; u++) {
       bool foe = false;
       bool sep = false;
       for (int c = 0; c < pa->n; c++) {
