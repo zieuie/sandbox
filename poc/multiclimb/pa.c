@@ -35,6 +35,8 @@ int load_row(const char* line, const int line_limit, cell_t* cell_buffer, const 
       if (ret > buffer_limit) {
         break;
       }
+    } else if (c == 0) {
+      break;
     }
   }
 
@@ -120,6 +122,8 @@ void dump_pa(const pa_t* pa, const char* filename) {
     }
     fprintf(fp, "\n");
   }
+
+  fclose(fp);
 }
 
 void weave_pa(pa_t* pa, cell_t d) {
