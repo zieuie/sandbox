@@ -28,7 +28,7 @@ void hill_climb(const pa_t* pa, const cell_t d, int num_forks) {
   bitlut_t* foes = make_bitset(lut_size);
   bitlut_t* problems = make_bitset(lut_size);
 
-  parallel_populate(pa, d, foes, problems, lut_size, 16);
+  parallel_populate(pa, d, foes, problems, lut_size, num_forks);
 
   ssize_t foe_count = bit_sum(foes, lut_size);
   ssize_t score = bit_sum(problems, lut_size);
