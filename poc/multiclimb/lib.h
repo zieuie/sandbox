@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <immintrin.h>
 
 
 #if __has_include(<roaring/roaring64.h>)

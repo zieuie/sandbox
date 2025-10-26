@@ -205,19 +205,20 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
 
   for(ssize_t it_count = 0;; it_count++) {
 
-    if (time(NULL) - last_write_time > 2 && last_write_score > score) {
+    *lamport = it_count;
+    if (score < best_score) {
+      best_score = score;
+    }
+
+    bool should_backup = time(NULL) - last_write_time > 2 && last_write_score > score;
+    if (should_backup) {
       printf("Periodic backup to %s\n", outfile);
       dump_pa(pa, outfile);
       time(&last_write_time);
       last_write_score = score;
     }
 
-    *lamport = it_count;
-    if (score < best_score) {
-      best_score = score;
-    }
-
-    if (it_count % 100000 == 0 || (score < last_score && score < 100)) {
+    if (should_backup || it_count % 100000 == 0 || (score < last_score && score < 100)) {
       cur_time(time_str, 80);
       printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li\n", time_str, pa->n, d, it_count, score, best_score);
       last_score = score;
