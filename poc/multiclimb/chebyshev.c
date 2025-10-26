@@ -196,10 +196,22 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
   // start making changes
   ssize_t best_score = score;
   ssize_t last_score = score;
-  ssize_t last_tweak = 0;
+  ssize_t last_write_score = score;
+  time_t last_write_time = time(NULL);
+  char outfile[1024];
+  sprintf(outfile, "pa_%d_choose_%d_backup.txt", pa->n, d);
+
   char time_str[80];
 
   for(ssize_t it_count = 0;; it_count++) {
+
+    if (time(NULL) - last_write_time > 2 && last_write_score > score) {
+      printf("Periodic backup to %s\n", outfile);
+      dump_pa(pa, outfile);
+      time(&last_write_time);
+      last_write_score = score;
+    }
+
     *lamport = it_count;
     if (score < best_score) {
       best_score = score;
@@ -207,7 +219,7 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
 
     if (it_count % 100000 == 0 || (score < last_score && score < 100)) {
       cur_time(time_str, 80);
-      printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, last_tweak);
+      printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li\n", time_str, pa->n, d, it_count, score, best_score);
       last_score = score;
 
       // for(int x = 0; x < num_forks; x++) {
