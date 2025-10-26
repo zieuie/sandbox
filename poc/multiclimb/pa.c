@@ -217,26 +217,27 @@ void random_pa(pa_t* pa, cell_t n, cell_t d) {
   pa->cells = cells;
 }
 
-void cur_time(char* buffer, ssize_t bufsize) {
+time_t cur_time(char* buffer, ssize_t bufsize) {
   time_t rawtime;
   struct tm *info;
 
   // Get the current raw time
   if (time(&rawtime) == (time_t)-1) {
       fprintf(stderr, "Error: Could not get raw time.\n");
-      return;
+      return -1;
   }
 
   // Convert raw time to local time structure
   info = localtime(&rawtime);
   if (info == NULL) {
       fprintf(stderr, "Error: Could not convert to local time.\n");
-      return;
+      return -1;
   }
 
   // Format the time using strftime
   // Example format: "YYYY-MM-DD HH:MM:SS"
   strftime(buffer, bufsize, "%Y-%m-%d %H:%M:%S", info);
+  return rawtime;
 }
 
 void free_pa(pa_t *pa) {
