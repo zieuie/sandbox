@@ -313,6 +313,9 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
 
   *lamport = -1;
 
+  printf("Periodic backup to %s\n", outfile);
+  dump_pa(pa, outfile);
+
   int status;
   for (int64_t j = 0; j < num_forks; j++) {
     if (waitpid(pids[j], &status, 0) < 0) {
