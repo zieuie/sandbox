@@ -61,79 +61,87 @@ void pot_finder(const pa_t* pa, const cell_t d, const bitlut_t* foes, const bitl
 
   cell_t num_groups = (pa->n/d) + !!(pa->n%d);
   cell_t g;
-  ssize_t timestamp;
+  ssize_t tries = 0;
+  ssize_t last_sent = -1;
+  (void) last_sent;
 
   for(;;) {
-    for (ssize_t tries = 0; ; tries++) {
-      timestamp = *lamport;
-      // pick a random row to improve
-      ret.row_idx = (int) (rand() % pa->m);
-
-      // pick a random group of digits to terrorize
-      g = (cell_t) (rand() % num_groups);
-      len_group = 0;
-      for (int c = 0; c < pa->n; c++) {
-        if (pa_get(pa,ret.row_idx,c) / d == g) {
-          group[len_group++] = c;
-        }
-      }
-
-      // shuffle dst - TODO, make sure we don't have the identity
-      pa_row_copy_out(pa, ret.row, ret.row_idx);
-      for (ssize_t right = 1; right < len_group; right++) {
-        ssize_t left = (ssize_t) (rand() % (right+1));
-        pot[group[right]] = pot[group[left]];
-        pot[group[left ]] = pa_get(pa, ret.row_idx, group[right]);
-      }
-
-      // evaluate the permutation
-      ret.num_added = 0;
-      ret.num_removed = 0;
-
-      for (ssize_t x = 0; x < pa->m; x++) {
-        if (x == ret.row_idx || !bit_get(foes, sym_idx(ret.row_idx, x))) {
-          continue;
-        }
-
-        bool new_separation = false;
-        for (ssize_t c = 0; c < pa->n; c++) {
-          if (abs(pa_get(pa, x, c) - pot[c]) >= d) {
-            new_separation = true;
-            break;
-          }
-        }
-
-        if (new_separation) {
-          if (bit_get(problems, sym_idx(x, ret.row_idx))) {
-            // you were a problem, now you're not (because you're separated)
-            ret.added[ret.num_added++] = x;
-          }
-        } else if (!bit_get(problems, sym_idx(x, ret.row_idx))) {
-          // you were not a problem, now you are (because you're not separated)
-          ret.removed[ret.num_removed++] = x;
-        }
-      }
-
-      // was it good enough?
-      if (ret.num_added > ret.num_removed) {
-        break;
-      } else if (ret.num_added == ret.num_removed && tries > 10) {
-        break;
-      // } else if (tries > 10000000 && (num_removed - num_added < 2)) {
-      //   printf("backtracking...\n");
-      //   break;
-      }
-    } // end of choosing a disturbance
-
-    if (timestamp < 0) {
-      printf("It is a good day to die!\n");
+    tries++;
+    ret.lamport = *lamport;
+    if (ret.lamport < 0) {
       break;
     }
 
-    ret.lamport = timestamp;
-    if (write(outfd, &ret, sizeof(ret)) < (ssize_t) sizeof(ret)) {
-      printf("Failed to write!\n");
+    // pick a random row to improve
+    ret.row_idx = (int) (rand() % pa->m);
+
+    // pick a random group of digits to terrorize
+    g = (cell_t) (rand() % num_groups);
+    len_group = 0;
+    for (int c = 0; c < pa->n; c++) {
+      if (pa_get(pa,ret.row_idx,c) / d == g) {
+        group[len_group++] = c;
+      }
     }
+
+    // shuffle dst - TODO, make sure we don't have the identity
+    pa_row_copy_out(pa, ret.row, ret.row_idx);
+    for (ssize_t right = 1; right < len_group; right++) {
+      ssize_t left = (ssize_t) (rand() % (right+1));
+      pot[group[right]] = pot[group[left]];
+      pot[group[left ]] = pa_get(pa, ret.row_idx, group[right]);
+    }
+
+    // evaluate the permutation
+    ret.num_added = 0;
+    ret.num_removed = 0;
+
+    for (ssize_t x = 0; x < pa->m; x++) {
+      if (x == ret.row_idx || !bit_get(foes, sym_idx(ret.row_idx, x))) {
+        continue;
+      }
+
+      bool new_separation = false;
+      for (ssize_t c = 0; c < pa->n; c++) {
+        if (abs(pa_get(pa, x, c) - pot[c]) >= d) {
+          new_separation = true;
+          break;
+        }
+      }
+
+      if (new_separation) {
+        if (bit_get(problems, sym_idx(x, ret.row_idx))) {
+          // you were a problem, now you're not (because you're separated)
+          ret.added[ret.num_added++] = x;
+        }
+      } else if (!bit_get(problems, sym_idx(x, ret.row_idx))) {
+        // you were not a problem, now you are (because you're not separated)
+        ret.removed[ret.num_removed++] = x;
+      }
+    }
+
+    // reject bad options
+    if (*lamport < 0) {
+      // our parent terminated
+      break;
+    } else if (ret.lamport < *lamport) {
+      // we are out of date
+      continue;
+    } else if (ret.num_added < ret.num_removed) {
+      // this option sucks
+      continue;
+    } else if (ret.num_added == ret.num_removed && tries < 10) {
+      // this option sucks
+      continue;
+    }
+
+    // send!
+    if (write(outfd, &ret, sizeof(ret)) != (ssize_t) sizeof(ret)) {
+      continue;
+    }
+
+    tries = 0;
+    last_sent = ret.lamport;
   }
 }
 
@@ -143,6 +151,15 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
   // begin lamport's clock
   ssize_t *lamport = (ssize_t*) zmalloc(sizeof(ssize_t));
   disturb_t* changes = malloc(num_forks * sizeof(disturb_t));
+  ssize_t sizes[1024];
+  int reward[1024];
+  bool trust[1024];
+
+  for (int x = 0; x < num_forks; x++) {
+    sizes[x] = 0;
+    reward[x] = 0;
+    trust[x] = true;
+  }
 
   // make pipes
   int max_fd = -1;
@@ -192,6 +209,11 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
       cur_time(time_str, 80);
       printf("[%s] P(%d,%d) Iteration: %lu Score: %lu Best: %li Last tweak: %li\n", time_str, pa->n, d, it_count, score, best_score, last_tweak);
       last_score = score;
+
+      // for(int x = 0; x < num_forks; x++) {
+      //   printf("%d ", reward[x]);
+      // }
+      // printf("\n");
     }
 
     if (score == 0) {
@@ -200,13 +222,6 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
 
     // wait for a child to respond
     disturb_t change;
-    ssize_t sizes[1024];
-    bool trust[1024];
-
-    for (int x = 0; x < num_forks; x++) {
-      sizes[x] = 0;
-      trust[x] = true;
-    }
 
     for(;;) {
       // set up the select
@@ -223,6 +238,7 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
       // do the select
       if (select(max_fd + 1, &readfds, NULL, NULL, &timeout) < 0) {
         printf("Failed to select!\n");
+        fflush(stdout);
         continue;
       }
 
@@ -238,34 +254,34 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
       // no chosen one
       if (chosen < 0) {
         printf("No pipes were ready\n");
+        fflush(stdout);
         continue;
       }
 
       // pull the data
-      ssize_t bytes_read = read(pipes[2*chosen], ((char*) &changes[chosen]) + sizes[chosen], sizeof(disturb_t) - sizes[chosen]);
+      ssize_t bytes_read = read(pipes[2*chosen], ((char*) &changes[chosen]) + sizes[chosen], ((ssize_t) sizeof(disturb_t)) - sizes[chosen]);
+
+      if (bytes_read <= 0) {
+        printf("Failed to read from %d; %lu\n", chosen, bytes_read);
+      }
+
       sizes[chosen] += bytes_read;
       if (sizes[chosen] < (ssize_t) sizeof(disturb_t)) {
-        // we still need more buffer
-        // printf("Partial buffer %li of %lu for child %d\n", sizes[chosen], sizeof(disturb_t), chosen);
         continue;
       } else if (sizes[chosen] > (ssize_t) sizeof(disturb_t)) {
         printf("Buffer overrun in child %d\n", chosen);
-        trust[chosen] = false;
+        fflush(stdout);
+        sizes[chosen] = 0;
         continue;
       }
-      
+
       change = changes[chosen];
       sizes[chosen] = 0;
-      
+
       if (change.lamport != it_count) {
-        // printf("*");
-        // printf("Ignoring stale change from iteration %li of %li\n", change.lamport, it_count);
         continue;
       } else {
-        // printf("Chosen child %d (lamport: %li, row_idx: %i, num_added: %i, num_removed: %i)\n", chosen, change.lamport, change.row_idx, change.num_added, change.num_removed);
-        // printf(".");
-        // printf("[%li] ", change.lamport);
-        // fflush(stdout);
+        reward[chosen]++;
         break;
       }
     }
@@ -291,6 +307,7 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
     } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
       printf("Warning: waitpid %ld failed on pid %u with status %d\n", j, pids[j], status);
     }
+    fflush(stdout);
   }
 
   for (int x = 0; x < num_forks; x++) {
