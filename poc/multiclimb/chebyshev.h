@@ -13,7 +13,7 @@ inline bool pair_separated(const pa_t* pa, const cell_t d, const int u, const in
 }
 
 bool pa_separated(const pa_t* pa, const cell_t d);
-void hill_climb(const pa_t* pa, cell_t d);
+void hill_climb(const pa_t* pa, cell_t d, int num_forks);
 
 
 #endif

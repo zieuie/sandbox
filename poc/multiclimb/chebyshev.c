@@ -8,7 +8,7 @@
 #include "lib.h"
 #include "populate.h"
 
-void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, ssize_t score);
+void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, ssize_t score, int num_forks);
 
 bool pa_separated(const pa_t* pa, const cell_t d) {
   for (ssize_t u = 0; u < pa->m; u++) {
@@ -22,7 +22,7 @@ bool pa_separated(const pa_t* pa, const cell_t d) {
 }
 
 
-void hill_climb(const pa_t* pa, const cell_t d) {
+void hill_climb(const pa_t* pa, const cell_t d, int num_forks) {
   // allocate these huge things up front
   ssize_t lut_size = (long) pa->m * (pa->m-1) / 2;
   bitlut_t* foes = make_bitset(lut_size);
@@ -34,7 +34,7 @@ void hill_climb(const pa_t* pa, const cell_t d) {
   ssize_t score = bit_sum(problems, lut_size);
   printf("problems: %lu, foes: %lu, lut: %lu\n", score, foe_count, lut_size);
 
-  do_climb(pa, d, foes, problems, score);
+  do_climb(pa, d, foes, problems, score, num_forks);
 
   bitmap_free(foes, lut_size);
   bitmap_free(problems, lut_size);
@@ -145,9 +145,7 @@ void pot_finder(const pa_t* pa, const cell_t d, const bitlut_t* foes, const bitl
   }
 }
 
-void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, ssize_t score) {
-  int num_forks = 8;
-
+void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems, ssize_t score, int num_forks) {
   // begin lamport's clock
   ssize_t *lamport = (ssize_t*) zmalloc(sizeof(ssize_t));
   disturb_t* changes = malloc(num_forks * sizeof(disturb_t));
@@ -199,7 +197,7 @@ void do_climb(const pa_t* pa, const cell_t d, bitlut_t* foes, bitlut_t* problems
   ssize_t last_write_score = score;
   time_t last_write_time = time(NULL);
   char outfile[1024];
-  sprintf(outfile, "pa_%d_choose_%d_backup.txt", pa->n, d);
+  sprintf(outfile, "pa_%d_choose_%d_unfinished.txt", pa->n, d);
 
   char time_str[80];
 

@@ -39,13 +39,14 @@ void resume_computation(pa_t* pa, int n, int d) {
 
 int main(int argc, char* argv[]) {
   // error checking
-  if (argc < 3) {
+  if (argc < 4) {
     help();
   }
 
   // parse args
   cell_t n = (cell_t) atoi(argv[1]);
   cell_t d = (cell_t) atoi(argv[2]);
+  int num_forks = argc < 4 ? 1 : (int) atoi(argv[3]);
   if (d < 2) {
     printf("Error: Distance must be at least 2.\n");
     return 1;
@@ -63,7 +64,7 @@ int main(int argc, char* argv[]) {
   // seed RNG
   srand((unsigned) time(NULL));
 
-  hill_climb(&pa, d);
+  hill_climb(&pa, d, num_forks);
 
   char outfile[1024];
   if (pa_separated(&pa, d)) {
