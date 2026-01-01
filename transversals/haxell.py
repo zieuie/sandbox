@@ -1,46 +1,25 @@
 import itertools as it
 import math
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any
 from datetime import datetime
 
 
-@dataclass(eq=True, frozen=True)
-class Vertex:
-  color: Any
-  data: Any
-
-  def edge(self, other):
-    if self.color == other.color:
+def edge(self, other):
+  different_colors = False
+  for a,b in zip(self, other):
+    if abs(a-b) >= pa_distance:
       return False
-    for a,b in zip(self.data, other.data):
-      if abs(a-b) >= pa_distance:
-        return False
-    return True
+    elif a // pa_distance != b // pa_distance:
+      different_colors = True
+  return different_colors
 
-  def separated(self, other):
-    if self.color == other.color:
-      return False
-    for a,b in zip(self.data, other.data):
-      if abs(a-b) >= pa_distance:
-        return True
-    return False
 
-  def pull(self, perm):
-    rc = [0]*len(self.color)
-    rd = [0]*len(self.data)
-    for dst,src in enumerate(perm.data):
-      rc[dst] = self.color[src]
-      rd[dst] = self.data[src]
-    return Vertex(tuple(rc), tuple(rd))
-
-  def neighbors(self):
-    for e in ident_neigh:
-      yield e.pull(self)
-
-  def __repr__(self):
-    return repr(self.data)
+def separated(first, second):
+  for a,b in zip(first, second):
+    if abs(a-b) >= pa_distance:
+      return True
+  return False
 
 
 # page 19
@@ -85,25 +64,25 @@ def grow_transversal(M, A):
     while True:
       # Icount : int
       # Imap[color] = vertex
-      Icount, Iany = immediate_count(M,Xs[l],l)
+      Icount, Iany, Iany_color = immediate_count(M,Xs[l],l)
       if Icount <= mu * sum(map(len,Xs[l].values())):
         break
 
       if l == 1:
-        M[Iany.color] = Iany
+        M[Iany_color] = Iany
         return M
 
       to_delete = set()
-      for w in Ys[l-1].values():
-        if w.color not in Xs[l]:
+      for w_color, w in Ys[l-1].items():
+        if w_color not in Xs[l]:
           continue
 
-        _, u = immediate_count(M, {w.color: Xs[l][w.color]},l)
+        _, u, _ = immediate_count(M, {w_color: Xs[l][w_color]},l)
         if u is None:
           continue
 
-        M[w.color] = u
-        to_delete.add(w.color)
+        M[w_color] = u
+        to_delete.add(w_color)
 
       for a in to_delete:
         Ys[l-1].pop(a)
@@ -139,9 +118,9 @@ def build_layer(M,Xs,Ys,X,Y,l):
       X.setdefault(A, set()).add(v)
 
       # Y = Y u {u in M | uv in E}
-      for u in M.values():
-        if v.edge(u):
-          Y[u.color] = u
+      for u_color, u in M.items():
+        if edge(v, u):
+          Y[u_color] = u
 
   return X,Y
 
@@ -156,18 +135,19 @@ def is_good(A, v, Xs, Ys, X, Y, l):
   if A in X and v in X[A]:
     return False
 
-  # we don't have its neighbors
-  for u in v.neighbors():
-    if u == Y.get(u.color):
+  for neigh in ident_neigh:
+    u = tuple(neigh[src] for src in v)
+    u_color = tuple(e//pa_distance for e in u)
+    if u == Y.get(u_color):
       return False
 
-    if u.color in X and u in X[u.color]:
+    if u_color in X and u in X[u_color]:
       return False
 
     for i in range(l+1):
-      if u == Ys[i].get(u.color):
+      if u == Ys[i].get(u_color):
         return False
-      if u.color in Xs[i] and u in Xs[i][u.color]:
+      if u_color in Xs[i] and u in Xs[i][u_color]:
         return False
 
   return True
@@ -176,17 +156,20 @@ def is_good(A, v, Xs, Ys, X, Y, l):
 def immediate_count(M,W,l):
   Icount = 0
   Iany = None
+  Iany_color = None
 
-  for v in it.chain(*W.values()):
-    for u in M.values():
-      if u.edge(v):
-        break
-    else:
-      if l != 1 or v.color == Ay0:
-        Icount += 1
-        Iany = v
+  for v_color, vs in W.items():
+    for v in vs:
+      for u in M.values():
+        if edge(u, v):
+          break
+      else:
+        if l != 1 or v_color == Ay0:
+          Icount += 1
+          Iany = v
+          Iany_color = v_color
 
-  return Icount, Iany
+  return Icount, Iany, Iany_color
 
 
 def from_color(A):
@@ -199,8 +182,7 @@ def from_color(A):
   groups = list(map(list,map(it.permutations, groups)))
   for g in it.product(*groups):
     g = list(map(iter, g))
-    data = [next(g[e]) for e in A]
-    yield Vertex(color=tuple(A), data=tuple(data))
+    yield tuple(next(g[e]) for e in A)
 
 
 def make_colors():
@@ -246,7 +228,6 @@ def make_ident_neigh():
   n,d = perm_len, pa_distance
   q = list(range(n))
   qt = [e//d for e in q]
-  e = Vertex(tuple(qt),tuple(q))
 
   groups = []
   for i in range(n):
@@ -273,13 +254,12 @@ def make_ident_neigh():
   neigh = []
   claws = set()
   for p in recur():
-    t = [e//d for e in p]
-    if t == qt:
+    pt = [e//d for e in p]
+    if pt == qt:
       continue
-    o = Vertex(tuple(t),tuple(p))
-    if not e.separated(o):
-      neigh.append(o)
-      claws.add(tuple(t))
+    if not separated(p, q):
+      neigh.append(tuple(p))
+      claws.add(tuple(pt))
   return neigh, claws
 
 
@@ -306,9 +286,9 @@ if __name__ == '__main__':
 
   print('M is')
   for v in M.values():
-    print(' '.join(map(str, v.data)))
+    print(' '.join(map(str, v)))
 
   with open(f'pa_{perm_len}_{pa_distance}_haxell.txt', 'w+') as f:
     for v in M.values():
-      f.write(' '.join(map(str, v.data)) + '\n')
+      f.write(' '.join(map(str, v)) + '\n')
 
