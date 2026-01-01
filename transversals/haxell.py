@@ -49,17 +49,17 @@ def find_it():
   global Ay0
   # M[class] = vertex
   M = dict()
-  for i,_ in enumerate(colors):
+  for i in it.count():
     for A in colors:
       if A not in M:
         break
     else:
-      raise ValueError('Could not find a class not in M')
+      break
 
     VERBOSE and print()
     VERBOSE and print()
     VERBOSE and print('-'*80)
-    print(datetime.now(), f'find_it iteration {i+1} of {len(colors)}')
+    print(datetime.now(), f'find_it iteration {i+1} of {len(colors)} |M| {len(M)}')
 
     Ay0 = A
     M = grow_transversal(M, A)
@@ -108,7 +108,7 @@ def grow_transversal(M, A):
 
       # Icount : int
       # Imap[color] = vertex
-      Icount, Iany = immediate_count(M,Xs[l])
+      Icount, Iany = immediate_count(M,Xs[l],l)
       if Icount <= mu * len(Xs[l]):
         break
 
@@ -122,7 +122,7 @@ def grow_transversal(M, A):
         if w.color not in Xs[l]:
           continue
 
-        _, u = immediate_count(M, {w.color: Xs[l][w.color]})
+        _, u = immediate_count(M, {w.color: Xs[l][w.color]},l)
         if u is None:
           continue
 
@@ -229,7 +229,7 @@ def is_good(A, v, Xs, Ys, X, Y, l):
   return True
 
 
-def immediate_count(M,W):
+def immediate_count(M,W,l):
   Icount = 0
   Iany = None
 
@@ -248,8 +248,9 @@ def immediate_count(M,W):
       if u.edge(v):
         break
     else:
-      Icount += 1
-      Iany = v
+      if l != 1 or v.color == Ay0:
+        Icount += 1
+        Iany = v
 
   return Icount, Iany
 
@@ -361,7 +362,6 @@ if __name__ == '__main__':
   r = len(claws)
   print(f'Degree {len(ident_neigh)} and {len(claws)}-claw free')
 
-  exit(1)
   mu, U, rho = feasible_constants(r, eps)
   print(f'mu,U,rho are ', mu,U,rho)
 
