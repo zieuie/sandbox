@@ -295,8 +295,14 @@ def resume_computation(filename):
 # globals
 backup_interval = 60
 HELP_STR = f'''
-haxell.py - Creates (n choose d) permutation arrays using Haxell's algorithm
-            for independent transversals. A backup will be made every {backup_interval} seconds.
+haxell.py 
+
+Creates (n choose d) permutation arrays using Haxell's algorithm
+for independent transversals. A backup will be made every {backup_interval} seconds.
+
+This program can resume from any partial permutation array stored in
+a file named pa_n_d_haxell.txt. For example, pa_12_3_haxell.txt, 
+if it exists, will be used on startup.
 
 Usage:
   pypy3 haxell.py N D [epsilon]
