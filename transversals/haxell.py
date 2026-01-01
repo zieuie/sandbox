@@ -1,7 +1,6 @@
-import functools
 import itertools as it
 import math
-from collections import Counter, defaultdict
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime
 
@@ -28,8 +27,8 @@ def find_it(limit=None):
     else:
       break
 
-    if not i % 100:
-      print(datetime.now(), f'find_it iteration {i} of {len(colors)}')
+    # if not i % 100:
+    print(datetime.now(), f'find_it iteration {i} of {len(colors)}')
 
     Ay0 = A
     M = grow_transversal(M, A)
@@ -97,21 +96,10 @@ def grow_transversal(M, A):
 
 
 def calc_forbidden(Xs,Ys,X,Y,l):
-  forbidden = defaultdict(set)
-  for a, v in Y.items():
-    forbidden[a].add(v)
-
-  for a, vs in X.items():
-    for v in vs:
-      forbidden[a].add(v)
-
+  forbidden = set()
+  forbidden.update(Y.values(), *X.values())
   for i in range(l+1):
-    for a, v in Ys[i].items():
-      forbidden[a].add(v)
-
-    for a, vs in Xs[i].items():
-      for v in vs:
-        forbidden[a].add(v)
+    forbidden.update(Ys[i].values(), *Xs[i].values())
   return forbidden
 
 
@@ -126,31 +114,26 @@ def build_layer(M,X,Y,forbidden,colors):
       if len(X.get(A, tuple())) >= U:
         break
 
-      if A in forbidden and v in forbidden[A]:
+      if v in forbidden:
         continue
 
       good = True
-      for ua,us in forbidden.items():
-        if ua == A:
-          continue
-        for u in us:
-          if edge(u,v):
-            good = False
-            break
-        if not good:
+      for u in forbidden:
+        if edge(u,v) and tuple(e//pa_distance for e in u) != A:
+          good = False
           break
       if not good:
         continue
 
       # X = X u {v}
       X.setdefault(A, set()).add(v)
-      forbidden[A].add(v)
+      forbidden.add(v)
 
       # Y = Y u {u in M | uv in E}
       for u_color, u in M.items():
         if A != u_color and edge(v, u):
           Y[u_color] = u
-          forbidden[u_color].add(u)
+          forbidden.add(u)
 
   return X,Y
 
