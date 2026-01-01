@@ -3,6 +3,7 @@ import math
 from copy import deepcopy
 from typing import Any
 from datetime import datetime
+import functools
 
 
 def edge(self, other):
@@ -103,8 +104,10 @@ def superposed_build(M, Xs, Ys, l):
 
 def build_layer(M,Xs,Ys,X,Y,l):
   global Ay0
-  X = deepcopy(X)
-  Y = deepcopy(Y)
+  if X:
+    X = {k:set(v) for k,v in X.items()}
+  if Y:
+    Y = {k:set(v) for k,v in Y.items()}
 
   for A in (Ys[l] if l else [Ay0]):
     for v in from_color(A):
@@ -172,17 +175,19 @@ def immediate_count(M,W,l):
   return Icount, Iany, Iany_color
 
 
+@functools.lru_cache(maxsize=128)
 def from_color(A):
   n,d = perm_len, pa_distance
   groups = []
   for x in range(int(math.ceil(n/d))):
     groups.append(list(range(d*x, min(n, d*(x+1)))))
 
-
+  ret = []
   groups = list(map(list,map(it.permutations, groups)))
   for g in it.product(*groups):
     g = list(map(iter, g))
-    yield tuple(next(g[e]) for e in A)
+    ret.append(tuple(next(g[e]) for e in A))
+  return ret
 
 
 def make_colors():
