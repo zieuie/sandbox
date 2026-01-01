@@ -250,6 +250,48 @@ def make_ident_neigh():
   return neigh
 
 
+def resume_computation(filename):
+  M = dict()
+  if os.path.exists(filename):
+    print(f'Found a file named {filename}')
+    with open(filename, 'r') as f:
+      good = True
+      for line in f:
+        # clean up the line
+        line = line.split('#')[0].strip()
+        if len(line) == 0:
+          continue
+        
+        # get the permutation out of it
+        row = tuple(map(int, line.split()))
+        color = tuple(e//pa_distance for e in row)
+        M[color] = row
+
+        # validate the permutation
+        if len(row) != perm_len:
+          good = False
+          print(f'One row has {len(row)} permutations. We are not using this file.')
+          if 'y' != input('Overwrite this file and continue from scratch? (y/N)').lower():
+            exit(0)
+
+      # verify the partitial independent transversal
+      P = list(M.values())
+      for ux,u in enumerate(P):
+        for vx in range(ux):
+          v = P[vx]
+          if edge(u,v):
+            good = False
+            print('Not separated 1:', u)
+            print('Not separated 2:', v)
+            print(f'Two rows are not separated. We are not using this file.')
+            if 'y' != input('Overwrite this file and continue from scratch? (y/N)').lower():
+              exit(0)
+
+  if good:
+    return M
+  return dict()
+
+
 # globals
 backup_interval = 60
 HELP_STR = f'''
@@ -267,6 +309,7 @@ Where:
 
 if __name__ == '__main__':
   from sys import argv
+  # parameters are globally used
   try:
     perm_len = int(argv[1])
     pa_distance = int(argv[2])
@@ -275,18 +318,25 @@ if __name__ == '__main__':
     print(HELP_STR)
     exit(1)
 
+  # global variable for edge()
   dsquared = pa_distance**2
 
+  # read a file if it exists
   print (f'P({perm_len}, {pa_distance}) with epsilon {eps}')
+  filename = f'pa_{perm_len}_{pa_distance}_haxell.txt'
+  M = resume_computation(filename)
 
+  # get the neighbors of the identity to calculate r-claw
   ident_neigh = make_ident_neigh()
   r = len(ident_neigh)
   print(f'Degree {sum(map(len,ident_neigh))} and {r}-claw free')
   print(sorted(Counter(map(len,ident_neigh.values())).items()))
 
+  # compute some constants for Haxell's algorithm
   mu, U, rho = feasible_constants(r, eps)
   print(f'mu,U,rho are ', mu,U,rho)
 
+  # compute all the colors
   colors = list(make_colors())
   print(f'There are {len(colors)} colors')
 
@@ -296,76 +346,30 @@ if __name__ == '__main__':
     cgroups.append(list(range(pa_distance*x, min(perm_len, pa_distance*(x+1)))))
   cgroups = list(map(list,map(it.permutations, cgroups)))
 
-
-  # import cProfile
-
-  # pr = cProfile.Profile()
-  # pr.enable()  # Start profiling
-
-  good = False
-  M = dict()
-  filename = f'pa_{perm_len}_{pa_distance}_haxell.txt'
-  if os.path.exists(filename):
-    print(f'Found a file named {filename}')
-    with open(filename, 'r') as f:
-      good = True
-      for line in f:
-        line = line.split('#')[0].strip()
-        row = tuple(map(int, line.split()))
-        color = tuple(e//pa_distance for e in row)
-        M[color] = row
-        if len(row) != perm_len:
-          print(f'One row has {len(row)} permutations. We are not using this file.')
-          if 'y' != input('Overwrite this file and continue from scratch? (y/N)').lower():
-            exit(0)
-
-          good = False
-          break
-        
-      for _,u in M.items():
-        for _,v in M.items():
-          if u != v and edge(u,v):
-            print('Not separated 1:', u)
-            print('Not separated 2:', v)
-            print(f'Two rows are not separated. We are not using this file.')
-            if 'y' != input('Overwrite this file and continue from scratch? (y/N)').lower():
-              exit(0)
-
-            good = False
-            break
-        if not good:
-          break
-
-  if not good:
-    M = dict()
-
+  # main driver
   t = time()
   for M in find_it(M):
+    # get mad
     if M is None:
-      print('Failure!')
+      print('Haxell halted without an independent transversal!')
       exit(0)
     
+    # print some status
     i = len(M)
-    print(datetime.now(), f'iteration {i} of {len(colors)}')
+    print(datetime.now(), f'P({perm_len},{pa_distance}) >= {i} of {len(colors)}')
+
+    # do a backup maybe
     if i % 100 == 0 or time() - t > backup_interval:
-      print(datetime.now(), f'Writing {len(M)} permutations to {filename}')
+      print(datetime.now(), f'Writing {i} permutations to {filename}')
       with open(filename, 'w+') as f:
         for row in M.values():
           f.write(' '.join(map(str, row)) + '\n')
       t = time()
 
-  # pr.disable()  # Stop profiling
-  # pr.print_stats(sort='tottime') # Print statistics, sorted by cumulative time
-  # exit(0)
-
-
-  # M = find_it()
-
-  print('M is')
-  for v in M.values():
-    print(' '.join(map(str, v)))
-
-  with open(f'pa_{perm_len}_{pa_distance}_haxell.txt', 'w+') as f:
+  # we terminated! write it to a final file
+  print(datetime.now(), f'Writing {i} permutations to {filename}')
+  with open(filename, 'w+') as f:
     for v in M.values():
       f.write(' '.join(map(str, v)) + '\n')
 
+  print('Success!')
