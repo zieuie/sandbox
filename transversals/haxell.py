@@ -251,6 +251,7 @@ def make_ident_neigh():
 
 
 def resume_computation(filename):
+  good = False
   M = dict()
   if os.path.exists(filename):
     print(f'Found a file named {filename}')
