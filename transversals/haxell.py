@@ -6,6 +6,7 @@ from datetime import datetime
 import functools
 
 
+VERBOSE = False
 def edge(self, other):
   different_colors = False
   for a,b in zip(self, other):
@@ -53,7 +54,10 @@ def grow_transversal(M, A):
   Ys = [dict()]
   l = 0
   while A not in M:
+    VERBOSE and print('*',end='',flush=True)
+    VERBOSE and print('[',l,end='',flush=True)
     X,Y = build_layer(M,Xs,Ys,dict(),dict(),l)
+    VERBOSE and print(']',end='',flush=True)
 
     Yllen = sum(map(len,Ys))
     if sum(map(len,X.values())) <= rho * Yllen:
@@ -104,17 +108,50 @@ def superposed_build(M, Xs, Ys, l):
 
 def build_layer(M,Xs,Ys,X,Y,l):
   global Ay0
+  VERBOSE and print('a',end='',flush=True)
   if X:
     X = {k:set(v) for k,v in X.items()}
   if Y:
-    Y = {k:set(v) for k,v in Y.items()}
+    Y = {**Y}
+  VERBOSE and print('b',end='',flush=True)
+
+  forbidden = dict()
+  for a, v in Y.items():
+    forbidden.setdefault(a,set()).add(v)
+
+  for a, vs in X.items():
+    for v in vs:
+      forbidden.setdefault(a,set()).add(v)
+
+  for i in range(l+1):
+    for a, v in Ys[i].items():
+      forbidden.setdefault(a,set()).add(v)
+
+    for a, vs in Xs[i].items():
+      for v in vs:
+        forbidden.setdefault(a,set()).add(v)
 
   for A in (Ys[l] if l else [Ay0]):
+    VERBOSE and print('c',end='',flush=True)
     for v in from_color(A):
       if len(X.get(A, tuple())) >= U:
         break
 
-      if not is_good(A,v,Xs,Ys,X,Y,l):
+      if A in forbidden and v in forbidden[A]:
+        continue
+
+      good = True
+      for na, ns in ident_neigh.items():
+        ua = tuple(na[src] for src in v)
+        if ua in forbidden:
+          for neigh in ns:
+            if tuple(neigh[src] for src in v) in forbidden[ua]:
+              good = False
+              break
+        if not good:
+          break
+
+      if not good:
         continue
 
       # X = X u {v}
@@ -124,6 +161,9 @@ def build_layer(M,Xs,Ys,X,Y,l):
       for u_color, u in M.items():
         if edge(v, u):
           Y[u_color] = u
+          forbidden.setdefault(u_color,set()).add(u)
+
+  VERBOSE and print('c',end='',flush=True)
 
   return X,Y
 
@@ -175,7 +215,8 @@ def immediate_count(M,W,l):
   return Icount, Iany, Iany_color
 
 
-@functools.lru_cache(maxsize=128)
+# @functools.lru_cache(maxsize=128)
+@functools.cache
 def from_color(A):
   n,d = perm_len, pa_distance
   groups = []
@@ -256,16 +297,14 @@ def make_ident_neigh():
       yield from recur(i+1)
       used[e] = False
 
-  neigh = []
-  claws = set()
+  neigh = dict()
   for p in recur():
     pt = [e//d for e in p]
     if pt == qt:
       continue
     if not separated(p, q):
-      neigh.append(tuple(p))
-      claws.add(tuple(pt))
-  return neigh, claws
+      neigh.setdefault(tuple(pt),set()).add(tuple(p))
+  return neigh
 
 
 # globals
@@ -277,15 +316,17 @@ if __name__ == '__main__':
 
   print (f'P({perm_len}, {pa_distance}) with epsilon {eps}')
 
-  ident_neigh, claws = make_ident_neigh()
-  r = len(claws)
-  print(f'Degree {len(ident_neigh)} and {len(claws)}-claw free')
+  ident_neigh = make_ident_neigh()
+  r = len(ident_neigh)
+  print(f'Degree {sum(map(len,ident_neigh))} and {r}-claw free')
 
   mu, U, rho = feasible_constants(r, eps)
   print(f'mu,U,rho are ', mu,U,rho)
 
   colors = list(make_colors())
   print(f'There are {len(colors)} colors')
+  for color in colors:
+    from_color(color)
 
   M = find_it()
 
