@@ -79,7 +79,7 @@ def grow_transversal(M, A):
   l = 0
   while A not in M:
     VERBOSE and print('while A not in M', l)
-    X,Y = build_layer2(M,Xs,Ys,dict(),dict(),l)
+    X,Y = build_layer(M,Xs,Ys,dict(),dict(),l)
     Xs.append(X)
     Ys.append(Y)
 
@@ -157,7 +157,7 @@ def superposed_build(M, Xs, Ys, l):
     VERBOSE and print(len(Ys), len(Xs), l)
     VERBOSE and print()
 
-    X, Y = build_layer2(M,Xs,Ys,Xs[i],Ys[i],l)
+    X, Y = build_layer(M,Xs,Ys,Xs[i],Ys[i],l)
     if sum(map(len,X.values())) >= (1+mu)*len(Xs[i]):
       Xs[i], Ys[i] = X,Y
       l = i
@@ -166,72 +166,6 @@ def superposed_build(M, Xs, Ys, l):
 
 
 def build_layer(M,Xs,Ys,X,Y,l):
-  X = deepcopy(X)
-  Y = deepcopy(Y)
-  for i in it.count():
-    VERBOSE and print('.', end='', flush=True)
-    # print('.', end='', flush=True)
-    # while v in A(Y_l) is addable for X,Y,T..
-    v = addable(M,Xs,Ys,X,Y,l)
-    if v is None:
-      break
-
-    # X = X u {v}
-    X.setdefault(v.color, set()).add(v)
-
-    # Y = Y u {u in M | uv in E}
-    for u in M.values():
-      if v.edge(u):
-        if u.color in Y and u != Y[u.color]:
-          VERBOSE and print('uh oh', Y, u)
-          input()
-        Y[u.color] = u
-
-  return X,Y
-
-
-def addable(M, Xs, Ys, X, Y, l):
-  global Ay0
-  # M[class] = vertex
-  # Xs[layer_no] = { color: vertex }
-  # Ys[layer_no] = { color: {vertices} }
-
-  for A in (Ys[l] if l else [Ay0]):
-    if len(X.get(A, tuple())) >= U:
-      continue
-    for v in from_color(A):
-      # we don't have it
-      if A in Ys[l] and v == Ys[l][A]:
-        continue
-      if A in X and v in X[A]:
-        continue
-      if A in Y and v == Y[A]:
-        continue
-
-      # we don't have its neighbors
-      good = True
-      for u in v.neighbors():
-        if u.color in X and u in X[u.color]:
-          good = False
-          break
-        if u.color in Y and u == Y[u.color]:
-          good = False
-          break
-        for i in range(l+1):
-          if u.color in Xs[i] and u in Xs[i][u.color]:
-            good = False
-            break
-          if u.color in Ys[i] and u == Ys[i][u.color]:
-            good = False
-            break
-        if not good:
-          break
-
-      if good:
-        return v
-
-
-def build_layer2(M,Xs,Ys,X,Y,l):
   global Ay0
   X = deepcopy(X)
   Y = deepcopy(Y)
@@ -340,7 +274,6 @@ def make_colors():
   for x in range(int(math.ceil(perm_len/pa_distance))):
     rem[x] = list(range(pa_distance*x, min(perm_len, pa_distance*(x+1))))
 
-
   def recur(i):
     if i >= perm_len:
       yield tuple(sofar)
@@ -380,10 +313,31 @@ def make_ident_neigh():
   qt = [e//d for e in q]
   e = Vertex(tuple(qt),tuple(q))
 
+  groups = []
+  for i in range(n):
+    g = []
+    for j in range(n):
+      if abs(j-i) < d:
+        g.append(j)
+    groups.append(g)
+
+  used = [0]*n
+  sofar = [0]*n
+  def recur(i=0):
+    if i >= n:
+      yield tuple(sofar)
+      return
+    for e in groups[i]:
+      if used[e]:
+        continue
+      used[e] = True
+      sofar[i] = e
+      yield from recur(i+1)
+      used[e] = False
+
   neigh = []
   claws = set()
-
-  for p in it.permutations(q):
+  for p in recur():
     t = [e//d for e in p]
     if t == qt:
       continue
@@ -393,66 +347,34 @@ def make_ident_neigh():
       claws.add(tuple(t))
   return neigh, claws
 
+
 # globals
-from sys import argv
-perm_len = int(argv[1])
-pa_distance = int(argv[2])
-eps = float(argv[3]) if len(argv) > 3 else 0.1
+if __name__ == '__main__':
+  from sys import argv
+  perm_len = int(argv[1])
+  pa_distance = int(argv[2])
+  eps = float(argv[3]) if len(argv) > 3 else 0.1
 
-print (f'P({perm_len}, {pa_distance}) with epsilon {eps}')
+  print (f'P({perm_len}, {pa_distance}) with epsilon {eps}')
 
-ident_neigh, claws = make_ident_neigh()
-r = len(claws)
-print(f'Degree {len(ident_neigh)} and {len(claws)}-claw free')
+  ident_neigh, claws = make_ident_neigh()
+  r = len(claws)
+  print(f'Degree {len(ident_neigh)} and {len(claws)}-claw free')
 
-mu, U, rho = feasible_constants(r, eps)
-print(f'mu,U,rho are ', mu,U,rho)
+  exit(1)
+  mu, U, rho = feasible_constants(r, eps)
+  print(f'mu,U,rho are ', mu,U,rho)
 
-colors = list(make_colors())
-print(f'There are {len(colors)} colors')
+  colors = list(make_colors())
+  print(f'There are {len(colors)} colors')
 
-M = find_it()
+  M = find_it()
 
-print('M is')
-for v in M.values():
-  print(' '.join(map(str, v.data)))
-
-with open(f'pa_{perm_len}_{pa_distance}_haxell.txt', 'w+') as f:
+  print('M is')
   for v in M.values():
-    f.write(' '.join(map(str, v.data)) + '\n')
+    print(' '.join(map(str, v.data)))
 
+  with open(f'pa_{perm_len}_{pa_distance}_haxell.txt', 'w+') as f:
+    for v in M.values():
+      f.write(' '.join(map(str, v.data)) + '\n')
 
-# p = [0, 1, 2, 3, 4, 7, 6, 5, 8]
-# v = Vertex(tuple([e//3 for e in p]), tuple(p))
-# for x in v.neighbors():
-#   VERBOSE and print(x, x.separated(v))
-#   if x.data == (2, 1, 0, 5, 4, 8, 7, 3, 6):
-#     VERBOSE and print('here')
-#     input()
-
-# uu = (2, 1, 0, 5, 4, 8, 7, 3, 6)
-# u = Vertex(tuple([e//3 for e in uu]), tuple(uu))
-# VERBOSE and print (u.separated(v), v.separated(u))
-# for x in v.neighbors():
-#   VERBOSE and print(x, x.separated(v))
-#   if x.data == uu:
-#     VERBOSE and print('here')
-#     input()
-
-# VERBOSE and print(u, u.separated(v), v.data in set(e.data for e in u.neighbors()))
-# VERBOSE and print(v, v.separated(u), u.data in set(e.data for e in v.neighbors()))
-
-
-# n,d = perm_len, pa_distance
-# q = [0, 1, 2, 3, 4, 7, 6, 5, 8]
-# qt = [e//d for e in q]
-# v = Vertex(tuple(qt),tuple(q))
-# for p in it.permutations(q):
-#   t = [e//d for e in p]
-#   if t == qt:
-#     continue
-#   o = Vertex(tuple(t),tuple(p))
-#   if p == tuple(uu):
-#     VERBOSE and print('moo')
-  # if not v.separated(o) and o.data == tuple(uu):
-    # VERBOSE and print(o.data)
