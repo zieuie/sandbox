@@ -6,7 +6,6 @@ from typing import Any
 from datetime import datetime
 
 
-VERBOSE = False
 @dataclass(eq=True, frozen=True)
 class Vertex:
   color: Any
@@ -56,9 +55,6 @@ def find_it():
     else:
       break
 
-    VERBOSE and print()
-    VERBOSE and print()
-    VERBOSE and print('-'*80)
     print(datetime.now(), f'find_it iteration {i+1} of {len(colors)} |M| {len(M)}')
 
     Ay0 = A
@@ -70,7 +66,6 @@ def find_it():
 
 def grow_transversal(M, A):
   M = deepcopy(M)
-  VERBOSE and print('grow_transversal, A =', A)
 
   # Xs = [{ color: {vertices} }, ...]
   Xs = [dict()]
@@ -78,42 +73,23 @@ def grow_transversal(M, A):
   Ys = [dict()]
   l = 0
   while A not in M:
-    VERBOSE and print('while A not in M', l)
     X,Y = build_layer(M,Xs,Ys,dict(),dict(),l)
-    Xs.append(X)
-    Ys.append(Y)
-
 
     Yllen = sum(map(len,Ys))
     if sum(map(len,X.values())) <= rho * Yllen:
       return None
 
+    Xs.append(X)
+    Ys.append(Y)
     l += 1
     while True:
-      VERBOSE and print('M is:')
-      for v in M.values():
-        VERBOSE and print('  ', v)
-      VERBOSE and print(len(M))
-      VERBOSE and print()
-
-      VERBOSE and print('T is:')
-      for i in range(1,l+1):
-        VERBOSE and print(f'..[layer {i}]')
-        for k in set(Ys[i].keys()) | set(Xs[i].keys()):
-          y,x = Ys[i].get(k), Xs[i].get(k)
-          # VERBOSE and print('  ', k, '|', y, '|', ' '.join(map(str, x)) if x else 'None')
-          VERBOSE and print('  ', k, '|', y)
-      VERBOSE and print(len(Ys), len(Xs), l)
-      VERBOSE and print()
-
       # Icount : int
       # Imap[color] = vertex
       Icount, Iany = immediate_count(M,Xs[l],l)
-      if Icount <= mu * len(Xs[l]):
+      if Icount <= mu * sum(map(len,Xs[l].values())):
         break
 
       if l == 1:
-        VERBOSE and print('l=1, adding', Iany)
         M[Iany.color] = Iany
         return M
 
@@ -126,11 +102,9 @@ def grow_transversal(M, A):
         if u is None:
           continue
 
-        VERBOSE and print('l!=1, replacing', w, 'with', u)
         M[w.color] = u
-        # del Ys[l-1][w.color]
         to_delete.add(w.color)
-      
+
       for a in to_delete:
         Ys[l-1].pop(a)
 
@@ -138,27 +112,10 @@ def grow_transversal(M, A):
 
 
 def superposed_build(M, Xs, Ys, l):
-  VERBOSE and print('superposed_build', l)
   i = 1
   while i <= l:
-    VERBOSE and print('superposed_build iteration', i)
-    VERBOSE and print('M is:')
-    for v in M.values():
-      VERBOSE and print('  ', v)
-    VERBOSE and print(len(M))
-    VERBOSE and print()
-
-    VERBOSE and print('T is:')
-    for j in range(1,l+1):
-      VERBOSE and print(f'..[layer {j}]')
-      for k in set(Ys[j].keys()) | set(Xs[j].keys()):
-        y,x = Ys[j].get(k), Xs[j].get(k)
-        VERBOSE and print('  ', k, '|', y)
-    VERBOSE and print(len(Ys), len(Xs), l)
-    VERBOSE and print()
-
-    X, Y = build_layer(M,Xs,Ys,Xs[i],Ys[i],l)
-    if sum(map(len,X.values())) >= (1+mu)*len(Xs[i]):
+    X, Y = build_layer(M,Xs,Ys,Xs[i],Ys[i],i-1)
+    if sum(map(len,X.values())) >= (1+mu)*sum(map(len,Xs[i].values())):
       Xs[i], Ys[i] = X,Y
       l = i
     i += 1
@@ -169,61 +126,48 @@ def build_layer(M,Xs,Ys,X,Y,l):
   global Ay0
   X = deepcopy(X)
   Y = deepcopy(Y)
-  VERBOSE and print('build_layer', l)
 
   for A in (Ys[l] if l else [Ay0]):
-    if len(X.get(A, tuple())) >= U:
-      continue
     for v in from_color(A):
+      if len(X.get(A, tuple())) >= U:
+        break
+
       if not is_good(A,v,Xs,Ys,X,Y,l):
         continue
 
-      VERBOSE and print('.', end='', flush=True)
-
       # X = X u {v}
-      X.setdefault(v.color, set()).add(v)
+      X.setdefault(A, set()).add(v)
 
       # Y = Y u {u in M | uv in E}
       for u in M.values():
         if v.edge(u):
-          if u.color in Y:
-            VERBOSE and print('uh oh', Y, u, v, u in set(v.neighbors()))
-            input()
           Y[u.color] = u
 
   return X,Y
 
 
 def is_good(A, v, Xs, Ys, X, Y, l):
-  if A != v.color:
-    VERBOSE and print('oh shoot', A, v)
-    input()
+  if v == Y.get(A):
+    return False
 
-  # if A in Ys[l] and v == Ys[l][A]:
-  #   return False
-  for i in range(l+1):
-    if A in Ys[i] and v == Ys[i][A]:
-      return False
+  if v == Ys[l].get(A):
+    return False
 
   if A in X and v in X[A]:
     return False
 
-  if A in Y and v == Y[A]:
-    return False
-
   # we don't have its neighbors
   for u in v.neighbors():
+    if u == Y.get(u.color):
+      return False
 
     if u.color in X and u in X[u.color]:
       return False
 
-    if u.color in Y and u == Y[u.color]:
-      return False
-
     for i in range(l+1):
-      if u.color in Xs[i] and u in Xs[i][u.color]:
+      if u == Ys[i].get(u.color):
         return False
-      if u.color in Ys[i] and u == Ys[i][u.color]:
+      if u.color in Xs[i] and u in Xs[i][u.color]:
         return False
 
   return True
@@ -232,16 +176,6 @@ def is_good(A, v, Xs, Ys, X, Y, l):
 def immediate_count(M,W,l):
   Icount = 0
   Iany = None
-
-  # the neighborly way
-  # for vs in W.values():
-  #   for v in vs:
-  #     for u in v.neighbors():
-  #       if u.color in M and u == M[u.color]:
-  #         break
-  #     else:
-  #       Icount += 1
-  #       Iany = v
 
   for v in it.chain(*W.values()):
     for u in M.values():
