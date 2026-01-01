@@ -1,8 +1,11 @@
 import itertools as it
 import math
+import os
 from collections import Counter
-from copy import deepcopy
 from datetime import datetime
+from time import time
+
+VERBOSE = False
 
 
 def edge(self, other):
@@ -15,12 +18,11 @@ def edge(self, other):
   return True
 
 
-def find_it(limit=None):
+def find_it(M=None):
   global Ay0
 
-  limit = limit or len(colors)
-  M = dict()
-  for i in range(limit):
+  M = M or dict()
+  for _ in range(len(M), len(colors)):
     for A in colors:
       if A not in M:
         break
@@ -28,24 +30,25 @@ def find_it(limit=None):
       break
 
     # if not i % 100:
-    print(datetime.now(), f'find_it iteration {i} of {len(colors)}')
+    # print(datetime.now(), f'find_it iteration {i} of {len(colors)}')
 
     Ay0 = A
-    M = grow_transversal(M, A)
-    if M is None:
-      return None
-  return M
+    if grow_transversal(M, A):
+      yield M
+    else:
+      yield None
+      break
 
 
 def grow_transversal(M, A):
-  M = deepcopy(M)
-
   # Xs = [{ color: {vertices} }, ...]
   Xs = [dict()]
   # Ys = [{ color: vertex }, ...]
   Ys = [dict()]
   l = 0
+  VERBOSE and print('|',end='',flush=True)
   while A not in M:
+    VERBOSE and print('*',end='',flush=True)
     forbidden = calc_forbidden(Xs,Ys,dict(),dict(),l)
     colors = (Ys[l] if l else [Ay0])
     X,Y = build_layer(M,dict(),dict(),forbidden,colors)
@@ -58,6 +61,7 @@ def grow_transversal(M, A):
     Ys.append(Y)
     l += 1
     while True:
+      VERBOSE and print('^',end='',flush=True)
       # Icount : int
       # Imap[color] = vertex
       Icount, Iany, Iany_color = immediate_count(M,Xs[l],l)
@@ -104,12 +108,14 @@ def calc_forbidden(Xs,Ys,X,Y,l):
 
 
 def build_layer(M,X,Y,forbidden,colors):
+  VERBOSE and print('(',end='',flush=True)
   if X:
     X = {k:set(v) for k,v in X.items()}
   if Y:
     Y = {**Y}
 
   for A in colors:
+    VERBOSE and print('A',end='',flush=True)
     for v in from_color(A):
       if len(X.get(A, tuple())) >= U:
         break
@@ -135,6 +141,7 @@ def build_layer(M,X,Y,forbidden,colors):
           Y[u_color] = u
           forbidden.add(u)
 
+  VERBOSE and print(')',end='',flush=True)
   return X,Y
 
 
@@ -286,7 +293,57 @@ if __name__ == '__main__':
   # pr = cProfile.Profile()
   # pr.enable()  # Start profiling
 
-  M = find_it()
+  good = False
+  M = dict()
+  filename = f'pa_{perm_len}_{pa_distance}_haxell.txt'
+  if os.path.exists(filename):
+    print(f'Found a file named {filename}')
+    with open(filename, 'r') as f:
+      good = True
+      for line in f:
+        line = line.split('#')[0].strip()
+        row = tuple(map(int, line.split()))
+        color = tuple(e//pa_distance for e in row)
+        M[color] = row
+        if len(row) != perm_len:
+          print(f'One row has {len(row)} permutations. We are not using this file.')
+          if 'y' != input('Overwrite this file and continue from scratch? (y/N)').lower():
+            exit(0)
+
+          good = False
+          break
+        
+      for _,u in M.items():
+        for _,v in M.items():
+          if u != v and edge(u,v):
+            print('Not separated 1:', u)
+            print('Not separated 2:', v)
+            print(f'Two rows are not separated. We are not using this file.')
+            if 'y' != input('Overwrite this file and continue from scratch? (y/N)').lower():
+              exit(0)
+
+            good = False
+            break
+        if not good:
+          break
+
+  if not good:
+    M = dict()
+
+  t = time()
+  for M in find_it(M):
+    if M is None:
+      print('Failure!')
+      exit(0)
+    
+    i = len(M)
+    print(datetime.now(), f'iteration {i} of {len(colors)}')
+    if i % 100 == 0 or time() - t > 10:
+      print(datetime.now(), f'Writing {len(M)} permutations to {filename}')
+      with open(filename, 'w+') as f:
+        for row in M.values():
+          f.write(' '.join(map(str, row)) + '\n')
+      t = time()
 
   # pr.disable()  # Stop profiling
   # pr.print_stats(sort='tottime') # Print statistics, sorted by cumulative time
