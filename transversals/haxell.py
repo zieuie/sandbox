@@ -250,22 +250,31 @@ def make_ident_neigh():
   return neigh
 
 
-def make_foes():
-  n,d = perm_len, pa_distance
-  q = tuple(range(n))
-  qt = tuple(e//d for e in q)
-
-
-
-
-
-
 # globals
+backup_interval = 60
+HELP_STR = f'''
+haxell.py - Creates (n choose d) permutation arrays using Haxell's algorithm
+            for independent transversals. A backup will be made every {backup_interval} seconds.
+
+Usage:
+  pypy3 haxell.py N D [epsilon]
+
+Where:
+  N       - Permutation length
+  D       - Chebyshev distance
+  epsilon - A parameter for Haxell's algorithm (Default 0.1)
+'''
+
 if __name__ == '__main__':
   from sys import argv
-  perm_len = int(argv[1])
-  pa_distance = int(argv[2])
-  eps = float(argv[3]) if len(argv) > 3 else 0.1
+  try:
+    perm_len = int(argv[1])
+    pa_distance = int(argv[2])
+    eps = float(argv[3]) if len(argv) > 3 else 0.1
+  except:
+    print(HELP_STR)
+    exit(1)
+
   dsquared = pa_distance**2
 
   print (f'P({perm_len}, {pa_distance}) with epsilon {eps}')
@@ -338,7 +347,7 @@ if __name__ == '__main__':
     
     i = len(M)
     print(datetime.now(), f'iteration {i} of {len(colors)}')
-    if i % 100 == 0 or time() - t > 10:
+    if i % 100 == 0 or time() - t > backup_interval:
       print(datetime.now(), f'Writing {len(M)} permutations to {filename}')
       with open(filename, 'w+') as f:
         for row in M.values():
