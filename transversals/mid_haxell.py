@@ -5,8 +5,6 @@ from collections import Counter
 from datetime import datetime
 from time import time
 
-VERBOSE = False
-
 
 def edge(self, other):
   i = 0
@@ -18,26 +16,37 @@ def edge(self, other):
   return True
 
 
-def find_it(M=None):
-  global Ay0
-
-  M = M or dict()
+def find_it(M, colors):
+  t = time()
   for _ in range(len(M), len(colors)):
+    # pick an unused color
     for A in colors:
       if A not in M:
         break
     else:
       break
 
-    # if not i % 100:
-    # print(datetime.now(), f'find_it iteration {i} of {len(colors)}')
+    if not grow_transversal(M, A):
+      return False
 
-    Ay0 = A
-    if grow_transversal(M, A):
-      yield M
-    else:
-      yield None
-      break
+    # print some status
+    i = len(M)
+    print(datetime.now(), f'P({perm_len},{pa_distance}) >= {i} of {len(colors)}')
+
+    # do a backup maybe
+    if time() - t > backup_interval:
+      print(datetime.now(), f'Writing {i} permutations to {filename}')
+      with open(filename, 'w+') as f:
+        for row in M.values():
+          f.write(' '.join(map(str, row)) + '\n')
+      t = time()
+
+  # we terminated! write it to a final file
+  print(datetime.now(), f'Writing {len(M)} permutations to {filename}')
+  with open(filename, 'w+') as f:
+    for v in M.values():
+      f.write(' '.join(map(str, v)) + '\n')
+  return True
 
 
 def grow_transversal(M, A):
@@ -46,12 +55,10 @@ def grow_transversal(M, A):
   # Ys = [{ color: vertex }, ...]
   Ys = [dict()]
   l = 0
-  VERBOSE and print('|',end='',flush=True)
   while A not in M:
-    VERBOSE and print('*',end='',flush=True)
     forbidden = calc_forbidden(Xs,Ys,dict(),dict(),l)
-    colors = (Ys[l] if l else [Ay0])
-    X,Y = build_layer(M,dict(),dict(),forbidden,colors)
+    a_list = (Ys[l] if l else [A])
+    X,Y = build_layer(M,dict(),dict(),forbidden,a_list)
 
     Yllen = sum(map(len,Ys))
     if sum(map(len,X.values())) <= rho * Yllen:
@@ -61,10 +68,9 @@ def grow_transversal(M, A):
     Ys.append(Y)
     l += 1
     while True:
-      VERBOSE and print('^',end='',flush=True)
       # Icount : int
       # Imap[color] = vertex
-      Icount, Iany, Iany_color = immediate_count(M,Xs[l],l)
+      Icount, Iany, Iany_color = immediate_count(M,Xs[l],l, A)
       if Icount <= mu * sum(map(len,Xs[l].values())):
         break
 
@@ -77,7 +83,7 @@ def grow_transversal(M, A):
         if w_color not in Xs[l]:
           continue
 
-        _, u, _ = immediate_count(M, {w_color: Xs[l][w_color]},l)
+        _, u, _ = immediate_count(M, {w_color: Xs[l][w_color]},l, A)
         if u is None:
           continue
 
@@ -91,8 +97,8 @@ def grow_transversal(M, A):
       Xs, Ys, l = Xs[:l], Ys[:l], l-1
       for l in range(1,l+1):
         forbidden = calc_forbidden(Xs,Ys,Xs[l],Ys[l],l-1)
-        colors = (Ys[l-1] if l-1 else [Ay0])
-        X,Y = build_layer(M,Xs[l],Ys[l],forbidden,colors)
+        a_list = (Ys[l-1] if l-1 else [A])
+        X,Y = build_layer(M,Xs[l],Ys[l],forbidden,a_list)
         if sum(map(len,X.values())) >= (1+mu)*sum(map(len,Xs[l].values())):
           Xs[l], Ys[l] = X,Y
           break
@@ -107,15 +113,13 @@ def calc_forbidden(Xs,Ys,X,Y,l):
   return forbidden
 
 
-def build_layer(M,X,Y,forbidden,colors):
-  VERBOSE and print('(',end='',flush=True)
+def build_layer(M,X,Y,forbidden,a_list):
   if X:
     X = {k:set(v) for k,v in X.items()}
   if Y:
     Y = {**Y}
 
-  for A in colors:
-    VERBOSE and print('A',end='',flush=True)
+  for A in a_list:
     for v in from_color(A):
       if len(X.get(A, tuple())) >= U:
         break
@@ -141,11 +145,10 @@ def build_layer(M,X,Y,forbidden,colors):
           Y[u_color] = u
           forbidden.add(u)
 
-  VERBOSE and print(')',end='',flush=True)
   return X,Y
 
 
-def immediate_count(M,W,l):
+def immediate_count(M,W,l,A):
   Icount = 0
   Iany = None
   Iany_color = None
@@ -156,7 +159,7 @@ def immediate_count(M,W,l):
         if v_color != u_color and edge(u, v):
           break
       else:
-        if l != 1 or v_color == Ay0:
+        if l != 1 or v_color == A:
           Icount += 1
           Iany = v
           Iany_color = v_color
@@ -164,35 +167,39 @@ def immediate_count(M,W,l):
   return Icount, Iany, Iany_color
 
 
-# @functools.lru_cache(maxsize=2)
 def from_color(A):
-  global cgroups
-  ret = []
-  for g in it.product(*cgroups):
-    g = list(map(iter, g))
-    ret.append(tuple(next(g[e]) for e in A))
-  return ret
+  num_groups = int(math.ceil(perm_len/pa_distance))
+  for row in ident_class:
+    c = [0]*num_groups
+    ret = [0]*perm_len
+    for i,e in enumerate(A):
+      ret[i] = row[c[e]+pa_distance*e]
+      c[e] += 1
+    yield tuple(ret)
 
 
 def make_colors():
   sofar = [0]*perm_len
-  rem = dict()
-  for x in range(int(math.ceil(perm_len/pa_distance))):
-    rem[x] = list(range(pa_distance*x, min(perm_len, pa_distance*(x+1))))
+  num_groups = int(math.ceil(perm_len/pa_distance))
+  rem = [0]*num_groups
+  for x in range(num_groups):
+    rem[x] = min(perm_len, pa_distance*(x+1)) - pa_distance*x
 
+  ret = []
   def recur(i):
     if i >= perm_len:
-      yield tuple(sofar)
+      ret.append(tuple(sofar))
       return
 
-    for k,v in rem.items():
-      if v:
-        pot = v.pop()
+    for k in range(len(rem)):
+      if rem[k]:
+        rem[k] -= 1
         sofar[i] = k
-        yield from recur(i+1)
-        v.append(pot)
+        recur(i+1)
+        rem[k] += 1
 
-  yield from recur(0)
+  recur(0)
+  return ret
 
 
 def feasible_constants(r, eps):
@@ -262,7 +269,7 @@ def resume_computation(filename):
         line = line.split('#')[0].strip()
         if len(line) == 0:
           continue
-        
+
         # get the permutation out of it
         row = tuple(map(int, line.split()))
         color = tuple(e//pa_distance for e in row)
@@ -296,13 +303,13 @@ def resume_computation(filename):
 # globals
 backup_interval = 60
 HELP_STR = f'''
-haxell.py 
+haxell.py
 
 Creates (n choose d) permutation arrays using Haxell's algorithm
 for independent transversals. A backup will be made every {backup_interval} seconds.
 
 This program can resume from any partial permutation array stored in
-a file named pa_n_d_haxell.txt. For example, pa_12_3_haxell.txt, 
+a file named pa_n_d_haxell.txt. For example, pa_12_3_haxell.txt,
 if it exists, will be used on startup.
 
 Usage:
@@ -331,7 +338,8 @@ if __name__ == '__main__':
   # read a file if it exists
   print (f'P({perm_len}, {pa_distance}) with epsilon {eps}')
   filename = f'pa_{perm_len}_{pa_distance}_haxell.txt'
-  M = resume_computation(filename)
+  # M = resume_computation(filename)
+  M = dict()
 
   # get the neighbors of the identity to calculate r-claw
   ident_neigh = make_ident_neigh()
@@ -347,36 +355,13 @@ if __name__ == '__main__':
   colors = list(make_colors())
   print(f'There are {len(colors)} colors')
 
-  # globals for from_color()
-  cgroups = []
-  for x in range(int(math.ceil(perm_len/pa_distance))):
-    cgroups.append(list(range(pa_distance*x, min(perm_len, pa_distance*(x+1)))))
-  cgroups = list(map(list,map(it.permutations, cgroups)))
-
+  # here be dragons
+  ident_class = [list(it.chain(*g)) for g in it.product(*[list(it.permutations(list(range(pa_distance*x, min(perm_len, pa_distance*(x+1)))))) for x in range(int(math.ceil(perm_len/pa_distance)))])]
+  
   # main driver
   t = time()
-  for M in find_it(M):
-    # get mad
-    if M is None:
-      print('Haxell halted without an independent transversal!')
-      exit(0)
-    
-    # print some status
-    i = len(M)
-    print(datetime.now(), f'P({perm_len},{pa_distance}) >= {i} of {len(colors)}')
-
-    # do a backup maybe
-    if i % 100 == 0 or time() - t > backup_interval:
-      print(datetime.now(), f'Writing {i} permutations to {filename}')
-      with open(filename, 'w+') as f:
-        for row in M.values():
-          f.write(' '.join(map(str, row)) + '\n')
-      t = time()
-
-  # we terminated! write it to a final file
-  print(datetime.now(), f'Writing {i} permutations to {filename}')
-  with open(filename, 'w+') as f:
-    for v in M.values():
-      f.write(' '.join(map(str, v)) + '\n')
+  if not find_it(M, colors):
+    print('Haxell halted without an independent transversal!')
+    exit(1)
 
   print('Success!')
