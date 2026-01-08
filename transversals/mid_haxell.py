@@ -26,8 +26,21 @@ def find_it(M, colors):
     else:
       break
 
-    if not grow_transversal(M, A):
-      return False
+    good, BD = grow_transversal(M, A)
+    if not good:
+      print('Haxell halted without an independent transversal!')
+      B,D = BD
+      with open(f'bd_{perm_len}_{pa_distance}_haxell.txt', 'w+') as f:
+        f.write('# B\n')
+        for a in B:
+          f.write(' '.join(map(str,a)) + '\n')
+        f.write('\n\n# D\n')
+        for k,vs in D.items():
+          f.write('##\n' + ' '.join(map(str,k)) + '\n\n')
+          for v in vs:
+            f.write(' '.join(map(str,v)) + '\n')
+
+      return
 
     # print some status
     i = len(M)
@@ -46,7 +59,72 @@ def find_it(M, colors):
   with open(filename, 'w+') as f:
     for v in M.values():
       f.write(' '.join(map(str, v)) + '\n')
-  return True
+
+  print('Success!')
+
+
+def make_bd(M, A, Xs, Ys, Xfail, Yfail, l):
+  B = set()
+  for y in Ys[:l+1]:
+    B.update(y.keys())
+  B.difference_update(it.islice(from_color(A),U))
+
+  D = dict()
+  for j in range(1, l+1):
+    forbidden = calc_forbidden(Xs[:j],Ys[:j],Xs[j],Ys[j],j-1)
+    a_list = Ys[j]
+    Xj, Yj = build_layer(M, Xs[j], Ys[j],forbidden,a_list)
+    B.difference_update(Xs[j].keys() - Xj.keys())
+    for k,v in Xj.items():
+      D.setdefault(k,set()).update(v)
+    for k,v in Yj.items():
+      D.setdefault(k,set()).add(v)
+
+  for k,v in Xfail.items():
+    D.setdefault(k,set()).update(v)
+  for k,v in Yfail.items():
+    D.setdefault(k,set()).add(v)
+  for k,v in make_s(M,D).items():
+    D.setdefault(k,set()).update(v)
+
+  return B,D
+
+
+def make_s(M,W):
+  # page 14
+  # define S to be the set of all u s.t.
+  # u is the smallest indexed neighbor of v in Im(W)
+
+  # page 6:
+  # v is immediately addable w.r.t. M if
+  # v not in M and has no edge into M
+
+  # so...
+
+  S = dict()
+  # for v in W...
+  for v_color, vs in W.items():
+    print('v_color', v_color)
+    for v in vs:
+      print('v', v)
+      for u_color, u in M.items():
+        print('u_color, u, v', u_color,u,v)
+        if v_color != u_color and edge(u, v):
+          break
+      else:
+        # v is immediately addable, i.e., v in Im(W)
+        # (e,n) iff (v,u) iff (e,u*vinv=n) so u = nv
+        u = None
+        ua = None
+        for na, ns in ident_neigh.items():
+          for neigh in ns:
+            pot = tuple(neigh[e] for e in v)
+            if u is None or pot < u:
+              u = pot
+              ua = tuple(na[e] for e in v)
+        S.setdefault(ua,set()).add(u)
+
+  return S
 
 
 def grow_transversal(M, A):
@@ -62,7 +140,7 @@ def grow_transversal(M, A):
 
     Yllen = sum(map(len,Ys))
     if sum(map(len,X.values())) <= rho * Yllen:
-      return None
+      return False, make_bd(M, A, Xs, Ys, X,Y,l)
 
     Xs.append(X)
     Ys.append(Y)
@@ -76,7 +154,7 @@ def grow_transversal(M, A):
 
       if l == 1:
         M[Iany_color] = Iany
-        return M
+        return True, None
 
       to_delete = set()
       for w_color in Ys[l-1]:
@@ -282,7 +360,7 @@ def resume_computation(filename):
           if 'y' != input('Overwrite this file and continue from scratch? (y/N)').lower():
             exit(0)
 
-      # verify the partitial independent transversal
+      # verify the partial independent transversal
       P = list(M.values())
       for ux,u in enumerate(P):
         for vx in range(ux):
@@ -357,11 +435,6 @@ if __name__ == '__main__':
 
   # here be dragons
   ident_class = [list(it.chain(*g)) for g in it.product(*[list(it.permutations(list(range(pa_distance*x, min(perm_len, pa_distance*(x+1)))))) for x in range(int(math.ceil(perm_len/pa_distance)))])]
-  
-  # main driver
-  t = time()
-  if not find_it(M, colors):
-    print('Haxell halted without an independent transversal!')
-    exit(1)
 
-  print('Success!')
+  # main driver
+  find_it(M, colors)
