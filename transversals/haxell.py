@@ -275,7 +275,7 @@ def resume_computation(filename):
           if 'y' != input('Overwrite this file and continue from scratch? (y/N)').lower():
             exit(0)
 
-      # verify the partitial independent transversal
+      # verify the partial independent transversal
       P = list(M.values())
       for ux,u in enumerate(P):
         for vx in range(ux):
@@ -331,7 +331,8 @@ if __name__ == '__main__':
   # read a file if it exists
   print (f'P({perm_len}, {pa_distance}) with epsilon {eps}')
   filename = f'pa_{perm_len}_{pa_distance}_haxell.txt'
-  M = resume_computation(filename)
+  # M = resume_computation(filename)
+  M = dict()
 
   # get the neighbors of the identity to calculate r-claw
   ident_neigh = make_ident_neigh()
@@ -374,6 +375,7 @@ if __name__ == '__main__':
       t = time()
 
   # we terminated! write it to a final file
+  i = len(M)
   print(datetime.now(), f'Writing {i} permutations to {filename}')
   with open(filename, 'w+') as f:
     for v in M.values():

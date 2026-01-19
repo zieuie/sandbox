@@ -26,7 +26,9 @@ def find_it(M, colors):
     else:
       break
 
+    print('grow_transversal start')
     good, BD = grow_transversal(M, A)
+    print('grow_transversal end')
     if not good:
       print('Haxell halted without an independent transversal!')
       B,D = BD
@@ -64,6 +66,7 @@ def find_it(M, colors):
 
 
 def make_bd(M, A, Xs, Ys, Xfail, Yfail, l):
+  print('make_bd start')
   B = set()
   for y in Ys[:l+1]:
     B.update(y.keys())
@@ -73,7 +76,7 @@ def make_bd(M, A, Xs, Ys, Xfail, Yfail, l):
   for j in range(1, l+1):
     forbidden = calc_forbidden(Xs[:j],Ys[:j],Xs[j],Ys[j],j-1)
     a_list = Ys[j]
-    Xj, Yj = build_layer(M, Xs[j], Ys[j],forbidden,a_list)
+    Xj, Yj = build_layer(M, Xs[j], Ys[j],Ys[j-1],forbidden,a_list)
     B.difference_update(Xs[j].keys() - Xj.keys())
     for k,v in Xj.items():
       D.setdefault(k,set()).update(v)
@@ -104,11 +107,11 @@ def make_s(M,W):
   S = dict()
   # for v in W...
   for v_color, vs in W.items():
-    print('v_color', v_color)
+    # print('v_color', v_color)
     for v in vs:
-      print('v', v)
+      # print('v', v)
       for u_color, u in M.items():
-        print('u_color, u, v', u_color,u,v)
+        # print('u_color, u, v', u_color,u,v)
         if v_color != u_color and edge(u, v):
           break
       else:
@@ -134,13 +137,31 @@ def grow_transversal(M, A):
   Ys = [dict()]
   l = 0
   while A not in M:
+    print(f'while {A} not in M')
+    for i in range(l+1):
+      print(f'Ys[{i}]')
+      for k,v in Ys[i].items():
+        print('  ', v)
+      print(f'Xs[{i}]')
+      for k,v in Xs[i].items():
+        print('  ', k, len(v))
     forbidden = calc_forbidden(Xs,Ys,dict(),dict(),l)
     a_list = (Ys[l] if l else [A])
-    X,Y = build_layer(M,dict(),dict(),forbidden,a_list)
+    X,Y = build_layer(M,dict(),dict(),Ys[l],forbidden,a_list)
+    print('Layer built')
+    print('Y')
+    for k,v in Y.items():
+      print('  ', v)
+    print('X')
+    for k,v in X.items():
+      print('  ', k, len(v))
 
     Yllen = sum(map(len,Ys))
     if sum(map(len,X.values())) <= rho * Yllen:
-      return False, make_bd(M, A, Xs, Ys, X,Y,l)
+      print(f'sum({list(map(len,X.values()))}) <= {rho} * {Yllen}')
+      print(f'{sum(map(len,X.values()))} <= {rho * Yllen}')
+
+      return False, ([],{}) # make_bd(M, A, Xs, Ys, X,Y,l)
 
     Xs.append(X)
     Ys.append(Y)
@@ -150,21 +171,39 @@ def grow_transversal(M, A):
       # Imap[color] = vertex
       Icount, Iany, Iany_color = immediate_count(M,Xs[l],l, A)
       if Icount <= mu * sum(map(len,Xs[l].values())):
+        print(f'Icount <= mu * sum(map(len,Xs[l].values())')
+        print(f'{Icount} <= {mu} * sum({list(map(len,Xs[l].values()))})')
+        print(f'{Icount} <= {mu*sum(map(len,Xs[l].values()))}')
+        print('breaking')
         break
+
+      print(f'Icount > mu * sum(map(len,Xs[l].values())')
+      print(f'{Icount} > {mu} * sum({list(map(len,Xs[l].values()))})')
+      print(f'{Icount} > {mu*sum(map(len,Xs[l].values()))}')
+      print('not breaking')
 
       if l == 1:
         M[Iany_color] = Iany
+        print("l==1 so taking", Iany)
         return True, None
 
       to_delete = set()
       for w_color in Ys[l-1]:
         if w_color not in Xs[l]:
+          print("l>1 but nothing in Xs[l] available of color", w_color)
+          print("Xs[l]")
+          for i,x in enumerate(Xs):
+            print(f'  Xs[{i}]')
+            for k,v in x.items():
+              print('    ', k, len(v))
           continue
 
         _, u, _ = immediate_count(M, {w_color: Xs[l][w_color]},l, A)
         if u is None:
+          print("l>1 but nothing available of color", w_color)
           continue
 
+        print("l>1 so taking", u)
         M[w_color] = u
         to_delete.add(w_color)
 
@@ -172,47 +211,70 @@ def grow_transversal(M, A):
         Ys[l-1].pop(a)
 
       # superposed_build
+      print("superposed_build start", l)
       Xs, Ys, l = Xs[:l], Ys[:l], l-1
       for l in range(1,l+1):
         forbidden = calc_forbidden(Xs,Ys,Xs[l],Ys[l],l-1)
         a_list = (Ys[l-1] if l-1 else [A])
-        X,Y = build_layer(M,Xs[l],Ys[l],forbidden,a_list)
+        X,Y = build_layer(M,Xs[l],Ys[l],Ys[l-1],forbidden,a_list)
         if sum(map(len,X.values())) >= (1+mu)*sum(map(len,Xs[l].values())):
           Xs[l], Ys[l] = X,Y
           break
       Xs, Ys = Xs[:l+1], Ys[:l+1]
+      print("superposed_build end")
 
 
 def calc_forbidden(Xs,Ys,X,Y,l):
   forbidden = set()
-  forbidden.update(Y.values(), *X.values())
-  for i in range(l+1):
-    forbidden.update(Ys[i].values(), *Xs[i].values())
+  forbidden.update(Y.values(), *X.values(), Ys[l].values())
+  # for i in range(l+1):
+  #   forbidden.update(Ys[i].values(), *Xs[i].values())
   return forbidden
 
 
-def build_layer(M,X,Y,forbidden,a_list):
+def build_layer(M,X,Y,Ysl,forbidden,a_list):
+  print('build_layer', len(forbidden))
+  print('M')
+  for k,v in M.items():
+    print('  ', v)
+  print('Y', len(Y))
+  for k,v in Y.items():
+    print('  ', v)
+  print('X', len(X))
+  for k,v in X.items():
+    print('  ', k, len(v))
+  print('a_list')
+  for v in a_list:
+    print('  ', v)
+
   if X:
-    X = {k:set(v) for k,v in X.items()}
+    X = {k:set(list(v)) for k,v in X.items()}
   if Y:
     Y = {**Y}
 
+  welp = set()
+  welp.update(Y.values(), Ysl.values(), *X.values())
   for A in a_list:
+    print('from color', A)
     for v in from_color(A):
       if len(X.get(A, tuple())) >= U:
+        print('  ', v, 'too many')
         break
 
-      if v in forbidden:
+      if v in welp:
+        print('  ', v, 'forbidden')
         continue
 
       good = True
       for u in forbidden:
         if edge(u,v) and tuple(e//pa_distance for e in u) != A:
+          print('  ', v, 'edge with', u)
           good = False
           break
       if not good:
         continue
 
+      print('! ', v, 'good')
       # X = X u {v}
       X.setdefault(A, set()).add(v)
       forbidden.add(v)
@@ -222,6 +284,7 @@ def build_layer(M,X,Y,forbidden,a_list):
         if A != u_color and edge(v, u):
           Y[u_color] = u
           forbidden.add(u)
+          print('> ', u, 'added')
 
   return X,Y
 
