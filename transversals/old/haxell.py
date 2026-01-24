@@ -33,11 +33,37 @@ def find_it(M=None):
     # print(datetime.now(), f'find_it iteration {i} of {len(colors)}')
 
     Ay0 = A
-    if grow_transversal(M, A):
+    state = grow_transversal(M, A)
+
+    if state is None:
       yield M
-    else:
-      yield None
-      break
+      continue
+
+    X, Y, xfail, yfail, l = state
+    B,D = make_BD(M, A, X, Y, xfail, yfail, l)
+    
+    print()
+    print('B:')
+    for e in B:
+      print('  -', e)
+    print()
+    print('D:')
+    for k,vs in D.items():
+      print()
+      print(k)
+      for e in vs:
+        print('  -', e)
+    print()
+
+    good = True    
+    for a in B:
+      for v in from_color(a):
+        if not is_dominated(a,v,D):
+          print('not dominated:', v)
+          good = False
+    print('Proper BD:', good)
+    print(len(B), sum(len(e) for e in D.values()))
+    exit(1)
 
 
 def grow_transversal(M, A):
@@ -55,7 +81,7 @@ def grow_transversal(M, A):
 
     Yllen = sum(map(len,Ys))
     if sum(map(len,X.values())) <= rho * Yllen:
-      return None
+      return Xs, Ys, X, Y, l
 
     Xs.append(X)
     Ys.append(Y)
@@ -70,7 +96,7 @@ def grow_transversal(M, A):
 
       if l == 1:
         M[Iany_color] = Iany
-        return M
+        return None
 
       to_delete = set()
       for w_color in Ys[l-1]:
@@ -291,6 +317,129 @@ def resume_computation(filename):
   if good:
     return M
   return dict()
+
+
+
+
+
+
+
+
+
+
+### The BD part
+
+
+def immediately_addable(M, W):
+  ret = dict()
+  for a,vs in W.items():
+    for v in vs:
+      if not blocks(M,a,v):
+        ret.setdefault(a,set()).add(v)
+  return ret
+
+def blocks(M,av,v):
+  for au,u in M.items():
+    if au != av and edge(u,v):
+      return True
+  return False
+
+def compute_B(A, Y, l):
+    """
+    A is root class.
+    Y is list of dicts: Y[i][class] = blocking vertex (from M)
+    l is current depth at failure (we tried to build layer l+1 and failed)
+    """
+    B = {A}
+    # Y_0 is empty in your code; paper treats A(Y_0)=A specially.
+    for i in range(1, l+1):
+        B.update(Y[i].keys())
+    return B
+
+def remove_AU_from_B(B, A, X, U):
+    # A^U = "the first U vertices in class A" in the paper’s ordering.
+    # In your code, simplest proxy: if |X_1[A]| reached U, drop A from B.
+    if 1 < len(X) and len(X[1].get(A, ())) >= U:
+        B.discard(A)
+    return B
+
+def compute_D(X, Y, xfail=None, yfail=None):
+    D = {}
+    # layers 1..l (skip layer 0 placeholder)
+    for i in range(1, len(X)):
+        for a, vs in X[i].items():
+            D.setdefault(a, set()).update(vs)
+    for i in range(1, len(Y)):
+        for a, v in Y[i].items():
+            D.setdefault(a, set()).add(v)
+    if xfail:
+        for a, vs in xfail.items():
+            D.setdefault(a, set()).update(vs)
+    if yfail:
+        for a, v in yfail.items():
+            D.setdefault(a, set()).add(v)
+    return D
+
+def compute_S(M, W):
+    """
+    M: transversal dict[class]->vertex
+    W: dict[class]->iterable of vertices (candidate pool)
+    S: dict[class(u)] -> set(vertices u)
+    where u is the minimum neighbor of v among v in Im(W).
+    """
+    S = {}
+    for v in immediately_addable(M, W):
+        best_u = None
+        for pot in ident_neigh:
+            u = tuple(pot[e] for e in v)
+            if best_u is None or u < best_u:
+                best_u = u
+        if best_u is not None:
+            au = tuple(e//pa_distance for e in best_u)
+            S.setdefault(au, set()).add(best_u)
+    return S
+
+def make_BD(M, A, X, Y, xfail, yfail, l):
+    B = compute_B(A, Y, l)
+    B = remove_AU_from_B(B, A, X, U)
+
+    D = compute_D(X, Y, xfail, yfail)
+
+    # Optionally restrict W to classes in B to keep S small:
+    W = {a: vs for a, vs in D.items() if a in B}
+
+    S = compute_S(M, W)
+    for a, vs in S.items():
+        D.setdefault(a, set()).update(vs)
+
+    return B, D
+
+def is_dominated(a,v,D):
+  # if a in D and v in D[a]:
+  #   return True
+
+  for au,us in D.items():
+    for u in us:
+      if a != au and edge(u,v):
+        return True
+      
+  return False
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # globals
