@@ -5,60 +5,49 @@ from collections import Counter
 from datetime import datetime
 from time import time
 import random
+from bisect import bisect_left
 
 
 ### Metric-specific stuff
 
+def separated(self, other):
+  return pa_distance <= len(self) - _lcs_len(self, other)
+
 def edge(self, other):
-  # if [e//pa_distance for e in self] == [e//pa_distance for e in other]:
-  #   return False
-  i = 0
-  L = len(self)
-  while i < L:
-    if (self[i]-other[i])**2 >= dsquared:
-      return False
-    i += 1
-  return True
+  return pa_distance > len(self) - _lcs_len(self, other)
+
+def _lcs_len(a, b):
+  pos = {x:i for i, x in enumerate(b)}
+  s = [pos[x] for x in a]
+  tails = []
+  for v in s:
+    j = bisect_left(tails, v)
+    if j == len(tails):
+      tails.append(v)
+    else:
+      tails[j] = v
+  return len(tails)
 
 def get_color(v):
-  return tuple(e//pa_distance for e in v)
+  # return tuple(e//pa_distance for e in v)
+  g = perm_len-pa_distance+1
+  return tuple(e for e in v if e < g)
 
 def from_color(A):
-  num_groups = int(math.ceil(perm_len/pa_distance))
-  for row in ident_class:
-    c = [0]*num_groups
-    ret = [0]*perm_len
-    for i,e in enumerate(A):
-      ret[i] = row[c[e]+pa_distance*e]
-      c[e] += 1
-    yield tuple(ret)
+  n = perm_len
+  for ps in it.combinations(list(range(n)), len(A)):
+    for qs in it.permutations(list(range(len(A), n))):
+      l, h = iter(A), iter(qs)
+      yield tuple(next(l) if i in ps else next(h) for i in range(n))
 
 def get_neighbors(v):
-  for pot in ident_neigh:
-    yield tuple(pot[e] for e in v)
+  raise NotImplementedError(f'Cannot get neighbors for {v}')
+  # for pot in ident_neigh:
+  #   yield tuple(pot[e] for e in v)
 
 def make_colors():
-  sofar = [0]*perm_len
-  num_groups = int(math.ceil(perm_len/pa_distance))
-  rem = [0]*num_groups
-  for x in range(num_groups):
-    rem[x] = min(perm_len, pa_distance*(x+1)) - pa_distance*x
-
-  ret = []
-  def recur(i):
-    if i >= perm_len:
-      ret.append(tuple(sofar))
-      return
-
-    for k in range(len(rem)):
-      if rem[k]:
-        rem[k] -= 1
-        sofar[i] = k
-        recur(i+1)
-        rem[k] += 1
-
-  recur(0)
-  return ret
+  g = perm_len-pa_distance+1
+  return list(it.permutations(list(range(g))))
 
 def get_degree_and_r():
   global ident_neigh
@@ -66,41 +55,21 @@ def get_degree_and_r():
   r = len(ident_neigh)
   return sum(map(len,ident_neigh)), r
 
-
 def make_ident_neigh():
-  n,d = perm_len, pa_distance
+  n = perm_len
   q = list(range(n))
   qt = get_color(q)
 
-  groups = []
-  for i in range(n):
-    g = []
-    for j in range(n):
-      if abs(j-i) < d:
-        g.append(j)
-    groups.append(g)
-
-  used = [0]*n
-  sofar = [0]*n
-  def recur(i=0):
-    if i >= n:
-      yield tuple(sofar)
-      return
-    for e in groups[i]:
-      if used[e]:
-        continue
-      used[e] = True
-      sofar[i] = e
-      yield from recur(i+1)
-      used[e] = False
-
   neigh = dict()
-  for p in recur():
-    pt = get_color(p)
+  for pt in make_colors():
     if pt == qt:
       continue
-    if edge(p, q):
-      neigh.setdefault(tuple(pt),set()).add(tuple(p))
+    row = set()
+    for p in from_color(pt):
+      if edge(p, q):
+        row.add(p)
+    if row:
+      neigh[pt] = row
   return neigh
 
 
@@ -350,9 +319,10 @@ def find_it(M, colors):
     pot = grow_transversal(M, A)
     if pot is not None:
       print('Failed', len(M), A)
-      X, Y, xfail, yfail, l = pot
-      B,D = make_BD(M, A, X, Y, xfail, yfail, l)
-      return B,D
+      # X, Y, xfail, yfail, l = pot
+      # B,D = make_BD(M, A, X, Y, xfail, yfail, l)
+      # return B,D
+      # return [], dict()
 
   print('Success', len(M))
   return None
@@ -515,7 +485,24 @@ if __name__ == '__main__':
   # main driver
   state = find_it(M, colors)
   if state is None:
+    A = []
     print('Success!')
+    for k,v in M.items():
+      print(' '.join(map(str, v)))
+      A.append(v)
+    
+    good = True
+    for ux, u in enumerate(A):
+      for vx in range(ux):
+        v = A[vx]
+        if not separated(u,v):
+          print('Failed to verify', ux, vx)
+          good = False
+    
+    if good:
+      print('Verified')
+    else:
+      print('Failed to verify')
     exit(0)
 
   B,D = state
