@@ -17,7 +17,7 @@ ray.init(
     },
 )
 
-@ray.remote
+@ray.remote(num_cpus=1)
 class Worker:
   def __init__(self, n, d, eps):
     self.h = Haxell(n,d,eps)
@@ -88,7 +88,7 @@ def find_it(n,d,eps,num_workers=4, M=None):
     if good:
       M.update(pot)
       past[timestamp] = s
-      print(datetime.now(), delta, len(M))
+      print(datetime.now(), delta, len(M), fail_count)
       fail_count = 0
     else:
       missing_colors.append(old_color)
