@@ -1,20 +1,102 @@
 from datetime import datetime
+from time import sleep
+from random import randrange, seed, choice
 
-from multihaxell.worker import Worker
+
+from multihaxell.haxell import Haxell
+
+import itertools as it
+import ray
+ray.init()
 
 
-def find_it(n,d,eps):
+@ray.remote
+class Worker:
+  def __init__(self, n, d, eps):
+    self.h = Haxell(n,d,eps)
+
+  def grow_transversal(self, M, A, timestamp):
+    start = datetime.now()
+    ret = self.h.grow_transversal(M, A)
+    return timestamp, A, datetime.now() - start, ret
+
+
+def find_it(n,d,eps,num_workers=10):
   M = dict()
-  w = Worker(n,d,eps)
-  for A in w.colors:
-    print(datetime.now(), len(M), len(w.colors))
-    if A in M:
-      print('Skipped')
-      continue
-    pot = w.grow_transversal(M, A)
-    if pot is None:
-      print('Failed')
+  colors = list(Haxell(n,d,eps).colors)
+  missing_colors = list(colors)
+
+  workers = [Worker.remote(n,d,eps) for _ in range(num_workers)]
+
+  futures = dict()
+  for c,a in zip(workers, missing_colors[-num_workers:]):
+    future = c.grow_transversal.remote(M,a,0)
+    futures[future] = c
+
+  past = {0: set()}
+  fail_count = 0
+  for timestamp in it.count(1):
+    # are we there yet?
+    if not missing_colors:
+      print('done!')
       break
+
+    # scale up if possible
+    cpus = int(ray.cluster_resources().get("CPU", 1))
+    while cpus > len(workers):
+      print('Scaling up from', len(workers), 'to', cpus)
+      worker = Worker.remote(n,d,eps)
+      workers.append(worker)
+      a = missing_colors.pop(0)
+      futures[worker.grow_transversal.remote(M, a, timestamp)] = worker
+
+    # get the changes
+    ready, _ = ray.wait(list(futures.keys()), num_returns=1)
+    future = ready[0]
+    worker = futures.pop(future)
+    lamp, old_color, delta, pot = ray.get(future)
+
+    # fire the next work
+    a = missing_colors.pop(0)
+    futures[worker.grow_transversal.remote(M, a, timestamp)] = worker
+
+    # check history
+    good = True
+    if not pot:
+      good = False
+    else:
+      s = set(pot.keys())
+      for t in range(lamp, timestamp):
+        p = past.get(t)
+        if p is None or p & s:
+          print('.', end='')
+          good = False
+          break
+    # else:
+      # print('good') #, timestamp, s)
+
+    # commit and update history
+    if good:
+      M.update(pot)
+      past[timestamp] = s
+      print(datetime.now(), delta, len(M))
+      fail_count = 0
+    else:
+      missing_colors.append(old_color)
+      past[timestamp] = set()
+      fail_count += 1
+    past.pop(timestamp-100, None)
+
+    # start backtracking if we have to
+    if fail_count > 10:
+      print('backtracking...')
+      for _ in range(10):
+        k = choice(list(M.keys()))
+        # print('  -', k)
+        M.pop(k)
+        missing_colors.append(k)
+      fail_count = 0
+
   return M
 
 
@@ -58,3 +140,6 @@ if __name__ == '__main__':
 
   print('Success')
 
+  with open(f'hresults/pa_{perm_len}_{pa_distance}.txt', 'w+') as f:
+    for v in state.values():
+      f.write(' '.join(map(str, v)) + '\n')

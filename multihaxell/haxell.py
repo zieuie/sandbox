@@ -7,7 +7,7 @@ from datetime import datetime
 from time import time
 
 
-class Worker:
+class Haxell:
   def __init__(self, perm_len, pa_distance, eps=0.1):
 
     self.perm_len = perm_len
@@ -251,7 +251,7 @@ class Worker:
     return x,y
 
   def grow_transversal(self, M, A):
-    changed = set()
+    ret = dict()
     X = [dict()]
     Y = [dict()]
     l = 0
@@ -275,16 +275,16 @@ class Worker:
         if l == 1:
           for a,us in I.items():
             for u in us:
-              changed.add(a)
+              ret[a] = u
               M[a] = u
-              return changed
+              return ret
 
         # switch around Y[l-1] vertices
         for aw in tuple(Y[l-1].keys()):
           if aw not in I:
             continue
           for u in I[aw]:
-            changed.add(aw)
+            ret[aw] = u
             M[aw] = u
             del Y[l-1][aw]
             break

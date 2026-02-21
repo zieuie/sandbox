@@ -465,7 +465,8 @@ if __name__ == '__main__':
   print (f'P({perm_len}, {pa_distance}) with epsilon {eps}')
   filename = f'pa_{perm_len}_{pa_distance}_haxell.txt'
   # M = resume_computation(filename)
-  M = dict()
+  M = resume_computation('u_7_3_64.txt')
+  # M = dict()
 
   # get the neighbors of the identity to calculate r-claw
   degree, r = get_degree_and_r()

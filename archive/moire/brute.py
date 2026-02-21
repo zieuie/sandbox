@@ -16,6 +16,13 @@ def brute(A, H):
     if i > best:
       print(len(A), i)
       best = i
+
+
+      print('--- partial start', best)
+      for row in A:
+          print(row)
+      print('--- partial end  ', best)
+
       # yield deepcopy(A[:i])
 
     if i >= len(A):
@@ -51,9 +58,9 @@ def lattify(t, H, n):
 
 def main():
   # n, d = 5, 4
-  # n, d = 4, 3
+  n, d = 5, 3
   # n, d = 6, 4
-  n, d = 7, 3
+  #n, d = 7, 3
   # n, d = 9, 5
   # n, d = 9, 5
   # n, d = 6, 5
