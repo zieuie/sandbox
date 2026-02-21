@@ -5,10 +5,17 @@ from random import randrange, seed, choice
 
 from multihaxell.haxell import Haxell
 
+import os
 import itertools as it
 import ray
-ray.init()
-
+ray.init(
+    address="auto",
+    runtime_env={
+        "working_dir": ".",   # ship the current directory (repo) to workers
+        # optional if you also need pip deps installed on workers:
+        # "pip": ["numpy==1.26.4", "networkx==3.2.1"],
+    },
+)
 
 @ray.remote
 class Worker:
@@ -21,10 +28,10 @@ class Worker:
     return timestamp, A, datetime.now() - start, ret
 
 
-def find_it(n,d,eps,num_workers=10):
-  M = dict()
-  colors = list(Haxell(n,d,eps).colors)
-  missing_colors = list(colors)
+def find_it(n,d,eps,num_workers=4, M=None):
+  M = M or dict()
+  colors = Haxell(n,d,eps).colors
+  missing_colors = list(set(colors) - set(M.keys()))
 
   workers = [Worker.remote(n,d,eps) for _ in range(num_workers)]
 
@@ -35,15 +42,16 @@ def find_it(n,d,eps,num_workers=10):
 
   past = {0: set()}
   fail_count = 0
+  best = 0
   for timestamp in it.count(1):
     # are we there yet?
-    if not missing_colors:
+    if len(M) == len(colors):
       print('done!')
       break
 
     # scale up if possible
     cpus = int(ray.cluster_resources().get("CPU", 1))
-    while cpus > len(workers):
+    while cpus > len(workers) and missing_colors:
       print('Scaling up from', len(workers), 'to', cpus)
       worker = Worker.remote(n,d,eps)
       workers.append(worker)
@@ -57,8 +65,9 @@ def find_it(n,d,eps,num_workers=10):
     lamp, old_color, delta, pot = ray.get(future)
 
     # fire the next work
-    a = missing_colors.pop(0)
-    futures[worker.grow_transversal.remote(M, a, timestamp)] = worker
+    if missing_colors:
+      a = missing_colors.pop(0)
+      futures[worker.grow_transversal.remote(M, a, timestamp)] = worker
 
     # check history
     good = True
@@ -87,15 +96,22 @@ def find_it(n,d,eps,num_workers=10):
       fail_count += 1
     past.pop(timestamp-100, None)
 
+    # write backup if necessary
+    if len(M) > best:
+      best = len(M)
+      with open(f'partial_pa_{n}_{d}.txt', 'w+') as f:
+        for v in M.values():
+          f.write(' '.join(map(str, v)) + '\n')
+
     # start backtracking if we have to
-    if fail_count > 10:
-      print('backtracking...')
-      for _ in range(10):
-        k = choice(list(M.keys()))
-        # print('  -', k)
-        M.pop(k)
-        missing_colors.append(k)
-      fail_count = 0
+    # if fail_count > 100:
+    #   print('backtracking...')
+    #   for _ in range(10):
+    #     k = choice(list(M.keys()))
+    #     # print('  -', k)
+    #     M.pop(k)
+    #     missing_colors.append(k)
+    #   fail_count = 0
 
   return M
 
@@ -133,7 +149,21 @@ if __name__ == '__main__':
     print(HELP_STR)
     exit(1)
 
-  state = find_it(perm_len, pa_distance, eps)
+  partial_filename = f'partial_pa_{perm_len}_{pa_distance}.txt'
+  M = dict()
+  if os.path.exists(partial_filename):
+    with open(partial_filename, 'r') as f:
+      for line in f:
+        if not line.strip():
+          continue
+
+        row = list(map(int, line.strip().split()))
+        a = tuple(e // pa_distance for e in row)
+        M[a] = row
+
+    print(f'Resuming with {len(M)} rows')
+
+  state = find_it(perm_len, pa_distance, eps, M=M)
   if state is None:
     print('Failed')
     exit(1)
