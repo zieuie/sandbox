@@ -7,8 +7,32 @@ from datetime import datetime
 from time import time
 
 
+def make_colors(n, d):
+  sofar = [0]*n
+  num_groups = int(math.ceil(n/d))
+  rem = [0]*num_groups
+  for x in range(num_groups):
+    rem[x] = min(n, d*(x+1)) - d*x
+
+  ret = []
+  def recur(i):
+    if i >= n:
+      ret.append(tuple(sofar))
+      return
+
+    for k in range(len(rem)):
+      if rem[k]:
+        rem[k] -= 1
+        sofar[i] = k
+        recur(i+1)
+        rem[k] += 1
+
+  recur(0)
+  return ret
+
+
 class Haxell:
-  def __init__(self, perm_len, pa_distance, eps=0.1):
+  def __init__(self, perm_len, pa_distance, colors, eps=0.1):
 
     self.perm_len = perm_len
     self.pa_distance = pa_distance
@@ -25,7 +49,7 @@ class Haxell:
     self.mu, self.U, self.rho = self.feasible_constants(r, eps)
 
     # compute all the colors
-    self.colors = list(self.make_colors())
+    self.colors = colors
 
     # here be dragons
     self.ident_class = [list(it.chain(*g)) for g in it.product(*[list(it.permutations(list(range(pa_distance*x, min(perm_len, pa_distance*(x+1)))))) for x in range(int(math.ceil(perm_len/pa_distance)))])]
@@ -60,29 +84,6 @@ class Haxell:
   def get_neighbors(self, v):
     for pot in ident_neigh:
       yield tuple(pot[e] for e in v)
-
-  def make_colors(self):
-    sofar = [0]*self.perm_len
-    num_groups = int(math.ceil(self.perm_len/self.pa_distance))
-    rem = [0]*num_groups
-    for x in range(num_groups):
-      rem[x] = min(self.perm_len, self.pa_distance*(x+1)) - self.pa_distance*x
-
-    ret = []
-    def recur(i):
-      if i >= self.perm_len:
-        ret.append(tuple(sofar))
-        return
-
-      for k in range(len(rem)):
-        if rem[k]:
-          rem[k] -= 1
-          sofar[i] = k
-          recur(i+1)
-          rem[k] += 1
-
-    recur(0)
-    return ret
 
   def get_degree_and_r(self):
     global ident_neigh

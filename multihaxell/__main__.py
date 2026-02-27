@@ -3,7 +3,7 @@ from time import sleep
 from random import randrange, seed, choice
 
 
-from multihaxell.haxell import Haxell
+from multihaxell.haxell import Haxell, make_colors
 
 import os
 import itertools as it
@@ -19,8 +19,8 @@ ray.init(
 
 @ray.remote(num_cpus=1)
 class Worker:
-  def __init__(self, n, d, eps):
-    self.h = Haxell(n,d,eps)
+  def __init__(self, n, d, colors, eps):
+    self.h = Haxell(n,d,colors,eps)
 
   def grow_transversal(self, M, A, timestamp):
     start = datetime.now()
@@ -28,90 +28,124 @@ class Worker:
     return timestamp, A, datetime.now() - start, ret
 
 
-def find_it(n,d,eps,num_workers=4, M=None):
+def good_history(M, fchanges, timestamp_to_diff, start, end, dsquared):
+  if not fchanges:
+    return False
+
+  for t in range(start, end):
+    for k in timestamp_to_diff.get(t, tuple()):
+      if k in fchanges:
+        continue
+      for u in fchanges.values():
+        for x,y in zip(u,M[k]):
+          if (x-y)**2 < dsquared:
+            return False
+
+  return True
+
+
+def find_it(n,d,eps,M=None):
   M = M or dict()
-  colors = Haxell(n,d,eps).colors
-  missing_colors = list(set(colors) - set(M.keys()))
+  colors = make_colors(n,d)
+  dsquared = d*d
 
-  workers = [Worker.remote(n,d,eps) for _ in range(num_workers)]
+  # tracking workers and tasks in flight
+  free_workers = list()
+  worker_to_color = dict()  # worker to color
+  future_to_worker = dict()  # future to worker
+  color_to_workers = dict()  # colors being worked on
 
-  futures = dict()
-  for c,a in zip(workers, missing_colors[-num_workers:]):
-    future = c.grow_transversal.remote(M,a,0)
-    futures[future] = c
+  # tracking history and things received
+  remaining_colors = list(set(colors) - set(M.keys()))
+  timestamps_received = set()
+  timestamp_to_diff = dict()
+  timestamps_in_flight = []
+  latest_cutoff = 0
 
-  past = {0: set()}
+  backup_file = f'partial_pa_{n}_{d}.txt.tmp'
+  real_file = f'partial_pa_{n}_{d}.txt'
+
+  # tracking progress
+  red_count = 0
   fail_count = 0
-  best = 0
+  # loop forever
   for timestamp in it.count(1):
     # are we there yet?
     if len(M) == len(colors):
       print('done!')
       break
 
-    # scale up if possible
-    cpus = int(ray.cluster_resources().get("CPU", 1))
-    while cpus > len(workers) and missing_colors:
-      print('Scaling up from', len(workers), 'to', cpus)
-      worker = Worker.remote(n,d,eps)
-      workers.append(worker)
-      a = missing_colors.pop(0)
-      futures[worker.grow_transversal.remote(M, a, timestamp)] = worker
+    try:
+      # make more workers if necessary
+      cpus = int(ray.cluster_resources().get("CPU", 1))
+      while len(worker_to_color) + len(free_workers) < cpus:
+        print(f'Increasing workers from {len(worker_to_color) + len(free_workers)} to {cpus}')
+        free_workers.append(Worker.remote(n,d,colors=colors,eps=eps))
 
-    # get the changes
-    ready, _ = ray.wait(list(futures.keys()), num_returns=1)
-    future = ready[0]
-    worker = futures.pop(future)
-    lamp, old_color, delta, pot = ray.get(future)
+      # assign workers
+      while free_workers:
+        a = choice(remaining_colors)
+        # while color_to_workers.get(a, None): # and len(free_workers) < len(remaining_colors):
+        #   a = choice(remaining_colors)
+        w = free_workers.pop(0)
+        f = w.grow_transversal.remote(M,a,timestamp)
+        timestamps_in_flight.append(timestamp)
+        worker_to_color[w] = a
+        future_to_worker[f] = w
+        color_to_workers.setdefault(a, list()).append(w)
 
-    # fire the next work
-    if missing_colors:
-      a = missing_colors.pop(0)
-      futures[worker.grow_transversal.remote(M, a, timestamp)] = worker
+      # get a change
+      ready, _ = ray.wait(list(future_to_worker.keys()), num_returns=1)
+      if not ready:
+        print('not ready')
+        continue
+      future = ready[0]
+      worker = future_to_worker.pop(future)
+      ftime, fcolor, fduration, fchanges = ray.get(future)
+      timestamps_received.add(ftime)
 
-    # check history
-    good = True
-    if not pot:
-      good = False
-    else:
-      s = set(pot.keys())
-      for t in range(lamp, timestamp):
-        p = past.get(t)
-        if p is None or p & s:
-          print('.', end='')
-          good = False
-          break
-    # else:
-      # print('good') #, timestamp, s)
+      free_workers.append(worker)
+      worker_to_color.pop(worker, None)
+      color_to_workers[fcolor].remove(worker)
+      timestamps_in_flight.remove(ftime)
 
-    # commit and update history
-    if good:
-      M.update(pot)
-      past[timestamp] = s
-      print(datetime.now(), delta, len(M), fail_count)
-      fail_count = 0
-    else:
-      missing_colors.append(old_color)
-      past[timestamp] = set()
-      fail_count += 1
-    past.pop(timestamp-100, None)
+      # check if history is compatible
+      if fcolor not in M and good_history(M, fchanges, timestamp_to_diff, ftime, timestamp, dsquared):
+        # fix trackers
+        remaining_colors.remove(fcolor)
+        timestamp_to_diff.setdefault(timestamp, set()).update(fchanges.keys())
+        M.update(fchanges)
 
-    # write backup if necessary
-    if len(M) > best:
-      best = len(M)
-      with open(f'partial_pa_{n}_{d}.txt', 'w+') as f:
-        for v in M.values():
-          f.write(' '.join(map(str, v)) + '\n')
+        # write backup
+        with open(backup_file, 'w+') as f:
+          for v in M.values():
+            f.write(' '.join(map(str, v)) + '\n')
 
-    # start backtracking if we have to
-    # if fail_count > 100:
-    #   print('backtracking...')
-    #   for _ in range(10):
-    #     k = choice(list(M.keys()))
-    #     # print('  -', k)
-    #     M.pop(k)
-    #     missing_colors.append(k)
-    #   fail_count = 0
+        if 0 != os.system(f'cp -f {backup_file} {real_file}'):
+          print('Failed to move backup file over real file')
+
+        print(datetime.now(), fduration, len(M), 'of', len(colors), f'(fail_count: {fail_count}, {red_count})', timestamps_in_flight)
+        red_count = 0
+        fail_count = 0
+      else:
+        if fcolor in M:
+          red_count += 1
+        fail_count += 1
+        # print(datetime.now(), fduration, fail_count, len(M))
+        # print('.', end='')
+
+      # # clear out history
+      # for m in range(latest_cutoff, timestamp):
+      #   if m in timestamps_received:
+      #     timestamps_received.discard(m)
+      #     timestamp_to_diff.pop(m, None)
+      #   else:
+      #     break
+      # latest_cutoff = m
+
+    except ray.exceptions.RayError as e:
+      print('ignoring ray error', e)
+      continue
 
   return M
 
