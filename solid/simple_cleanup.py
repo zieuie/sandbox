@@ -52,21 +52,23 @@ for x, row in enumerate(A):
 # get pairs
 sofar = []
 for ux, u in enumerate(A):
-  for vx, v in enumerate(A):
-    if ux == vx:
-      continue
+  if ux % 1000 == 0:
+    print(ux, len(sofar), len(A), ux-len(sofar))
+  for v in sofar:
     if distance(u, v) < goald:
+      print(ux, len(sofar), len(A), ux-len(sofar))
+      print('bad row', ux, u)
       break
   else:
     sofar.append(u)
 A = sofar
 
-for ux, u in enumerate(A):
-  for vx in range(ux):
-    d = distance(u, A[vx])
-    if d < goald:
-      print ('Somehow, trimming failed. Send this PA to Zooey.')
-      exit(1)
+# for ux, u in enumerate(A):
+#   for vx in range(ux):
+#     d = distance(u, A[vx])
+#     if d < goald:
+#       print ('Somehow, trimming failed. Send this PA to Zooey.')
+#       exit(1)
 
 with open(f'trimmed_{goald}_from_{filename}', 'w+') as f:
   for row in A:
