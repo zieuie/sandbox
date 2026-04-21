@@ -3,3 +3,7 @@ venv
 a.out
 .vscode
 .codex
+
+# megahaxell checkpoints / outputs
+partial_pa_*.txt
+partial_pa_*.txt.tmp

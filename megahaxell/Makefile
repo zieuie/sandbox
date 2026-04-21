@@ -5,8 +5,7 @@ CC ?= cc
 
 BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
-BIN_HEAD := $(BUILD_DIR)/megahaxell-head
-BIN_WORKER := $(BUILD_DIR)/megahaxell-worker
+BIN := $(BUILD_DIR)/megahaxell
 TEST_BINS := $(BUILD_DIR)/test_smoke $(BUILD_DIR)/test_colors $(BUILD_DIR)/test_haxell_one
 
 WARN := -Wall -Wextra -Wpedantic
@@ -37,20 +36,16 @@ SRC_LIB := \
   src/pool.c \
   src/serial.c \
   src/server.c
+SRC_APP := src/main.c src/head.c src/worker.c
 SRC_TEST := tests/test_smoke.c tests/test_colors.c tests/test_haxell_one.c
 
 OBJ_LIB := $(patsubst src/%.c,$(OBJ_DIR)/src/%.o,$(SRC_LIB))
-OBJ_HEAD := $(OBJ_DIR)/src/head.o
-OBJ_WORKER := $(OBJ_DIR)/src/worker.o
+OBJ_APP := $(patsubst src/%.c,$(OBJ_DIR)/src/%.o,$(SRC_APP))
 OBJ_TEST := $(patsubst tests/%.c,$(OBJ_DIR)/tests/%.o,$(SRC_TEST))
 
-all: $(BIN_HEAD) $(BIN_WORKER)
+all: $(BIN)
 
-$(BIN_HEAD): $(OBJ_LIB) $(OBJ_HEAD)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
-
-$(BIN_WORKER): $(OBJ_LIB) $(OBJ_WORKER)
+$(BIN): $(OBJ_LIB) $(OBJ_APP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
