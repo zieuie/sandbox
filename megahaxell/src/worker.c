@@ -187,7 +187,7 @@ static int mhx_worker_handle_job(
     return -1;
   }
 
-  struct mhx_map M = mhx_map_create(n);
+  struct mhx_map M = mhx_map_create(n, d);
   for (size_t i = 0; i < mcount; i++) {
     line = strtok_r(NULL, "\n", &save);
     if (!line) {
@@ -253,7 +253,7 @@ static int mhx_worker_handle_job(
     }
   }
 
-  struct mhx_map diff = mhx_map_create(n);
+  struct mhx_map diff = mhx_map_create(n, d);
   int grow_rc = mhx_grow_transversal(*cached_h, &M, A, &diff);
   free(A);
 

@@ -35,6 +35,7 @@ int mhx_perm_eq(const struct mhx_perm *a, const struct mhx_perm *b);
 struct mhx_map_entry {
   uint8_t *color;      /* n bytes */
   struct mhx_perm perm; /* owns perm.v */
+  size_t rank;         /* rank(color) in the color domain */
 };
 
 struct mhx_map {
@@ -42,9 +43,13 @@ struct mhx_map {
   size_t len;
   size_t cap;
   struct mhx_map_entry *e;
+
+  int d;
+  size_t domain;        /* total number of possible colors */
+  size_t *pos_by_rank;  /* domain entries, SIZE_MAX means absent */
 };
 
-struct mhx_map mhx_map_create(int n);
+struct mhx_map mhx_map_create(int n, int d);
 void mhx_map_destroy(struct mhx_map *m);
 const struct mhx_perm *mhx_map_get(const struct mhx_map *m, const uint8_t *color);
 int mhx_map_set(struct mhx_map *m, const uint8_t *color, const struct mhx_perm *perm);

@@ -6,6 +6,7 @@
 #include "megahaxell/math/haxell.h"
 
 #include <errno.h>
+#include <ctype.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,7 +25,10 @@ static void mhx_on_sigint(int sig) {
 
 static void mhx_usage(FILE *f, const char *argv0) {
   fprintf(f, "usage:\n");
-  fprintf(f, "  %s --n N --d D [--eps 0.1] [--bind tcp://*:9001] [--local-workers N] [--verbose]\n", argv0);
+  fprintf(f,
+          "  %s --n N --d D [--eps 0.1] [--bind tcp://*:9001] [--local-workers N] [--verbose]\n",
+          argv0);
+  fprintf(f, "    [--state FILE] [--save-interval SECONDS] [--no-resume]\n");
 }
 
 static void mhx_die_zmq(const char *what) {
@@ -139,6 +143,117 @@ static int mhx_parse_u16_list(const char *s, int n, uint16_t *out) {
       }
     }
   }
+  return 0;
+}
+
+static int mhx_parse_perm_line(const char *line, int n, uint16_t *out_perm) {
+  const char *p = line;
+  for (int i = 0; i < n; i++) {
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0') return -1;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (!end || end == p) return -1;
+    if (v < 0 || v > 65535) return -1;
+    out_perm[i] = (uint16_t)v;
+    p = end;
+  }
+  return 0;
+}
+
+static void mhx_perm_to_color(int n, int d, const uint16_t *perm, uint8_t *out_color) {
+  for (int i = 0; i < n; i++) {
+    out_color[i] = (uint8_t)(perm[i] / (uint16_t)d);
+  }
+}
+
+// static int mhx_validate_M(int n, int d, const struct mhx_map *M) {
+//   for (size_t i = 0; i < M->len; i++) {
+//     if (M->e[i].perm.n != n) return -1;
+//     for (size_t j = 0; j < i; j++) {
+//       if (mhx_perm_edge(n, d, M->e[i].perm.v, M->e[j].perm.v)) {
+//         return -1;
+//       }
+//     }
+//   }
+//   return 0;
+// }
+
+static int mhx_file_exists(const char *path) {
+  return access(path, R_OK) == 0;
+}
+
+static int mhx_load_state(const char *path, int n, int d, struct mhx_map *M) {
+  FILE *f = fopen(path, "r");
+  if (!f) return -1;
+
+  char *line = NULL;
+  size_t cap = 0;
+  ssize_t got;
+
+  uint16_t *perm = (uint16_t *)malloc((size_t)n * sizeof(uint16_t));
+  uint8_t *color = (uint8_t *)malloc((size_t)n);
+  if (!perm || !color) {
+    free(perm);
+    free(color);
+    fclose(f);
+    return -1;
+  }
+
+  while ((got = getline(&line, &cap, f)) > 0) {
+    (void)got;
+    /* strip comments */
+    char *hash = strchr(line, '#');
+    if (hash) *hash = '\0';
+    /* trim leading whitespace */
+    char *p = line;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p == '\0') continue;
+
+    if (mhx_parse_perm_line(p, n, perm) != 0) {
+      free(line);
+      free(perm);
+      free(color);
+      fclose(f);
+      return -1;
+    }
+    mhx_perm_to_color(n, d, perm, color);
+
+    struct mhx_perm pv = {.n = n, .v = perm};
+    if (mhx_map_set(M, color, &pv) != 0) {
+      free(line);
+      free(perm);
+      free(color);
+      fclose(f);
+      return -1;
+    }
+  }
+
+  free(line);
+  free(perm);
+  free(color);
+  fclose(f);
+
+  return 0; // mhx_validate_M(n, d, M);
+}
+
+static int mhx_save_state_atomic(const char *path, const struct mhx_map *M) {
+  char tmp[1024];
+  int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+  if (n <= 0 || (size_t)n >= sizeof(tmp)) return -1;
+
+  FILE *f = fopen(tmp, "w");
+  if (!f) return -1;
+
+  for (size_t i = 0; i < M->len; i++) {
+    for (int j = 0; j < M->n; j++) {
+      fprintf(f, "%s%u", (j ? " " : ""), (unsigned)M->e[i].perm.v[j]);
+    }
+    fputc('\n', f);
+  }
+
+  if (fclose(f) != 0) return -1;
+  if (rename(tmp, path) != 0) return -1;
   return 0;
 }
 
@@ -271,6 +386,9 @@ int main(int argc, char **argv) {
   const char *bind = "tcp://*:9001";
   int local_workers = 0;
   int verbose = 0;
+  const char *state_path = NULL;
+  int save_interval_sec = 60;
+  int resume_enabled = 1;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -288,6 +406,12 @@ int main(int argc, char **argv) {
       local_workers = atoi(argv[++i]);
     } else if (strcmp(argv[i], "--verbose") == 0) {
       verbose = 1;
+    } else if (strcmp(argv[i], "--state") == 0 && i + 1 < argc) {
+      state_path = argv[++i];
+    } else if (strcmp(argv[i], "--save-interval") == 0 && i + 1 < argc) {
+      save_interval_sec = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--no-resume") == 0) {
+      resume_enabled = 0;
     } else {
       mhx_usage(stderr, argv[0]);
       return 2;
@@ -297,6 +421,13 @@ int main(int argc, char **argv) {
   if (n <= 0 || d <= 0) {
     mhx_usage(stderr, argv[0]);
     return 2;
+  }
+  if (save_interval_sec < 1) save_interval_sec = 1;
+
+  char state_buf[256];
+  if (!state_path) {
+    snprintf(state_buf, sizeof(state_buf), "partial_pa_%d_%d.txt", n, d);
+    state_path = state_buf;
   }
 
   signal(SIGINT, mhx_on_sigint);
@@ -308,7 +439,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  struct mhx_map M = mhx_map_create(n);
+  struct mhx_map M = mhx_map_create(n, d);
+  if (resume_enabled && mhx_file_exists(state_path)) {
+    if (mhx_load_state(state_path, n, d, &M) != 0) {
+      fprintf(stderr, "head: failed to resume from %s\n", state_path);
+      mhx_colors_free(&colors);
+      mhx_map_destroy(&M);
+      return 1;
+    }
+    fprintf(stderr, "head: resumed %zu/%zu from %s\n", M.len, colors.count, state_path);
+  }
 
   void *ctx = zmq_ctx_new();
   if (!ctx) mhx_die_zmq("zmq_ctx_new");
@@ -362,6 +502,7 @@ int main(int argc, char **argv) {
   unsigned long long res_err = 0;
   unsigned long long merges = 0;
   time_t last_progress = time(NULL);
+  time_t last_save = time(NULL);
 
   while (!g_stop) {
     void *ident = NULL;
@@ -415,7 +556,7 @@ int main(int argc, char **argv) {
           if (verbose) fprintf(stderr, "head: got RES id=%llu status=%s diff_len=%zu\n", job_id, status, diff_len);
 
           if (strcmp(status, "OK") == 0 && diff_len > 0) {
-            struct mhx_map diff = mhx_map_create(n);
+            struct mhx_map diff = mhx_map_create(n, d);
             size_t parsed = 0;
             for (size_t i = 0; i < diff_len; i++) {
               line = strtok_r(NULL, "\n", &save);
@@ -504,6 +645,15 @@ int main(int argc, char **argv) {
       last_progress = now;
     }
 
+    if (now != (time_t)-1 && now - last_save >= save_interval_sec) {
+      if (mhx_save_state_atomic(state_path, &M) == 0) {
+        if (verbose) fprintf(stderr, "head: saved %zu/%zu to %s\n", M.len, colors.count, state_path);
+      } else {
+        fprintf(stderr, "head: failed to save to %s: %s\n", state_path, strerror(errno));
+      }
+      last_save = now;
+    }
+
     if (M.len == colors.count) {
       fprintf(stderr, "head: done\n");
       break;
@@ -512,6 +662,12 @@ int main(int argc, char **argv) {
 
   zmq_close(router);
   zmq_ctx_term(ctx);
+
+  /* Final save on exit. */
+  if (mhx_save_state_atomic(state_path, &M) == 0) {
+    fprintf(stderr, "head: saved final %zu/%zu to %s\n", M.len, colors.count, state_path);
+  }
+
   mhx_map_destroy(&M);
   mhx_colors_free(&colors);
 

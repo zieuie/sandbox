@@ -27,8 +27,8 @@ int main(void) {
     return 1;
   }
 
-  struct mhx_map M = mhx_map_create(n);
-  struct mhx_map diff = mhx_map_create(n);
+  struct mhx_map M = mhx_map_create(n, d);
+  struct mhx_map diff = mhx_map_create(n, d);
 
   const uint8_t *A = mhx_color_at(&colors, 0);
   int grow = mhx_grow_transversal(h, &M, A, &diff);
@@ -45,4 +45,3 @@ int main(void) {
   mhx_colors_free(&colors);
   return rc;
 }
-

@@ -18,6 +18,16 @@ make -C megahaxell
 make -C megahaxell test
 ```
 
+### Checkpoint/Resume
+
+The head process periodically checkpoints the partial transversal to a file (default: `partial_pa_N_D.txt`) and resumes from it on startup.
+
+```sh
+./megahaxell/build/megahaxell-head --n 12 --d 3 --bind tcp://*:9001 --local-workers 4 --save-interval 30
+# stop with Ctrl-C, then restart:
+./megahaxell/build/megahaxell-head --n 12 --d 3 --bind tcp://*:9001 --local-workers 4
+```
+
 ## Modules (planned)
 
 * `core.c`: heavy compute on one process

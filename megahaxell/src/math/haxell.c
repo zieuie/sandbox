@@ -1,4 +1,5 @@
 #include "megahaxell/math/haxell.h"
+#include "megahaxell/math/colors.h"
 
 #include <stdint.h>
 #include <math.h>
@@ -69,12 +70,23 @@ int mhx_perm_eq(const struct mhx_perm *a, const struct mhx_perm *b) {
   return memcmp(a->v, b->v, (size_t)a->n * sizeof(uint16_t)) == 0;
 }
 
-struct mhx_map mhx_map_create(int n) {
+struct mhx_map mhx_map_create(int n, int d) {
   struct mhx_map m;
   m.n = n;
+  m.d = d;
   m.len = 0;
   m.cap = 0;
   m.e = NULL;
+  m.domain = 0;
+  m.pos_by_rank = NULL;
+  if (mhx_colors_count(n, d, &m.domain) == 0 && m.domain > 0) {
+    m.pos_by_rank = (size_t *)malloc(m.domain * sizeof(size_t));
+    if (m.pos_by_rank) {
+      for (size_t i = 0; i < m.domain; i++) m.pos_by_rank[i] = (size_t)-1;
+    } else {
+      m.domain = 0;
+    }
+  }
   return m;
 }
 
@@ -91,11 +103,19 @@ void mhx_map_destroy(struct mhx_map *m) {
     mhx_entry_free(&m->e[i]);
   }
   free(m->e);
+  free(m->pos_by_rank);
   memset(m, 0, sizeof(*m));
 }
 
 const struct mhx_perm *mhx_map_get(const struct mhx_map *m, const uint8_t *color) {
   if (!m || !color) return NULL;
+  if (m->pos_by_rank && m->domain) {
+    size_t rank;
+    if (mhx_color_rank(m->n, m->d, color, &rank) != 0 || rank >= m->domain) return NULL;
+    size_t pos = m->pos_by_rank[rank];
+    if (pos == (size_t)-1) return NULL;
+    return &m->e[pos].perm;
+  }
   for (size_t i = 0; i < m->len; i++) {
     if (mhx_color_eq(m->e[i].color, color, m->n)) return &m->e[i].perm;
   }
@@ -104,6 +124,25 @@ const struct mhx_perm *mhx_map_get(const struct mhx_map *m, const uint8_t *color
 
 int mhx_map_del(struct mhx_map *m, const uint8_t *color) {
   if (!m || !color) return -1;
+  if (m->pos_by_rank && m->domain) {
+    size_t rank;
+    if (mhx_color_rank(m->n, m->d, color, &rank) != 0 || rank >= m->domain) return -1;
+    size_t i = m->pos_by_rank[rank];
+    if (i == (size_t)-1) return 0;
+
+    size_t last = m->len - 1;
+    size_t last_rank = m->e[last].rank;
+
+    mhx_entry_free(&m->e[i]);
+    if (i != last) {
+      m->e[i] = m->e[last];
+      m->pos_by_rank[last_rank] = i;
+    }
+    m->len--;
+    m->pos_by_rank[rank] = (size_t)-1;
+    return 0;
+  }
+
   for (size_t i = 0; i < m->len; i++) {
     if (mhx_color_eq(m->e[i].color, color, m->n)) {
       mhx_entry_free(&m->e[i]);
@@ -119,12 +158,34 @@ int mhx_map_del(struct mhx_map *m, const uint8_t *color) {
 int mhx_map_set(struct mhx_map *m, const uint8_t *color, const struct mhx_perm *perm) {
   if (!m || !color || !perm || perm->n != m->n) return -1;
 
-  for (size_t i = 0; i < m->len; i++) {
-    if (mhx_color_eq(m->e[i].color, color, m->n)) {
-      /* replace */
-      memcpy(m->e[i].perm.v, perm->v, (size_t)m->n * sizeof(uint16_t));
+  if (m->pos_by_rank && m->domain) {
+    size_t rank;
+    if (mhx_color_rank(m->n, m->d, color, &rank) != 0 || rank >= m->domain) return -1;
+    size_t pos = m->pos_by_rank[rank];
+    if (pos != (size_t)-1) {
+      memcpy(m->e[pos].perm.v, perm->v, (size_t)m->n * sizeof(uint16_t));
       return 0;
     }
+
+    if (m->len == m->cap) {
+      size_t new_cap = m->cap ? m->cap * 2 : 64;
+      struct mhx_map_entry *p = (struct mhx_map_entry *)realloc(m->e, new_cap * sizeof(*m->e));
+      if (!p) return -1;
+      m->e = p;
+      m->cap = new_cap;
+    }
+
+    struct mhx_map_entry *e = &m->e[m->len];
+    memset(e, 0, sizeof(*e));
+    e->color = mhx_color_dup(color, m->n);
+    if (!e->color) return -1;
+    e->perm = mhx_perm_alloc(m->n);
+    if (!e->perm.v) return -1;
+    memcpy(e->perm.v, perm->v, (size_t)m->n * sizeof(uint16_t));
+    e->rank = rank;
+    m->pos_by_rank[rank] = m->len;
+    m->len++;
+    return 0;
   }
 
   if (m->len == m->cap) {
@@ -142,6 +203,7 @@ int mhx_map_set(struct mhx_map *m, const uint8_t *color, const struct mhx_perm *
   e->perm = mhx_perm_alloc(m->n);
   if (!e->perm.v) return -1;
   memcpy(e->perm.v, perm->v, (size_t)m->n * sizeof(uint16_t));
+  e->rank = 0;
   return 0;
 }
 
@@ -453,7 +515,7 @@ static int mhx_xmap_clone_into(const struct mhx_xmap *src, struct mhx_xmap *dst)
 }
 
 static int mhx_map_clone_into(const struct mhx_map *src, struct mhx_map *dst) {
-  *dst = mhx_map_create(src->n);
+  *dst = mhx_map_create(src->n, src->d);
   for (size_t i = 0; i < src->len; i++) {
     if (mhx_map_set(dst, src->e[i].color, &src->e[i].perm) != 0) return -1;
   }
@@ -636,7 +698,7 @@ static int mhx_build_layer(
     struct mhx_xmap *out_x,
     struct mhx_map *out_y) {
   struct mhx_xmap x = mhx_xmap_create(h->n);
-  struct mhx_map y = mhx_map_create(h->n);
+  struct mhx_map y = mhx_map_create(h->n, h->d);
   if (x_in && x_in->len) {
     if (mhx_xmap_clone_into(x_in, &x) != 0) return -1;
   }
@@ -840,7 +902,7 @@ int mhx_grow_transversal(struct mhx_haxell *h, struct mhx_map *M, const uint8_t 
 
   /* Reset diff. */
   mhx_map_destroy(diff);
-  *diff = mhx_map_create(h->n);
+  *diff = mhx_map_create(h->n, h->d);
 
   /* Layers */
   size_t cap = 8;
@@ -853,7 +915,7 @@ int mhx_grow_transversal(struct mhx_haxell *h, struct mhx_map *M, const uint8_t 
     return -1;
   }
   X[0] = mhx_xmap_create(h->n);
-  Y[0] = mhx_map_create(h->n);
+  Y[0] = mhx_map_create(h->n, h->d);
 
   size_t l = 0;
   while (mhx_map_get(M, A) == NULL) {
