@@ -1,0 +1,114 @@
+% Compact Section 5 tables for $GF(5^3)$ (q=125)
+
+% Primitive polynomial coefficients, low-to-high: [1, 0, 1, 1]
+
+% DP split: [(2, 2, 2), (2, 2, 3), (2, 3, 3), (3, 2, 3)]
+
+% Matching saturates A: yes (125/125)
+
+
+
+\begin{table}[!ht]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.0pt}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+$i\backslash\beta$ & $0$ & $1$ & $2$ & $3$ & $4$ \\ \hline
+$0$ & $\{0,10,41,72,103\}$ & $\{6,58,90,92,115\}$ & $\{27,59,61,84,99\}$ & $\{22,37,89,121,123\}$ & $\{28,30,53,68,120\}$ \\ \hline
+$1$ & $\{15,29,56,80,109\}$ & $\{1,57,62,65,107\}$ & $\{20,36,42,55,75\}$ & $\{12,19,23,40,66\}$ & $\{7,8,17,83,95\}$ \\ \hline
+$2$ & $\{25,49,78,108,122\}$ & $\{9,35,105,112,116\}$ & $\{26,31,34,76,94\}$ & $\{52,64,100,101,110\}$ & $\{5,11,24,44,113\}$ \\ \hline
+$3$ & $\{16,46,60,87,111\}$ & $\{51,67,73,86,106\}$ & $\{2,38,39,48,114\}$ & $\{14,32,88,93,96\}$ & $\{43,50,54,71,97\}$ \\ \hline
+$4$ & $\{18,47,77,91,118\}$ & $\{21,33,69,70,79\}$ & $\{4,74,81,85,102\}$ & $\{13,82,98,104,117\}$ & $\{3,45,63,119,124\}$ \\ \hline
+\end{tabular}
+}
+\caption{Special sets of $GF(5^3)$. Rows give prefix sums $i$ and columns give suffixes $\beta$.}
+\label{table:dp-special-sets}
+\end{table}
+
+
+
+\begin{table}[!ht]
+\centering
+\small
+\setlength{\tabcolsep}{4.0pt}
+\begin{tabular}{|c|c|c|c|c|c|r|}
+\hline
+block & $(a,b,t)$ & cosets & $at$ & $bt$ & $\omega$ & covered \\ \hline
+1 & $(2,2,2)$ & $C_{0}\text{--}C_{1}$ & 4 & 4 & 4 & 200 \\ \hline
+2 & $(2,2,3)$ & $C_{2}\text{--}C_{4}$ & 6 & 6 & 4 & 300 \\ \hline
+3 & $(2,3,3)$ & $C_{5}\text{--}C_{7}$ & 6 & 9 & 5 & 375 \\ \hline
+4 & $(3,2,3)$ & $C_{8}\text{--}C_{10}$ & 9 & 6 & 5 & 375 \\ \hline
+$\Sigma$ &  &  & 25 & 25 &  & 1250 \\ \hline
+\end{tabular}
+\caption{Output of the dynamic program for $GF(5^3)$.}
+\label{table:dp-output}
+\end{table}
+
+
+
+\begin{table}[!ht]
+\centering
+\small
+\setlength{\tabcolsep}{5.0pt}
+\begin{tabular}{|c|c|l|}
+\hline
+block & symbol set & special sets \\ \hline
+1 & $Q_{0}$ & $R_{0},R_{2}$ \\ \hline
+1 & $Q_{1}$ & $R_{1},R_{3}$ \\ \hline
+2 & $Q_{2}$ & $R_{4},R_{7}$ \\ \hline
+2 & $Q_{3}$ & $R_{5},R_{8}$ \\ \hline
+2 & $Q_{4}$ & $R_{6},R_{9}$ \\ \hline
+3 & $Q_{5}$ & $R_{10},R_{13},R_{16}$ \\ \hline
+3 & $Q_{6}$ & $R_{11},R_{14},R_{17}$ \\ \hline
+3 & $Q_{7}$ & $R_{12},R_{15},R_{18}$ \\ \hline
+4 & $Q_{8}$ & $R_{19},R_{22}$ \\ \hline
+4 & $Q_{9}$ & $R_{20},R_{23}$ \\ \hline
+4 & $Q_{10}$ & $R_{21},R_{24}$ \\ \hline
+\end{tabular}
+\caption{Round-robin assignment of special sets to the symbol sets.}
+\label{table:dp-round-robin}
+\end{table}
+
+
+
+\begin{table}[!ht]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4.0pt}
+\begin{tabular}{|c|l|}
+\hline
+position set & stripes selected by the matching \\ \hline
+$P_{0}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{0,6,28,59,123\}$ \\ $g=1:\ \{1,7,12,15,20\}$\end{tabular} \\ \hline
+$P_{1}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{9,21,26,114,119\}$ \\ $g=1:\ \{11,14,16,19,56\}$\end{tabular} \\ \hline
+$P_{2}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{8,25,35,51,88\}$ \\ $g=1:\ \{10,13,18,55,81\}$\end{tabular} \\ \hline
+$P_{3}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{3,24,38,50,118\}$ \\ $g=1:\ \{17,37,53,54,80\}$\end{tabular} \\ \hline
+$P_{4}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{2,23,49,68,117\}$ \\ $g=1:\ \{32,36,52,58,79\}$\end{tabular} \\ \hline
+$P_{5}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{48,67,85,94,116\}$ \\ $g=1:\ \{31,61,75,78,102\}$\end{tabular} \\ \hline
+$P_{6}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{47,66,83,93,109\}$ \\ $g=1:\ \{60,69,74,77,101\}$\end{tabular} \\ \hline
+$P_{7}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{46,82,92,96,108\}$ \\ $g=1:\ \{5,29,73,76,100\}$\end{tabular} \\ \hline
+$P_{8}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{45,64,91,107,113\}$ \\ $g=1:\ \{4,34,72,87,99\}$ \\ $g=2:\ \{41,44,86,97,105\}$\end{tabular} \\ \hline
+$P_{9}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{63,90,106,111,112\}$ \\ $g=1:\ \{33,57,71,98,122\}$ \\ $g=2:\ \{22,40,43,104,124\}$\end{tabular} \\ \hline
+$P_{10}$ & \begin{tabular}{@{}l@{}}$g=0:\ \{27,62,89,110,120\}$ \\ $g=1:\ \{30,65,70,115,121\}$ \\ $g=2:\ \{39,42,84,95,103\}$\end{tabular} \\ \hline
+\end{tabular}
+\caption{Position stripes selected by the bipartite matching.}
+\label{table:dp-matching}
+\end{table}
+
+
+
+\begin{table}[!ht]
+\centering
+\small
+\setlength{\tabcolsep}{6.0pt}
+\begin{tabular}{|l|r|}
+\hline
+method & lower bound on $M(126,125)$ \\ \hline
+Section 4 & 1150 \\ \hline
+DP construction & 1375 \\ \hline
+improvement & 225 \\ \hline
+\end{tabular}
+\caption{Comparison of the Section 4 and DP bounds for $q=125$.}
+\label{table:dp-payoff}
+\end{table}

@@ -1,0 +1,151 @@
+
+\section{Dynamic Programming for Odd Powers}
+\label{sec:dp}
+
+The approach to odd powers in Section~\ref{sec:odd} involves fully covering cosets using Methods 1 and 2. In this section, we permit partial coverage, allowing the available positions and symbol sets to be distributed more efficiently between cosets. This results in a computable lower bound for $M(q+1,q)$, and in certain cases this is an improvement over the result in Section~\ref{sec:odd}.
+
+\subsection{Partial Coverage of a Single Coset}
+
+
+We give a dynamic programming (DP) algorithm that yields lower bounds that are better than those given by Theorem \ref{odd}. In the technique used for that theorem, recall that we fully covered cosets by using either:
+
+{\bf Method 1}: take the set of values to be an entire suffix set, say $Suffix(\alpha)$, and the set of positions to be one stripe (i.e., one permutation from each suffix set).
+
+{\bf Method 2}: take the set of values to be one of the special sets and the set of positions be $p$ stripes (i.e., one choice from each special set).
+
+Now we will consider a generalized method which may cover less than the whole coset:
+
+{\bf General Method}: take the set of values to be the union of $b$ of the special sets and the set of positions be $a$ stripes (i.e., one choice from each suffix set for $a$ different prefixes).
+
+You see that if $a=1$ and $b=p$, then the General Method is equivalent to Method 1. Similarly, if $a=p$ and $b=1$, then the General Method is equivalent to Method 2. However, when $a$ and $b$ are different values, then this method may cover less than the whole coset.
+
+\begin{theorem}
+\label{th:general coset coverage}
+
+Using the General Method, a coset's coverage is:
+$$ p^{2m} * |\{y-x \pmod p : x \in P', y \in Q'  \}|  $$
+Where $P'$ is the set of prefix sums represented by the $a$ stripes in $P$, and $Q'$ is the set of prefix sums represented by the $b$ special sets in $Q$.
+
+\end{theorem}
+
+\begin{proof}
+
+(TODO, change this to use shift())
+Since $P'$ and $Q'$ are sets of prefixes, let's define the set of prefixes $V = \{ y-x | x \in P', y \in Q' \}$. For some coset $i$, we cover permutation $j$ when $y = i*x+j$ has a solution for $x \in P_i$ and $y \in Q_i$. In other words, we cover any $j = y - i*x$. In other words, we cover permutation $j$ when $prefix(j) \in V_i$. So in coset $i$, we cover exactly $|V_i| * p^{2m}$ permutations.
+
+\end{proof}
+
+\subsection{Allocating Positions and Symbols Between Multiple Cosets}
+
+The General Method described above uses a set of $a*p^m$ positions and a set of $b*p^m$ symbols. There are a total of $p^{2m+1}$ elements in $GF(p^{2m+1})$, which are considered as both positions and symbols. Therefore, if we want to maximize our coverage of multiple cosets using the General Method, we must find a balance between getting enough coverage on each coset while saving enough positions and symbols to use on the other cosets.
+
+This optimization is not straightforward. To begin, we make some simplifying assumptions. First, instead of trying to construct the final permutation array, we are only going to construct a property $I$, namely that for some coset $i$, $P_i$ contains $a$ stripes and $Q_i$ contains $b$ special sets. Further, that the $a$ stripes of $P_i$ have prefix sums that are in consecutive order, and the $b$ special sets have prefix sums that are in consecutive order skipping $t$ at a time. Lastly, that when $Q_i$ has some skipping factor $t$, then the same $t$ must be used for $t$ cosets in a row. In other words, if $Q_0$ has $m=3$, then $Q_1$ and $Q_2$ must also have $t=3$.
+
+From this, we have three sequences of numbers to optimize:
+- $A_s$ is the number of stripes given to each set of positions.
+- $B_s$ is the number of $special~sets$ given to each set of symbols.
+- $T_s$ is the skipping factor, and hence also number of cosets being assigned in a row
+
+We also have two budgets to account for. The first budget is the number of special sets available for each $Q_i$, and this budget starts at a value of $p^{m+1}$. The second budget is the number of stripes available to make each $P_i$, which also starts at $p^{m+1}$ since there are $p$ different prefixes and each special set is of size $p^m$.
+
+Applying Theorem \ref{th:general coset coverage} to these budgets and sequences, we find that we are trying to maximize this:
+$$ p^{2m} \sum_{(a,b,t)} |\{yt-x \pmod p : 0 \le x < a,\ 0 \le y < b\}|$$
+
+Dropping the $p^{2k}$ term for brevity, we convert this into a recurrence for dynamic programming:
+\begin{itemize}
+
+\item  $\theta (0,0) = 0$
+
+\item $\theta (p,q) = max\left\{ \theta(p-at, q-bt) + |\{yt_s-x \pmod p : 0 \le x < a_s,\ 0 \le y < b_s\}| \right\}$
+
+\end{itemize}
+
+\subsection{Pseudocode and Analysis}
+
+\begin{minted}[
+    frame=lines,
+    framesep=2mm,
+    baselinestretch=1.2,
+    fontsize=\footnotesize,
+    linenos
+]{text}
+
+Algorithm dp_split(p,m)
+
+Input:
+  prime p and integer m > 0
+
+  B      ← p^(m+1)
+  A      ← (B+1)*(B+1) sized array, initialized to all zeros  
+  choice ← (B+1)*(B+1) sized array, initialized to all null  
+
+  for u in 1..B:
+    for v in 1..B:
+      for a in 1..min(p, u):
+        for b in 1..min(p, v):
+          limit ← min(p, floor(u/a), floor(v/b))
+          for t in 1..limit:
+            gain ← t * overlap(p, a, b, t)
+            candidate ← gain + A[u-t*a, v-t*b]
+            if candidate > A[u,v]:
+              A[u,v] ← candidate
+              choice[u,v] ← (a, b, t)
+
+  split ← empty list
+  u = B
+  v = B
+  while choice[u,v] not null:
+    a, b, t = choice[u,v]
+    append (a,b,t) to split
+    u ← u-a*t
+    v ← v-b*t
+  return A[B,B], split
+
+
+\end{minted}
+
+We see from the size of the variables that the space complexity is $O(p^{2m+2})$. From the nested `for` loops, we see that the complexity of building the table is $O(p^{2m+3})$.
+
+The correctness of this algorithm follows from the optimal substructure. 
+
+\subsection{Constructing a PA from the Dynamic Programming Output}
+
+\noindent
+Let
+\[
+\mathcal S=((a_1,b_1,t_1),\ldots,(a_s,b_s,t_s))
+\]
+be the allocation sequence returned by Algorithm~\ref{alg:dp}, and let
+\[
+K_r=\sum_{j<r} t_j.
+\]
+Construct a bipartite graph $G=(A,B,E)$ as follows:
+\[
+\begin{aligned}
+A
+  &= \bigcup_{r=1}^{s}
+     \left\{
+       (K_r+\ell,g,h):
+       0\le \ell<t_r,\;
+       0\le g<a_r,\;
+       0\le h<p^m
+     \right\},\\
+B
+  &= GF(q).
+\end{aligned}
+\]
+
+For $g\in\{0,\ldots,p-1\}$ and
+$h\in\{0,\ldots,p^m-1\}$, let $\mathcal S_{g,h}$ denote
+the special set whose prefix is $g$ and whose suffix is $h$.
+For each vertex $v=(k,g,h)\in A$, define
+\[
+N(v)=
+\left\{
+shift(k,x):x\in\mathcal S_{g,h}
+\right\},
+\]
+Finally, let
+\[
+E=\{\{v,x\}:v\in A,\ x\in N(v)\}.
+\]

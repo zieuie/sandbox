@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from odd import GaloisElement, GaloisField, parse_pr, sud_sets
+from odd import GaloisElement, GaloisField, parse_pr, sud_sets, theorem
 
 
 def parse_prim(parts: Sequence[str]) -> list[int]:
@@ -50,6 +50,14 @@ def element_cell(element: GaloisElement) -> tuple[int, int]:
   return element.pre(), element.suf()
 
 
+def labels_to_markdown(labels: Sequence[int]) -> str:
+  return ", ".join(map(str, labels)) or "-"
+
+
+def labels_to_polynomials(field: GaloisField, labels: Sequence[int]) -> str:
+  return ", ".join(f"`{coeffs_to_polynomial(field.coeffs(label))}`" for label in labels) or "-"
+
+
 def mapping_table(field: GaloisField) -> str:
   lines = [
     "## Element Labels",
@@ -72,13 +80,12 @@ def sud_table(field: GaloisField) -> str:
   lines = [
     "## Sudborough Sets",
     "",
-    "| set | residue | suffix | suffix coefficients | element indices | elements as polynomials |",
-    "|---:|---:|---:|:---|:---|:---|",
+    "| set | residue | suffix | suffix coefficients | element indices |",
+    "|---:|---:|---:|:---|:---|",
   ]
   for set_index, elements in enumerate(sets):
     residue, suffix = divmod(set_index, suffix_count)
     labels = [int(element) for element in elements]
-    polynomials = [coeffs_to_polynomial(field.coeffs(label)) for label in labels]
     lines.append(
       "| "
       + " | ".join(
@@ -87,8 +94,7 @@ def sud_table(field: GaloisField) -> str:
           str(residue),
           str(suffix),
           f"`{coeffs_to_tuple(suffix_coeffs(suffix, field.L, field.P))}`",
-          ", ".join(map(str, labels)) or "-",
-          ", ".join(f"`{poly}`" for poly in polynomials) or "-",
+          labels_to_markdown(labels),
         ]
       )
       + " |"
@@ -96,22 +102,69 @@ def sud_table(field: GaloisField) -> str:
   return "\n".join(lines)
 
 
-def build_markdown(field: GaloisField) -> str:
+def partition_extension_table(field: GaloisField, p_sets: Sequence[Sequence[int]], q_sets: Sequence[Sequence[int]]) -> str:
+  lines = [
+    "## Partition-and-Extension Choices",
+    "",
+    "| block | AGL multiplier | positions P | symbols Q |",
+    "|---:|---:|:---|:---|",
+  ]
+  for block_index, (positions, symbols) in enumerate(zip(p_sets, q_sets), start=1):
+    sorted_positions = sorted(positions)
+    sorted_symbols = sorted(symbols)
+    lines.append(
+      "| "
+      + " | ".join(
+        [
+          str(block_index - 1),
+          str(block_index),
+          labels_to_markdown(sorted_positions),
+          labels_to_markdown(sorted_symbols),
+        ]
+      )
+      + " |"
+    )
+
+  freebie = len(p_sets) + 1
+  if freebie < field.Q:
+    lines.extend(
+      [
+        "",
+        f"Freebie coset multiplier: `{freebie}`. These rows append the new symbol `{field.Q}` without moving any old symbol.",
+      ]
+    )
+  return "\n".join(lines)
+
+
+def build_markdown(field: GaloisField, include_pe: bool) -> str:
   prim = coeffs_to_polynomial(field.prim)
-  return "\n\n".join(
-    [
-      f"# GF({field.P}^{field.R}) Tables",
-      f"Primitive polynomial: `{coeffs_to_tuple(field.prim)}` = `{prim}`",
-      f"Field order: `{field.Q}`",
-      mapping_table(field),
-      sud_table(field),
-      "",
-    ]
-  )
+  sections = [
+    f"# GF({field.P}^{field.R}) Tables",
+    f"Primitive polynomial: `{coeffs_to_tuple(field.prim)}` = `{prim}`",
+    f"Field order: `{field.Q}`",
+    mapping_table(field),
+    sud_table(field),
+  ]
+  if include_pe:
+    p_sets, q_sets, pe_field, active_rows = theorem(field.P, field.R, prim=field.prim)
+    sections.append(
+      "\n".join(
+        [
+          f"## Partition-and-Extension Summary",
+          "",
+          f"Active cosets: `{len(p_sets)}`",
+          f"Active rows: `{active_rows}`",
+          f"Total rows with freebie coset: `{active_rows + field.Q}`",
+        ]
+      )
+    )
+    sections.append(partition_extension_table(pe_field, p_sets, q_sets))
+  sections.append("")
+  return "\n\n".join(sections)
 
 
 def build_parser() -> argparse.ArgumentParser:
-  parser = argparse.ArgumentParser(description="Print markdown tables for field labels and Sudborough sets.")
+  parser = argparse.ArgumentParser(description="Print markdown tables for field labels, Sudborough sets, and PE choices.")
   parser.add_argument("q", help="Prime power, preferably as P^R, such as 2^5")
   parser.add_argument(
     "primitive_polynomial",
@@ -119,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     help="Primitive polynomial coefficients low-to-high, e.g. 1 0 0 1 0 1",
   )
   parser.add_argument("-o", "--output", help="Write markdown to this file instead of stdout")
+  parser.add_argument("--no-pe", action="store_true", help="Skip the partition-and-extension P/Q choice tables")
   return parser
 
 
@@ -135,7 +189,7 @@ def main() -> int:
     parser.error(f"expected {degree + 1} primitive-polynomial coefficients for degree {degree}")
 
   field = GaloisField(prime, degree, prim)
-  markdown = build_markdown(field)
+  markdown = build_markdown(field, include_pe=not args.no_pe)
   if args.output:
     Path(args.output).write_text(markdown)
   else:
