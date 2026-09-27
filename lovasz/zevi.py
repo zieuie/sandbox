@@ -34,8 +34,7 @@ def compute_F(n, k):
 
 
 pairs = [
-    (80, 32),
-    (160, 64),
+    (18, 8),
 ]
 
 for n, k in pairs:
