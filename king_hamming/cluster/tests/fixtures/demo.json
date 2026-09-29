@@ -1,0 +1,7 @@
+{
+  "arguments": {
+    "delay": 0.1,
+    "steps": 20
+  },
+  "program": "demo"
+}
