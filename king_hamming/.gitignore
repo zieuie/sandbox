@@ -1,0 +1,19 @@
+**/__pycache__/
+*.py[cod]
+
+# Native build products
+**/build/
+*.so
+/dp_solver/kh_dp_local
+/dp_solver/kh_dp_tile
+/dp_solver/kh_estimate
+/dp_solver/kh_field
+/matching_solver/kh_match_distributed
+/matching_solver/kh_match_kernel
+/matching_solver/kh_match_worker
+/matching_solver/tests/matching_unit
+/matching_solver/tests/parallel_unit
+
+# Runtime state and locally generated outputs
+deployments/
+experiments/

@@ -1,0 +1,208 @@
+[
+  {
+    "host": "192.168.4.101",
+    "hostname": "fearless",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "tmp_free": 219431809024,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  },
+  {
+    "host": "192.168.4.102",
+    "hostname": "red",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "tmp_free": 220239704064,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  },
+  {
+    "host": "192.168.4.103",
+    "hostname": "lover",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "tmp_free": 218943533056,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  },
+  {
+    "host": "192.168.4.104",
+    "hostname": "folklore",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "tmp_free": 219769532416,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  },
+  {
+    "host": "192.168.4.105",
+    "hostname": "evermore",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "tmp_free": 219034386432,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  },
+  {
+    "host": "192.168.4.106",
+    "hostname": "midnights",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "tmp_free": 220154855424,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  },
+  {
+    "host": "192.168.4.107",
+    "hostname": "poets",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "tmp_free": 219084128256,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  },
+  {
+    "host": "192.168.4.108",
+    "hostname": "showgirl",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "tmp_free": 219593236480,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  },
+  {
+    "host": "192.168.4.151",
+    "hostname": "uther",
+    "python": "3.12.3",
+    "byteorder": "little",
+    "metadata_bytes": 64,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "tmp_free": 319100465152,
+    "libc": [
+      "glibc",
+      "2.39"
+    ]
+  }
+]
