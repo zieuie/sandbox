@@ -1,0 +1,6 @@
+{"cpu_placement": "DP workers=1; CPUs: 0", "elapsed_seconds": 0.071001, "identical_artifact": true, "p": 7, "r": 5, "theta": 822, "threads": 1}
+{"cpu_placement": "DP workers=2; CPUs: 0 1", "elapsed_seconds": 0.044878, "identical_artifact": true, "p": 7, "r": 5, "theta": 822, "threads": 2}
+{"cpu_placement": "DP workers=4; CPUs: 0 1 2 3", "elapsed_seconds": 0.034022, "identical_artifact": true, "p": 7, "r": 5, "theta": 822, "threads": 4}
+{"cpu_placement": "DP workers=1; CPUs: 0", "elapsed_seconds": 3.073242, "identical_artifact": true, "p": 11, "r": 5, "theta": 4181, "threads": 1}
+{"cpu_placement": "DP workers=2; CPUs: 0 1", "elapsed_seconds": 1.583411, "identical_artifact": true, "p": 11, "r": 5, "theta": 4181, "threads": 2}
+{"cpu_placement": "DP workers=4; CPUs: 0 1 2 3", "elapsed_seconds": 0.877543, "identical_artifact": true, "p": 11, "r": 5, "theta": 4181, "threads": 4}

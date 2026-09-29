@@ -1,0 +1,10 @@
+{
+  "arguments": {
+    "max_state_bytes": 17179869184,
+    "max_visits": 5000000000,
+    "p": 5,
+    "r": 3,
+    "tile_side": 4096
+  },
+  "program": "dp"
+}
