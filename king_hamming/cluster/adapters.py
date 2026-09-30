@@ -28,6 +28,13 @@ class SolverAdapter:
         """Return a compact human-readable calculation label for operator status."""
         return specification.get("program", "unknown")
 
+    def status_details(self, specification, run, status):
+        """Return compact solver-owned status detail strings for one run."""
+        return []
+
+    def augment_status(self, connection, runs, now):
+        """Attach solver-owned, read-only status fields to selected run rows."""
+
     def estimate(self, specification, rate):
         """Return estimated seconds for specification at configured rate; override in an adapter."""
         return 1e100
@@ -36,12 +43,29 @@ class SolverAdapter:
         """Return simultaneous compute-node slots, including the coordinator lease owner."""
         return 1
 
+    def resource_requirements(self, specification):
+        """Return coordinator/worker host memory and minimum logical CPUs."""
+        return {"coordinator_memory_bytes": 0, "worker_memory_bytes": 0,
+                "min_cpu_count": 1}
+
+    def allows_host_sharing(self, specification):
+        """Return whether disjoint CPU slots may run beside this single-node job."""
+        return False
+
+    def cpu_width(self, specification, available):
+        """Choose a lease width from free host CPUs; sharing adapters default to one."""
+        return min(1, available)
+
     def initialize(self, connection):
         """Initialize adapter tables using connection; return no value."""
 
     def enqueue(self, connection, run_id, specification, now):
         """Prepare run_id at enqueue time; return its initial queue state."""
         return 'queued'
+
+    def resume_transition(self, connection, run, specification, now):
+        """Return the durable state and progress phase for a paused run being resumed."""
+        return 'queued', 'queued'
 
     def advance(self, connection, now):
         """Advance adapter workflows inside the leader transaction; return no value."""
@@ -182,6 +206,13 @@ def advance(connection, now):
 
     for adapter in all_adapters():
         adapter.advance(connection, now)
+
+
+def augment_status(connection, runs, now):
+    """Let adapters add bounded metadata without coupling the leader to algorithms."""
+
+    for adapter in all_adapters():
+        adapter.augment_status(connection, runs, now)
 
 
 def input_route(route):

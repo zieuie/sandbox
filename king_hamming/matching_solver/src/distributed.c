@@ -2,6 +2,7 @@
 
 #include "kh_sha256.h"
 #include "kh_resource.h"
+#include "kh_shard.h"
 #include "kh_solver.h"
 #include "kh_wire.h"
 
@@ -12,6 +13,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,9 +62,8 @@ typedef struct {
 typedef struct {
     uint32_t *left;
     uint32_t *right;
-    uint32_t *choice;
+    uint16_t *choice;
     uint32_t *distance;
-    uint64_t *offsets;
     uint32_t *frontier;
     uint32_t *next;
     uint32_t matched;
@@ -101,8 +102,9 @@ typedef struct {
     uint32_t frontier_count;
     uint32_t depth;
     uint32_t n;
-    uint32_t *discovered;
-    uint32_t discovered_count;
+    uint32_t *distance;
+    uint32_t *next;
+    _Atomic uint32_t *next_count;
     bool free_right;
     bool valid;
 } level_task_t;
@@ -111,6 +113,8 @@ typedef struct {
     worker_t *worker;
     uint32_t shortest;
     uint32_t n;
+    uint32_t root_begin;
+    uint32_t root_end;
     bool restrict_terminals;
     assignment_t *proposals;
     uint32_t proposal_count;
@@ -149,10 +153,17 @@ static void matching_free(matching_t *matching) {
     free(matching->right);
     free(matching->choice);
     free(matching->distance);
-    free(matching->offsets);
     free(matching->frontier);
     free(matching->next);
     memset(matching, 0, sizeof *matching);
+}
+
+static bool bit_test(const unsigned char *bits, uint32_t index) {
+    return ((bits[index >> 3] >> (index & 7)) & 1U) != 0;
+}
+
+static void bit_set(unsigned char *bits, uint32_t index) {
+    bits[index >> 3] |= (unsigned char)(1U << (index & 7));
 }
 
 static uint32_t load_u32(const unsigned char bytes[4]) {
@@ -411,13 +422,13 @@ static void *initialize_worker(void *raw) {
 }
 
 static bool workers_initialize(worker_t *workers, uint32_t worker_count, const dp_t *dp,
-                               const uint32_t *polynomial, uint32_t threads,
+                               const uint32_t *polynomial, const uint32_t *threads,
                                uint64_t max_bytes) {
     pthread_t launched[MAX_WORKERS];
     init_task_t tasks[MAX_WORKERS];
     uint32_t created = 0;
     for (uint32_t index = 0; index < worker_count; ++index) {
-        tasks[index] = (init_task_t){&workers[index], dp, polynomial, threads, max_bytes, false};
+        tasks[index] = (init_task_t){&workers[index], dp, polynomial, threads[index], max_bytes, false};
         if (pthread_create(&launched[index], NULL, initialize_worker, &tasks[index]) != 0) {
             break;
         }
@@ -433,18 +444,18 @@ static bool workers_initialize(worker_t *workers, uint32_t worker_count, const d
 
 static void *scan_worker(void *raw) {
     scan_task_t *task = raw;
-    bool valid = kh_wire_write_request(task->worker->write_descriptor, KH_WIRE_SCAN, task->count);
-    for (uint64_t index = 0; valid && index < task->count; ++index) {
-        valid = kh_wire_write_u32(task->worker->write_descriptor, task->left[index]);
-    }
+    bool valid = task->count <= SIZE_MAX &&
+                 kh_wire_write_request(task->worker->write_descriptor, KH_WIRE_SCAN, task->count) &&
+                 kh_wire_write_u32s(task->worker->write_descriptor, task->left,
+                                    (size_t)task->count);
     uint32_t status;
     uint64_t count;
     uint64_t expected = task->count * task->f;
     valid = valid && kh_wire_read_response(task->worker->read_descriptor, &status, &count) &&
             status == 0 && count == expected;
-    for (uint64_t index = 0; valid && index < expected; ++index) {
-        valid = kh_wire_read_u32(task->worker->read_descriptor, &task->labels[index]);
-    }
+    valid = valid && expected <= SIZE_MAX &&
+            kh_wire_read_u32s(task->worker->read_descriptor, task->labels,
+                              (size_t)expected);
     task->valid = valid;
     return NULL;
 }
@@ -497,28 +508,35 @@ static void *level_worker(void *raw) {
     level_task_t *task = raw;
     bool valid = kh_wire_write_request(task->worker->write_descriptor, KH_WIRE_LEVEL,
                                        task->frontier_count) &&
-                 kh_wire_write_u32(task->worker->write_descriptor, task->depth);
-    for (uint32_t index = 0; valid && index < task->frontier_count; ++index) {
-        valid = kh_wire_write_u32(task->worker->write_descriptor, task->frontier[index]);
-    }
+                 kh_wire_write_u32(task->worker->write_descriptor, task->depth) &&
+                 kh_wire_write_u32s(task->worker->write_descriptor, task->frontier,
+                                    task->frontier_count);
     uint32_t status;
     uint64_t count;
     uint32_t free_right;
     valid = valid && kh_wire_read_response(task->worker->read_descriptor, &status, &count) &&
             status == 0 && count <= task->n &&
             kh_wire_read_u32(task->worker->read_descriptor, &free_right) && free_right <= 1;
-    if (valid && count != 0) {
-        task->discovered = malloc((size_t)count * sizeof(uint32_t));
-        valid = task->discovered != NULL;
+    uint32_t batch[4096];
+    for (uint64_t offset = 0; valid && offset < count;) {
+        size_t chunk = count - offset < 4096 ? (size_t)(count - offset) : 4096;
+        valid = kh_wire_read_u32s(task->worker->read_descriptor, batch, chunk);
+        for (size_t index = 0; valid && index < chunk; ++index) {
+            uint32_t left = batch[index];
+            valid = left < task->n;
+            if (valid) {
+                uint32_t absent = ABSENT;
+                if (__atomic_compare_exchange_n(&task->distance[left], &absent, task->depth + 1,
+                                                false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+                    uint32_t position = atomic_fetch_add_explicit(
+                        task->next_count, 1, memory_order_relaxed);
+                    task->next[position] = left;
+                }
+            }
+        }
+        offset += chunk;
     }
-    for (uint64_t index = 0; valid && index < count; ++index) {
-        valid = kh_wire_read_u32(task->worker->read_descriptor, &task->discovered[index]) &&
-                task->discovered[index] < task->n;
-    }
-    if (valid) {
-        task->discovered_count = (uint32_t)count;
-        task->free_right = free_right != 0;
-    }
+    task->free_right = valid && free_right != 0;
     task->valid = valid;
     return NULL;
 }
@@ -527,11 +545,15 @@ static void *proposal_worker(void *raw) {
     proposal_task_t *task = raw;
     bool valid = kh_wire_write_request(task->worker->write_descriptor, KH_WIRE_PROPOSE,
                                        task->restrict_terminals) &&
-                 kh_wire_write_u32(task->worker->write_descriptor, task->shortest);
+                 kh_wire_write_u32(task->worker->write_descriptor, task->shortest) &&
+                 kh_wire_write_u32(task->worker->write_descriptor, task->root_begin) &&
+                 kh_wire_write_u32(task->worker->write_descriptor, task->root_end);
     uint32_t status;
     uint64_t count;
+    uint32_t limit = task->n < KH_SHARD_PROPOSAL_LIMIT
+                     ? task->n : KH_SHARD_PROPOSAL_LIMIT;
     valid = valid && kh_wire_read_response(task->worker->read_descriptor, &status, &count) &&
-            status == 0 && count <= task->n &&
+            status == 0 && task->shortest <= limit && count <= limit &&
             kh_wire_read_u64(task->worker->read_descriptor, &task->scans);
     if (valid && count != 0) {
         task->proposals = malloc((size_t)count * sizeof(assignment_t));
@@ -612,27 +634,19 @@ static bool reduced_breadth_first(worker_t *workers, uint32_t worker_count,
             return false;
         }
         level_task_t tasks[MAX_WORKERS];
+        _Atomic uint32_t next_count = 0;
         for (uint32_t index = 0; index < worker_count; ++index) {
             tasks[index] = (level_task_t){
                 &workers[index], frontier, frontier_count, depth, dp->count,
-                NULL, 0, false, false};
+                matching->distance, next, &next_count, false, false};
         }
         bool valid = launch_all(tasks, sizeof tasks[0], worker_count, level_worker,
                                 offsetof(level_task_t, valid));
-        uint32_t next_count = 0;
         bool found = false;
         for (uint32_t index = 0; index < worker_count; ++index) {
             if (valid) {
                 found = found || tasks[index].free_right;
-                for (uint32_t item = 0; item < tasks[index].discovered_count; ++item) {
-                    uint32_t left = tasks[index].discovered[item];
-                    if (matching->distance[left] == ABSENT) {
-                        matching->distance[left] = depth + 1;
-                        next[next_count++] = left;
-                    }
-                }
             }
-            free(tasks[index].discovered);
         }
         if (!valid) {
             *error = "native reduced BFS worker failed";
@@ -654,7 +668,7 @@ static bool reduced_breadth_first(worker_t *workers, uint32_t worker_count,
         uint32_t *swap = frontier;
         frontier = next;
         next = swap;
-        frontier_count = next_count;
+        frontier_count = atomic_load_explicit(&next_count, memory_order_relaxed);
         ++depth;
     }
     return true;
@@ -688,12 +702,16 @@ static bool proposal_path_valid(const dp_t *dp, const matching_t *matching,
 
 static bool reduced_augment(worker_t *workers, uint32_t worker_count,
                             const dp_t *dp, matching_t *matching,
-                            uint32_t shortest, uint32_t *paths,
+                            uint32_t shortest, uint32_t root_begin, uint32_t root_end,
+                            bool restrict_terminals, uint32_t *paths,
+                            uint64_t *proposal_assignments, uint32_t *conflicts,
+                            uint64_t *proposal_scans,
                             const char **error) {
     proposal_task_t tasks[MAX_WORKERS];
     for (uint32_t index = 0; index < worker_count; ++index) {
         tasks[index] = (proposal_task_t){&workers[index], shortest, dp->count,
-                                         matching->phase == 0, NULL, 0, 0, false};
+                                         root_begin, root_end, restrict_terminals,
+                                         NULL, 0, 0, false};
     }
     bool valid = launch_all(tasks, sizeof tasks[0], worker_count, proposal_worker,
                             offsetof(proposal_task_t, valid));
@@ -704,14 +722,17 @@ static bool reduced_augment(worker_t *workers, uint32_t worker_count,
         total_proposals += tasks[index].proposal_count;
     }
     matching->scans += proposed_scans;
-    assignment_t *accepted = valid ? malloc((size_t)dp->count * sizeof *accepted) : NULL;
-    unsigned char *used_left = valid ? calloc(dp->count, 1) : NULL;
+    assignment_t *accepted = (valid && total_proposals <= SIZE_MAX / sizeof *accepted)
+                             ? malloc((size_t)total_proposals * sizeof *accepted) : NULL;
+    unsigned char *used_left = valid ? calloc(((size_t)dp->count + 7) / 8, 1) : NULL;
     unsigned char *used_right = valid ? calloc(((uint64_t)dp->q + 7) / 8, 1) : NULL;
-    if (!valid || accepted == NULL || used_left == NULL || used_right == NULL) {
+    if (!valid || (total_proposals != 0 && accepted == NULL) ||
+        used_left == NULL || used_right == NULL) {
         valid = false;
     }
     uint32_t accepted_count = 0;
     *paths = 0;
+    *conflicts = 0;
     for (uint32_t worker = 0; valid && worker < worker_count; ++worker) {
         uint32_t begin = 0;
         while (begin < tasks[worker].proposal_count) {
@@ -731,7 +752,7 @@ static bool reduced_augment(worker_t *workers, uint32_t worker_count,
             for (uint32_t index = begin; !conflict && index < end; ++index) {
                 assignment_t item = tasks[worker].proposals[index];
                 if (item.left >= dp->count || item.right >= dp->q ||
-                    used_left[item.left] ||
+                    bit_test(used_left, item.left) ||
                     ((used_right[item.right >> 3] >> (item.right & 7)) & 1U)) {
                     conflict = true;
                 }
@@ -739,18 +760,16 @@ static bool reduced_augment(worker_t *workers, uint32_t worker_count,
             if (!conflict) {
                 for (uint32_t index = begin; index < end; ++index) {
                     assignment_t item = tasks[worker].proposals[index];
-                    used_left[item.left] = 1;
+                    bit_set(used_left, item.left);
                     used_right[item.right >> 3] |= (unsigned char)(1U << (item.right & 7));
                     accepted[accepted_count++] = item;
                 }
                 ++*paths;
+            } else {
+                ++*conflicts;
             }
             begin = end;
         }
-    }
-    if (valid && *paths == 0) {
-        valid = false;
-        *error = "native distributed proposals made no progress";
     }
     if (valid && !workers_apply(workers, worker_count, accepted, accepted_count)) {
         valid = false;
@@ -780,7 +799,8 @@ static bool reduced_augment(worker_t *workers, uint32_t worker_count,
     if (!valid && *error == NULL) {
         *error = "native distributed path proposal failed";
     }
-    (void)total_proposals;
+    *proposal_assignments = total_proposals;
+    *proposal_scans = proposed_scans;
     return valid;
 }
 
@@ -823,53 +843,72 @@ static bool reduced_hall(worker_t *workers, uint32_t worker_count, const dp_t *d
 
 static bool workers_restore(worker_t *workers, uint32_t worker_count, const dp_t *dp,
                             const matching_t *matching) {
-    assignment_t *assignments = malloc((size_t)matching->matched * sizeof *assignments);
+    uint32_t capacity = matching->matched < KH_SHARD_PROPOSAL_LIMIT
+                        ? matching->matched : KH_SHARD_PROPOSAL_LIMIT;
+    assignment_t *assignments = malloc((size_t)capacity * sizeof *assignments);
     if (matching->matched != 0 && assignments == NULL) {
         return false;
     }
     uint32_t count = 0;
-    for (uint32_t left = 0; left < dp->count; ++left) {
+    uint32_t restored = 0;
+    bool valid = true;
+    for (uint32_t left = 0; valid && left < dp->count; ++left) {
         if (matching->left[left] != ABSENT) {
             assignments[count++] = (assignment_t){left, matching->left[left], matching->choice[left]};
+            if (count == capacity) {
+                valid = workers_apply(workers, worker_count, assignments, count);
+                restored += valid ? count : 0;
+                count = 0;
+            }
         }
     }
-    bool valid = count == matching->matched &&
-                 workers_apply(workers, worker_count, assignments, count);
+    if (valid && count != 0) {
+        valid = workers_apply(workers, worker_count, assignments, count);
+        restored += valid ? count : 0;
+    }
     free(assignments);
-    return valid;
+    return valid && restored == matching->matched;
 }
 
-static bool matching_create(const dp_t *dp, uint64_t max_bytes, matching_t *matching,
-                            uint64_t *required) {
+static bool matching_create(const dp_t *dp, uint32_t worker_count, uint64_t max_bytes,
+                            matching_t *matching, uint64_t *required) {
     uint64_t n = dp->count;
     uint64_t q = dp->q;
-    // Persistent pairs/frontiers plus worst-case path stacks, claim maps,
-    // one worker-bucket copy, bounded scan frames, and process headroom.
-    *required = 52 * n + 4 * q + (q + 3) / 4 + UINT64_C(67108864);
+    uint64_t bit_n = (n + 7) / 8;
+    uint64_t bit_q = (q + 7) / 8;
+    uint64_t proposal_limit = n < KH_SHARD_PROPOSAL_LIMIT
+                              ? n : KH_SHARD_PROPOSAL_LIMIT;
+    uint64_t persistent = 18 * n + 4 * q;
+    uint64_t proposal_scratch = bit_n + bit_q +
+        2 * worker_count * proposal_limit * sizeof(assignment_t);
+    uint64_t hall_scratch = (worker_count + 1) * bit_q;
+    uint64_t scratch = proposal_scratch > hall_scratch
+                       ? proposal_scratch : hall_scratch;
+    *required = persistent + scratch + UINT64_C(67108864);
     if (*required > max_bytes || n > SIZE_MAX / sizeof(uint64_t) ||
-        q > SIZE_MAX / sizeof(uint32_t)) {
+        q > SIZE_MAX / sizeof(uint32_t) || dp->f > UINT16_MAX) {
         return false;
     }
     matching->left = malloc((size_t)n * sizeof(uint32_t));
     matching->right = malloc((size_t)q * sizeof(uint32_t));
-    matching->choice = malloc((size_t)n * sizeof(uint32_t));
+    matching->choice = malloc((size_t)n * sizeof(uint16_t));
     matching->distance = malloc((size_t)n * sizeof(uint32_t));
-    matching->offsets = malloc((size_t)n * sizeof(uint64_t));
     matching->frontier = malloc((size_t)n * sizeof(uint32_t));
     matching->next = malloc((size_t)n * sizeof(uint32_t));
     if (matching->left == NULL || matching->right == NULL || matching->choice == NULL ||
-        matching->distance == NULL || matching->offsets == NULL ||
-        matching->frontier == NULL || matching->next == NULL) {
+        matching->distance == NULL || matching->frontier == NULL || matching->next == NULL) {
         matching_free(matching);
         return false;
     }
     memset(matching->left, 255, (size_t)n * sizeof(uint32_t));
     memset(matching->right, 255, (size_t)q * sizeof(uint32_t));
-    memset(matching->choice, 255, (size_t)n * sizeof(uint32_t));
+    memset(matching->choice, 255, (size_t)n * sizeof(uint16_t));
     return true;
 }
 
-static void __attribute__((unused)) layer_free(layer_t *layer) {
+#if 0
+/* The active reduced protocol never materializes or spools edge layers. */
+static void layer_free(layer_t *layer) {
     if (layer->spool != NULL) {
         fclose(layer->spool);
     }
@@ -1215,6 +1254,7 @@ static bool __attribute__((unused)) augment_layer(const dp_t *dp, matching_t *ma
     }
     return valid;
 }
+#endif
 
 static bool hashed_write(hashed_writer_t *writer, const void *bytes, size_t count) {
     if (!writer->valid || fwrite(bytes, 1, count, writer->file) != count) {
@@ -1283,7 +1323,8 @@ static bool checkpoint_write(const char *directory, const dp_t *dp,
     }
     for (uint32_t left = 0; left < dp->count; ++left) {
         hashed_u32(&writer, matching->left[left]);
-        hashed_u32(&writer, matching->choice[left]);
+        hashed_u32(&writer, matching->left[left] == ABSENT
+                              ? ABSENT : matching->choice[left]);
     }
     unsigned char digest[32];
     kh_sha256_final(&writer.checksum, digest);
@@ -1384,7 +1425,7 @@ static bool checkpoint_read(const char *path, const dp_t *dp,
             }
         }
         matching->left[left] = right;
-        matching->choice[left] = choice;
+        matching->choice[left] = right == ABSENT ? UINT16_MAX : (uint16_t)choice;
     }
     unsigned char expected_digest[32];
     unsigned char actual_digest[32];
@@ -1497,7 +1538,7 @@ static bool packed_write(hashed_writer_t *writer, const dp_t *dp,
         if (hall) {
             value = matching->distance[left] != ABSENT;
         } else {
-            value = matching->choice[left] == ABSENT ? 0 :
+            value = matching->left[left] == ABSENT ? 0 :
                     matching->choice[left] + (uint32_t)obstructed;
         }
         accumulator |= (uint64_t)value << available;
@@ -1588,6 +1629,39 @@ static bool worker_fd(const char *text, worker_t *worker, uint32_t index) {
     return valid;
 }
 
+static bool thread_list_read(const char *text, uint32_t count, uint32_t fallback, uint32_t *output) {
+    if (text == NULL) {
+        for (uint32_t index = 0; index < count; ++index) {
+            output[index] = fallback;
+        }
+        return true;
+    }
+    char *copy = strdup(text);
+    if (copy == NULL) {
+        return false;
+    }
+    char *cursor = copy;
+    uint32_t parsed = 0;
+    uint64_t total = 0;
+    bool valid = true;
+    while (valid && parsed < count) {
+        char *comma = strchr(cursor, ',');
+        if (comma != NULL) {
+            *comma = '\0';
+        }
+        uint64_t value;
+        valid = parse_u64(cursor, &value) && value > 0 && value <= 1024;
+        if (valid) {
+            output[parsed++] = (uint32_t)value;
+            total += value;
+        }
+        cursor = comma == NULL ? NULL : comma + 1;
+    }
+    valid = valid && parsed == count && cursor == NULL && total <= MAX_WORKERS;
+    free(copy);
+    return valid;
+}
+
 static void workers_stop(worker_t *workers, uint32_t count) {
     for (uint32_t index = 0; index < count; ++index) {
         kh_wire_write_request(workers[index].write_descriptor, KH_WIRE_STOP, 0);
@@ -1615,9 +1689,10 @@ static void help(void) {
     puts("Native distributed exact matching coordinator.\n"
          "Usage: kh_match_distributed INPUT.khdp OUTPUT.khmatch --poly C0,...,Cr\n"
          "       --worker-fd READ,WRITE --worker-fd READ,WRITE [options]\n"
-         "Options: --threads-per-worker N --max-bytes N --max-edges N\n"
+         "Options: --threads-per-worker N --worker-threads N,... --max-bytes N --max-edges N\n"
          "         --max-field-elements N\n"
-         "         --checkpoint-dir PATH --resume PATH --stop-after-phases N\n"
+         "         --checkpoint-dir PATH --checkpoint-seconds N --phase-batch-roots N\n"
+         "         --resume PATH --stop-after-phases N\n"
          "         --checkpoint-handshake");
 }
 
@@ -1635,11 +1710,14 @@ int main(int argc, char **argv) {
     const char *poly_text = NULL;
     const char *checkpoint_directory = NULL;
     const char *resume = NULL;
+    const char *thread_list_text = NULL;
     uint64_t threads = 1;
     uint64_t max_bytes = UINT64_C(2147483648);
     uint64_t max_edges = UINT64_MAX;
     uint64_t max_field_elements = UINT32_MAX;
     uint64_t stop_after = 0;
+    uint64_t checkpoint_seconds = 0;
+    uint64_t phase_batch_roots = 65536;
     bool handshake = false;
     worker_t workers[MAX_WORKERS];
     uint32_t worker_count = 0;
@@ -1661,6 +1739,8 @@ int main(int argc, char **argv) {
             checkpoint_directory = value;
         } else if (!strcmp(option, "--resume")) {
             resume = value;
+        } else if (!strcmp(option, "--worker-threads")) {
+            thread_list_text = value;
         } else if (!strcmp(option, "--worker-fd")) {
             arguments_valid = worker_count < MAX_WORKERS &&
                               worker_fd(value, &workers[worker_count], worker_count);
@@ -1680,11 +1760,18 @@ int main(int argc, char **argv) {
                 max_field_elements = number;
             } else if (!strcmp(option, "--stop-after-phases")) {
                 stop_after = number;
+            } else if (!strcmp(option, "--checkpoint-seconds")) {
+                checkpoint_seconds = number;
+            } else if (!strcmp(option, "--phase-batch-roots")) {
+                phase_batch_roots = number;
             } else {
                 arguments_valid = false;
             }
         }
     }
+    uint32_t worker_threads[MAX_WORKERS] = {0};
+    arguments_valid = arguments_valid && threads > 0 && threads <= 1024 &&
+                      thread_list_read(thread_list_text, worker_count, (uint32_t)threads, worker_threads);
     dp_t dp = {0};
     uint32_t polynomial[32] = {0};
     matching_t matching = {0};
@@ -1693,18 +1780,18 @@ int main(int argc, char **argv) {
     bool initialized = false;
     bool success = arguments_valid && worker_count >= 2 && poly_text != NULL &&
                    threads > 0 && threads <= 1024 && max_bytes > 0 && max_edges > 0 &&
-                   max_field_elements > 0 &&
+                   max_field_elements > 0 && phase_batch_roots > 0 && phase_batch_roots <= UINT32_MAX &&
                    (!handshake || checkpoint_directory != NULL) &&
                    (!stop_after || checkpoint_directory != NULL) &&
                    dp_read(dp_path, &dp) && polynomial_read(poly_text, &dp, polynomial) &&
                    dp.q <= max_field_elements &&
-                   matching_create(&dp, max_bytes, &matching, &required);
+                   matching_create(&dp, worker_count, max_bytes, &matching, &required);
     if (!success) {
         error = "invalid input, worker descriptors, or coordinator memory admission";
         goto cleanup;
     }
     initialized = workers_initialize(workers, worker_count, &dp, polynomial,
-                                     (uint32_t)threads, max_bytes);
+                                     worker_threads, max_bytes);
     if (!initialized) {
         error = "native matching worker initialization failed";
         success = false;
@@ -1742,56 +1829,93 @@ int main(int argc, char **argv) {
             }
             break;
         }
-        uint32_t paths;
-        uint32_t previous = matching.matched;
-        if (!reduced_augment(workers, worker_count, &dp, &matching,
-                             shortest, &paths, &error) || paths == 0) {
-            if (error == NULL) {
-                error = "native shortest-path layer made no progress";
-            }
-            success = false;
-            goto cleanup;
-        }
-        ++matching.phase;
-        char *saved = NULL;
-        if (checkpoint_directory != NULL &&
-            !checkpoint_write(checkpoint_directory, &dp, polynomial, &matching, &saved)) {
-            error = "cannot publish native distributed checkpoint";
-            success = false;
-            goto cleanup;
-        }
-        printf("{\"event\":\"committed\",\"cursor\":%" PRIu64
-               ",\"augmented\":%u,\"matched\":%u,\"done\":%u,\"total\":%u,"
-               "\"checkpoint_done\":%u,\"phase\":\"matching\","
-               "\"units\":\"requests\",\"heartbeat\":true",
-               matching.phase, paths, matching.matched, matching.matched, dp.count,
-               handshake ? previous : matching.matched);
-        if (saved != NULL) {
-            printf(",\"checkpoint\":\"%s\"", saved);
-        }
-        puts("}");
-        fflush(stdout);
-        free(saved);
-        if (handshake) {
-            printf("{\"event\":\"checkpoint\",\"cursor\":%" PRIu64 "}\n", matching.phase);
-            fflush(stdout);
-            if (getchar() != '\n') {
-                error = "cluster checkpoint acknowledgment missing";
+        bool direct_phase = shortest == 1;
+        bool restrict_terminals = matching.matched == 0;
+        uint32_t batch_roots = direct_phase && checkpoint_directory != NULL
+                               ? (uint32_t)phase_batch_roots : dp.count;
+        uint32_t phase_paths = 0;
+        uint32_t checkpoint_matched = matching.matched;
+        time_t checkpoint_time = time(NULL);
+        for (uint32_t begin = 0; begin < dp.count;) {
+            uint32_t end = dp.count - begin < batch_roots ? dp.count : begin + batch_roots;
+            uint32_t paths = 0;
+            uint32_t conflicts = 0;
+            uint64_t proposal_assignments = 0;
+            uint64_t proposal_scans = 0;
+            if (!reduced_augment(workers, worker_count, &dp, &matching, shortest,
+                                 begin, end, restrict_terminals, &paths,
+                                 &proposal_assignments, &conflicts, &proposal_scans,
+                                 &error)) {
                 success = false;
                 goto cleanup;
             }
-            printf("{\"done\":%u,\"total\":%u,\"checkpoint_done\":%u,"
+            phase_paths += paths;
+            printf("{\"event\":\"proposals\",\"root_begin\":%u,\"root_end\":%u,"
+                   "\"proposal_assignments\":%" PRIu64 ",\"accepted_paths\":%u,"
+                   "\"conflicts\":%u,\"proposal_scans\":%" PRIu64 ","
+                   "\"done\":%u,\"total\":%u,\"checkpoint_done\":%u,"
                    "\"phase\":\"matching\",\"units\":\"requests\","
                    "\"heartbeat\":true}\n",
-                   matching.matched, dp.count, matching.matched);
+                   begin, end, proposal_assignments, paths, conflicts, proposal_scans,
+                   matching.matched, dp.count, checkpoint_matched);
             fflush(stdout);
+            time_t now = time(NULL);
+            bool phase_end = end == dp.count;
+            bool due = checkpoint_seconds == 0 ||
+                       (now != (time_t)-1 && checkpoint_time != (time_t)-1 && now >= checkpoint_time &&
+                        (uint64_t)(now - checkpoint_time) >= checkpoint_seconds);
+            bool boundary = phase_end || (checkpoint_directory != NULL && due);
+            if (matching.matched > checkpoint_matched && boundary) {
+                uint32_t augmented = matching.matched - checkpoint_matched;
+                ++matching.phase;
+                char *saved = NULL;
+                if (checkpoint_directory != NULL &&
+                    !checkpoint_write(checkpoint_directory, &dp, polynomial, &matching, &saved)) {
+                    error = "cannot publish native distributed checkpoint";
+                    success = false;
+                    goto cleanup;
+                }
+                printf("{\"event\":\"committed\",\"cursor\":%" PRIu64
+                       ",\"augmented\":%u,\"matched\":%u,\"done\":%u,\"total\":%u,"
+                       "\"checkpoint_done\":%u,\"phase\":\"matching\","
+                       "\"units\":\"requests\",\"heartbeat\":true",
+                       matching.phase, augmented, matching.matched, matching.matched, dp.count,
+                       handshake ? checkpoint_matched : matching.matched);
+                if (saved != NULL) {
+                    printf(",\"checkpoint\":\"%s\"", saved);
+                }
+                puts("}");
+                fflush(stdout);
+                free(saved);
+                if (handshake) {
+                    printf("{\"event\":\"checkpoint\",\"cursor\":%" PRIu64 "}\n", matching.phase);
+                    fflush(stdout);
+                    if (getchar() != '\n') {
+                        error = "cluster checkpoint acknowledgment missing";
+                        success = false;
+                        goto cleanup;
+                    }
+                    printf("{\"done\":%u,\"total\":%u,\"checkpoint_done\":%u,"
+                           "\"phase\":\"matching\",\"units\":\"requests\","
+                           "\"heartbeat\":true}\n", matching.matched, dp.count, matching.matched);
+                    fflush(stdout);
+                }
+                checkpoint_matched = matching.matched;
+                checkpoint_time = now;
+                if (stop_after != 0 && matching.phase >= stop_after) {
+                    workers_stop(workers, worker_count);
+                    matching_free(&matching);
+                    dp_free(&dp);
+                    kh_resource_print("coordinator", -1);
+                    return 3;
+                }
+            }
+            begin = end;
         }
-        if (stop_after != 0 && matching.phase >= stop_after) {
-            workers_stop(workers, worker_count);
-            matching_free(&matching);
-            dp_free(&dp);
-            kh_resource_print("coordinator", -1);
-            return 3;
+        if (phase_paths == 0) {
+            error = "native shortest-path layer made no progress";
+            success = false;
+            goto cleanup;
         }
     }
     if (!obstructed && matching.matched != dp.count) {

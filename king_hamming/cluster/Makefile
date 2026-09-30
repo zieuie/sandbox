@@ -12,6 +12,11 @@ check:
 	python3 tests/test_recovery.py --run
 	python3 tests/test_retention.py --run
 	python3 tests/test_scheduling.py --run
+	python3 tests/test_continuous_campaign.py --run
+	python3 tests/test_rollout.py --run
+	python3 tests/test_status.py --run
+	python3 tests/test_canary.py
+	python3 tests/test_resources.py
 	python3 tests/test_tiles.py --run
 	python3 tests/test_tile_driver.py --run
 	python3 tests/test_distributed.py --run

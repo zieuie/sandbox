@@ -49,7 +49,7 @@ def main() -> int:
     parser.add_argument("--max-bytes", type=int, default=2**31)
     parser.add_argument("--distributed", action="store_true", help="reserve a multi-node matching group")
     parser.add_argument("--workers", type=int, default=2,
-                        help="nodes to reserve for one distributed matching (2-8)")
+                        help="nodes to reserve for one distributed matching (2-9)")
     parser.add_argument("--max-edges", type=int, default=2_000_000)
     parser.add_argument("--max-field-elements", type=int, default=1_000_000)
     parser.add_argument("--leader", default="http://127.0.0.1:8041")

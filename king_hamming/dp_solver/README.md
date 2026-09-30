@@ -138,3 +138,14 @@ python3 king_hamming/dp_solver/print_dp.py /tmp/kh-dp-tiles-5-3.json --verify
 
 All adapter command programs print useful help without arguments. The standalone
 driver has its own retained index; it does not submit work to the ordinary queue.
+
+## Analyze retained split templates
+
+```sh
+python3 king_hamming/dp_solver/analyze_templates.py \
+    king_hamming/examples king_hamming/cluster/deployments/continuous-campaign/results
+```
+
+The JSON inventory records atom counts, budget residues, score, coset count, and
+exact run order without expanding solver tables. It supports template conjectures
+and counterexample searches; it does not replace optimality verification.

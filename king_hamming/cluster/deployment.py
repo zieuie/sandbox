@@ -71,6 +71,8 @@ def bundle() -> bytes:
                 archive.add(source, arcname=f"cluster/{source.name}")
 
         archive.add(ROOT.parent / "adapter_config.py", arcname="adapter_config.py")
+        for source in sorted((ROOT.parent / "campaigns").glob("*.py")):
+            archive.add(source, arcname=f"campaigns/{source.name}")
         import adapters
         for source, name in adapters.runtime_files():
             archive.add(source, arcname=name)
@@ -156,5 +158,4 @@ shutil.rmtree(root)
 print(json.dumps({'log':log,'removed':str(root)}))
 """
     return remote(host, code, [directory])
-
 

@@ -192,11 +192,9 @@ static void fill_rectangle(worker_t *worker) {
             upper = diagonal - pool->first_v;
         }
         uint64_t cells = upper - lower + 1;
-        uint64_t begin = lower + cells * worker->index / pool->count;
-        uint64_t end = lower + cells * (worker->index + 1) / pool->count;
-
-        // Each worker writes only its own contiguous part of this diagonal.
-        for (uint64_t u = begin; u < end; ++u) {
+        // Spread expensive central cells and cheaper boundary cells across
+        // every worker. Ownership stays disjoint and ties remain cell-local.
+        for (uint64_t u = lower + worker->index; u <= upper; u += pool->count) {
             pool->function(pool->context, (uint32_t)u, (uint32_t)(diagonal - u));
         }
 

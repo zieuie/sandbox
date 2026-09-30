@@ -13,7 +13,9 @@
 /matching_solver/kh_match_worker
 /matching_solver/tests/matching_unit
 /matching_solver/tests/parallel_unit
+/matching_solver/tests/wire_unit
 
 # Runtime state and locally generated outputs
 deployments/
 experiments/
+matching_solver/tests/shard_pool_unit

@@ -107,6 +107,15 @@ def collect_plan(connection: sqlite3.Connection, node: str, now: float) -> dict[
     """Return bounded deletable hashes for node; caller holds that worker's storage transaction lock."""
 
     retired = retire_old(connection, now)
+    # A replacement agent's disk inventory is read under its local storage
+    # transaction. Do not race that proof with deletion from the same disk.
+    proving = connection.execute(
+        "SELECT COUNT(*) FROM node_revalidation WHERE node_name=?", (node,)
+    ).fetchone()[0]
+    if proving:
+        return {"blob_hashes": [], "retired": retired,
+                "checkpoint_keep": int(setting(connection, "checkpoint_keep")),
+                "deferred": "storage revalidation", "revalidation_pending": proving}
     protected = {row[0] for row in connection.execute("SELECT artifact_hash FROM artifacts")}
 
     for row in connection.execute("SELECT * FROM checkpoints WHERE retired_at IS NULL"):

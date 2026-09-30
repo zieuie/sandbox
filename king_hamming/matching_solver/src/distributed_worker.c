@@ -6,7 +6,9 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +16,6 @@
 
 #define ABSENT UINT32_MAX
 #define PATH_START UINT32_C(0x80000000)
-#define SCAN_TARGET_BYTES UINT64_C(1048576)
 
 typedef struct {
     uint32_t p;
@@ -43,7 +44,7 @@ typedef struct {
     uint32_t f;
     uint32_t *left;
     uint32_t *right;
-    uint32_t *choice;
+    uint16_t *choice;
     uint32_t *distance;
     unsigned char *seen_left;
     unsigned char *right_bits;
@@ -65,6 +66,19 @@ static void shard_free(shard_t *shard) {
     free(shard->seen_left);
     free(shard->right_bits);
     memset(shard, 0, sizeof *shard);
+}
+
+static bool bit_test(const unsigned char *bits, uint32_t index) {
+    return ((bits[index >> 3] >> (index & 7)) & 1U) != 0;
+}
+
+static void bit_set(unsigned char *bits, uint32_t index) {
+    bits[index >> 3] |= (unsigned char)(1U << (index & 7));
+}
+
+static bool bit_test_set_atomic(unsigned char *bits, uint32_t index) {
+    unsigned char mask = (unsigned char)(1U << (index & 7));
+    return (__atomic_fetch_or(&bits[index >> 3], mask, __ATOMIC_RELAXED) & mask) != 0;
 }
 
 static bool read_init(int descriptor, uint64_t payload_bytes, init_t *init) {
@@ -150,19 +164,39 @@ static bool shard_create(shard_t *shard, uint32_t index, uint32_t workers,
     shard->n = kh_shard_graph_count(shard->graph);
     shard->q = kh_shard_graph_q(shard->graph);
     shard->f = kh_shard_graph_f(shard->graph);
-    uint64_t state_required = 42 * (uint64_t)shard->n +
-                              8 * (uint64_t)shard->q +
-                              ((uint64_t)shard->q + 3) / 4 +
-                              UINT64_C(67108864);
+    if (shard->f > UINT16_MAX) {
+        *error = "native shard choice width exceeds compact representation";
+        return false;
+    }
+    uint64_t n = shard->n;
+    uint64_t q = shard->q;
+    uint64_t bit_n = (n + 7) / 8;
+    uint64_t bit_q = (q + 7) / 8;
+    uint64_t proposal_limit = n < KH_SHARD_PROPOSAL_LIMIT
+                              ? n : KH_SHARD_PROPOSAL_LIMIT;
+    uint64_t persistent = 10 * n + bit_n + 8 * q + bit_q;
+    uint64_t level_scratch = 4 * n + 4 * ((n + shard->workers - 1) / shard->workers) +
+        (uint64_t)init->threads * (UINT64_C(65536) * 4 + 16);
+    uint64_t proposal_scratch = bit_n + bit_q +
+        proposal_limit * sizeof(assignment_t) +
+        (uint64_t)init->threads * 16 * (proposal_limit + 1);
+    uint64_t apply_scratch = (uint64_t)shard->workers * proposal_limit *
+                             sizeof(assignment_t);
+    uint64_t scratch = level_scratch > proposal_scratch
+                       ? level_scratch : proposal_scratch;
+    if (apply_scratch > scratch) {
+        scratch = apply_scratch;
+    }
+    uint64_t state_required = persistent + scratch + UINT64_C(67108864);
     if (state_required > init->max_bytes) {
         *error = "native shard replicated state exceeds memory limit";
         return false;
     }
     shard->left = malloc((size_t)shard->n * sizeof(uint32_t));
     shard->right = malloc((size_t)shard->q * sizeof(uint32_t));
-    shard->choice = malloc((size_t)shard->n * sizeof(uint32_t));
+    shard->choice = malloc((size_t)shard->n * sizeof(uint16_t));
     shard->distance = malloc((size_t)shard->n * sizeof(uint32_t));
-    shard->seen_left = malloc(shard->n);
+    shard->seen_left = malloc(((size_t)shard->n + 7) / 8);
     shard->right_bits = calloc(((uint64_t)shard->q + 7) / 8, 1);
     if (shard->left == NULL || shard->right == NULL || shard->choice == NULL ||
         shard->distance == NULL || shard->seen_left == NULL || shard->right_bits == NULL) {
@@ -171,7 +205,7 @@ static bool shard_create(shard_t *shard, uint32_t index, uint32_t workers,
     }
     memset(shard->left, 255, (size_t)shard->n * sizeof(uint32_t));
     memset(shard->right, 255, (size_t)shard->q * sizeof(uint32_t));
-    memset(shard->choice, 255, (size_t)shard->n * sizeof(uint32_t));
+    memset(shard->choice, 255, (size_t)shard->n * sizeof(uint16_t));
     memset(shard->distance, 255, (size_t)shard->n * sizeof(uint32_t));
     return true;
 }
@@ -184,19 +218,101 @@ static bool handle_scan(shard_t *shard, uint64_t count, const char **error) {
     uint32_t *left = malloc((size_t)count * sizeof *left);
     uint32_t *labels = malloc((size_t)count * shard->f * sizeof *labels);
     bool valid = count == 0 || (left != NULL && labels != NULL);
+    valid = valid && kh_wire_read_u32s(STDIN_FILENO, left, (size_t)count);
     for (uint64_t position = 0; valid && position < count; ++position) {
-        valid = kh_wire_read_u32(STDIN_FILENO, &left[position]) &&
-                left[position] < shard->n && left[position] % shard->workers == shard->index;
+        valid = left[position] < shard->n &&
+                left[position] % shard->workers == shard->index;
     }
     valid = valid && kh_shard_scan(shard->graph, left, count, labels, error);
     uint64_t label_count = count * shard->f;
     valid = valid && kh_wire_write_response(STDOUT_FILENO, 0, label_count);
-    for (uint64_t position = 0; valid && position < label_count; ++position) {
-        valid = kh_wire_write_u32(STDOUT_FILENO, labels[position]);
-    }
+    valid = valid && label_count <= SIZE_MAX &&
+            kh_wire_write_u32s(STDOUT_FILENO, labels, (size_t)label_count);
     free(left);
     free(labels);
     return valid;
+}
+
+#define DISCOVERY_CHUNK_ITEMS UINT32_C(65536)
+
+typedef struct discovery_chunk {
+    struct discovery_chunk *next;
+    uint32_t count;
+    uint32_t items[DISCOVERY_CHUNK_ITEMS];
+} discovery_chunk_t;
+
+typedef struct {
+    discovery_chunk_t *first;
+    discovery_chunk_t *last;
+    uint64_t count;
+} discovery_vector_t;
+
+static bool discovery_append(discovery_vector_t *vector, uint32_t item) {
+    if (vector->last == NULL || vector->last->count == DISCOVERY_CHUNK_ITEMS) {
+        discovery_chunk_t *chunk = malloc(sizeof *chunk);
+        if (chunk == NULL) {
+            return false;
+        }
+        chunk->next = NULL;
+        chunk->count = 0;
+        if (vector->last == NULL) {
+            vector->first = chunk;
+        } else {
+            vector->last->next = chunk;
+        }
+        vector->last = chunk;
+    }
+    vector->last->items[vector->last->count++] = item;
+    ++vector->count;
+    return true;
+}
+
+static void discovery_free(discovery_vector_t *vector) {
+    discovery_chunk_t *chunk = vector->first;
+    while (chunk != NULL) {
+        discovery_chunk_t *next = chunk->next;
+        free(chunk);
+        chunk = next;
+    }
+}
+
+typedef struct {
+    shard_t *shard;
+    const uint32_t *owned;
+    discovery_vector_t *discovered;
+    _Atomic bool free_right;
+    _Atomic bool valid;
+} level_context_t;
+
+static void level_range(void *raw, uint64_t begin, uint64_t end,
+                        uint32_t worker_index) {
+    (void)worker_index;
+    level_context_t *context = raw;
+    shard_t *shard = context->shard;
+    for (uint64_t item = begin; item < end &&
+         atomic_load_explicit(&context->valid, memory_order_relaxed); ++item) {
+        uint32_t left = context->owned[item];
+        for (uint32_t choice = 0; choice < shard->f; ++choice) {
+            uint32_t right;
+            if (!kh_shard_neighbor(shard->graph, left, choice, &right) || right >= shard->q) {
+                atomic_store_explicit(&context->valid, false, memory_order_relaxed);
+                break;
+            }
+            __atomic_fetch_or(&shard->right_bits[right >> 3],
+                              (unsigned char)(1U << (right & 7)), __ATOMIC_RELAXED);
+            uint32_t mate = shard->right[right];
+            if (mate == ABSENT) {
+                atomic_store_explicit(&context->free_right, true, memory_order_relaxed);
+            } else if (shard->distance[mate] == ABSENT &&
+                       !bit_test_set_atomic(shard->seen_left, mate)) {
+                discovery_vector_t *vector = &context->discovered[worker_index];
+                if (!discovery_append(vector, mate)) {
+                    atomic_store_explicit(&context->valid, false, memory_order_relaxed);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 static bool handle_level(shard_t *shard, uint64_t count, const char **error) {
@@ -209,21 +325,25 @@ static bool handle_level(shard_t *shard, uint64_t count, const char **error) {
         memset(shard->right_bits, 0, ((uint64_t)shard->q + 7) / 8);
     }
     uint32_t owned_count = 0;
-    for (uint64_t position = 0; position < count; ++position) {
-        uint32_t left;
-        if (!kh_wire_read_u32(STDIN_FILENO, &left) || left >= shard->n) {
+    uint32_t batch[4096];
+    for (uint64_t offset = 0; offset < count;) {
+        size_t chunk = count - offset < 4096 ? (size_t)(count - offset) : 4096;
+        if (!kh_wire_read_u32s(STDIN_FILENO, batch, chunk)) {
             return false;
         }
-        shard->distance[left] = depth;
-        owned_count += left % shard->workers == shard->index;
+        for (size_t index = 0; index < chunk; ++index) {
+            uint32_t left = batch[index];
+            if (left >= shard->n) {
+                return false;
+            }
+            shard->distance[left] = depth;
+            owned_count += left % shard->workers == shard->index;
+        }
+        offset += chunk;
     }
-    // The frontier must be replayed for owned extraction, so the coordinator
-    // sends canonical sorted frontiers and ownership is an arithmetic sequence.
-    // Receive it once into a bounded full-level array when this shard has work.
-    // The request has already been consumed; reconstruct owned vertices from
-    // distance changes at this exact depth.
     uint32_t *owned = malloc((size_t)owned_count * sizeof(uint32_t));
-    uint32_t *discovered = malloc((size_t)shard->n * sizeof(uint32_t));
+    uint32_t thread_count = kh_shard_graph_threads(shard->graph);
+    discovery_vector_t *discovered = calloc(thread_count, sizeof *discovered);
     if ((owned_count != 0 && owned == NULL) || discovered == NULL) {
         free(owned);
         free(discovered);
@@ -240,112 +360,105 @@ static bool handle_level(shard_t *shard, uint64_t count, const char **error) {
         free(discovered);
         return false;
     }
-    memset(shard->seen_left, 0, shard->n);
-    uint64_t batch = SCAN_TARGET_BYTES / (4 * (uint64_t)shard->f);
-    if (batch == 0) {
-        batch = 1;
+    memset(shard->seen_left, 0, ((size_t)shard->n + 7) / 8);
+    level_context_t context = {shard, owned, discovered, false, true};
+    kh_shard_parallel(shard->graph, owned_count, level_range, &context);
+    uint64_t discovered_count = 0;
+    for (uint32_t index = 0; index < thread_count; ++index) {
+        discovered_count += discovered[index].count;
     }
-    uint32_t discovered_count = 0;
-    bool free_right = false;
-    bool valid = true;
-    for (uint64_t begin = 0; valid && begin < owned_count; begin += batch) {
-        uint64_t take = owned_count - begin < batch ? owned_count - begin : batch;
-        uint32_t *labels = malloc((size_t)take * shard->f * sizeof(uint32_t));
-        valid = labels != NULL &&
-                kh_shard_scan(shard->graph, owned + begin, take, labels, error);
-        for (uint64_t item = 0; valid && item < take; ++item) {
-            for (uint32_t choice = 0; choice < shard->f; ++choice) {
-                uint32_t right = labels[item * shard->f + choice];
-                if (right >= shard->q) {
-                    valid = false;
-                    break;
-                }
-                shard->right_bits[right >> 3] |= (unsigned char)(1U << (right & 7));
-                uint32_t mate = shard->right[right];
-                if (mate == ABSENT) {
-                    free_right = true;
-                } else if (shard->distance[mate] == ABSENT && !shard->seen_left[mate]) {
-                    shard->seen_left[mate] = 1;
-                    discovered[discovered_count++] = mate;
-                }
-            }
-        }
-        free(labels);
-    }
+    bool valid = atomic_load_explicit(&context.valid, memory_order_relaxed);
+    bool free_right = atomic_load_explicit(&context.free_right, memory_order_relaxed);
     free(owned);
-    valid = valid && kh_wire_write_response(STDOUT_FILENO, 0, discovered_count) &&
+    valid = valid && discovered_count <= shard->n &&
+            kh_wire_write_response(STDOUT_FILENO, 0, discovered_count) &&
             kh_wire_write_u32(STDOUT_FILENO, free_right);
-    for (uint32_t position = 0; valid && position < discovered_count; ++position) {
-        valid = kh_wire_write_u32(STDOUT_FILENO, discovered[position]);
+    for (uint32_t index = 0; valid && index < thread_count; ++index) {
+        for (discovery_chunk_t *chunk = discovered[index].first;
+             valid && chunk != NULL; chunk = chunk->next) {
+            valid = kh_wire_write_u32s(STDOUT_FILENO, chunk->items, chunk->count);
+        }
+    }
+    for (uint32_t index = 0; index < thread_count; ++index) {
+        discovery_free(&discovered[index]);
     }
     free(discovered);
+    if (!valid && *error == NULL) {
+        *error = "parallel native shard level failed";
+    }
     return valid;
 }
 
-static bool handle_propose(shard_t *shard, uint64_t count) {
+typedef struct {
+    shard_t *shard;
+    bool terminal_owned;
     uint32_t shortest;
-    if (count > 1 || !kh_wire_read_u32(STDIN_FILENO, &shortest) ||
-        shortest == 0 || shortest > shard->n) {
-        return false;
-    }
-    size_t stack_size = (size_t)shortest + 1;
+    uint32_t root_begin;
+    assignment_t *proposals;
+    unsigned char *used_left;
+    unsigned char *used_right;
+    uint32_t proposal_capacity;
+    uint32_t proposal_count;
+    pthread_mutex_t commit;
+    _Atomic uint64_t scans;
+    _Atomic bool valid;
+    _Atomic bool full;
+} propose_context_t;
+
+static void propose_range(void *raw, uint64_t begin, uint64_t end,
+                          uint32_t worker_index) {
+    (void)worker_index;
+    propose_context_t *context = raw;
+    shard_t *shard = context->shard;
+    size_t stack_size = (size_t)context->shortest + 1;
     uint32_t *stack_left = malloc(stack_size * sizeof(uint32_t));
     uint32_t *stack_cursor = malloc(stack_size * sizeof(uint32_t));
     uint32_t *stack_right = malloc(stack_size * sizeof(uint32_t));
     uint32_t *stack_choice = malloc(stack_size * sizeof(uint32_t));
-    unsigned char *used_left = calloc(shard->n, 1);
-    unsigned char *used_right = calloc(((uint64_t)shard->q + 7) / 8, 1);
-    assignment_t *proposals = malloc((size_t)shard->n * sizeof *proposals);
     if (stack_left == NULL || stack_cursor == NULL || stack_right == NULL ||
-        stack_choice == NULL || used_left == NULL || used_right == NULL ||
-        proposals == NULL) {
-        free(stack_left);
-        free(stack_cursor);
-        free(stack_right);
-        free(stack_choice);
-        free(used_left);
-        free(used_right);
-        free(proposals);
-        return false;
+        stack_choice == NULL) {
+        atomic_store_explicit(&context->valid, false, memory_order_relaxed);
+        free(stack_left); free(stack_cursor); free(stack_right); free(stack_choice);
+        return;
     }
-    uint32_t proposal_count = 0;
-    uint64_t scans = 0;
-    bool valid = true;
-    for (uint32_t root = shard->index; valid && root < shard->n; root += shard->workers) {
-        if (shard->left[root] != ABSENT || used_left[root] || shard->distance[root] != 0) {
+    uint64_t local_scans = 0;
+    for (uint64_t position = begin; position < end &&
+         atomic_load_explicit(&context->valid, memory_order_relaxed) &&
+         !atomic_load_explicit(&context->full, memory_order_relaxed); ++position) {
+        uint32_t root = context->root_begin + (uint32_t)position;
+        if (root % shard->workers != shard->index ||
+            shard->left[root] != ABSENT || shard->distance[root] != 0) {
             continue;
         }
         uint32_t depth = 0;
         stack_left[0] = root;
         stack_cursor[0] = 0;
         bool found = false;
+        bool valid = true;
         while (valid) {
             uint32_t left = stack_left[depth];
             bool descended = false;
             while (stack_cursor[depth] < shard->f) {
                 uint32_t choice = stack_cursor[depth]++;
                 uint32_t right;
-                ++scans;
-                if (!kh_shard_neighbor(shard->graph, left, choice, &right) || right >= shard->q) {
+                ++local_scans;
+                if (!kh_shard_neighbor(shard->graph, left, choice, &right) ||
+                    right >= shard->q) {
                     valid = false;
                     break;
                 }
-                if ((used_right[right >> 3] >> (right & 7)) & 1U) {
-                    continue;
-                }
                 uint32_t mate = shard->right[right];
-                // Terminal ownership makes free-right proposals from different
-                // shards disjoint before the coordinator merge.
-                if (mate == ABSENT && (!count || right % shard->workers == shard->index) &&
-                    shard->distance[left] + 1 == shortest) {
+                if (mate == ABSENT && (!context->terminal_owned ||
+                    right % shard->workers == shard->index) &&
+                    shard->distance[left] + 1 == context->shortest) {
                     stack_right[depth] = right;
                     stack_choice[depth] = choice;
                     found = true;
                     break;
                 }
-                if (mate != ABSENT && !used_left[mate] &&
+                if (mate != ABSENT &&
                     shard->distance[mate] == shard->distance[left] + 1 &&
-                    shard->distance[mate] < shortest) {
+                    shard->distance[mate] < context->shortest) {
                     stack_right[depth] = right;
                     stack_choice[depth] = choice;
                     ++depth;
@@ -359,46 +472,98 @@ static bool handle_propose(shard_t *shard, uint64_t count) {
                     break;
                 }
             }
-            if (!valid || found) {
-                break;
-            }
-            if (descended) {
-                continue;
-            }
-            if (depth == 0) {
-                break;
-            }
+            if (!valid || found) break;
+            if (descended) continue;
+            if (depth == 0) break;
             --depth;
         }
-        if (valid && found) {
-            if ((uint64_t)proposal_count + depth + 1 > shard->n) {
-                valid = false;
-                break;
-            }
-            for (uint32_t position = 0; position <= depth; ++position) {
-                uint32_t left = stack_left[position];
-                uint32_t right = stack_right[position];
-                used_left[left] = 1;
-                used_right[right >> 3] |= (unsigned char)(1U << (right & 7));
-                proposals[proposal_count++] = (assignment_t){
-                    left, right, stack_choice[position] | (position == 0 ? PATH_START : 0)};
+        if (!valid) {
+            atomic_store_explicit(&context->valid, false, memory_order_relaxed);
+            break;
+        }
+        if (!found) continue;
+        pthread_mutex_lock(&context->commit);
+        bool no_space = (uint64_t)context->proposal_count + depth + 1 >
+                        context->proposal_capacity;
+        bool conflict = no_space;
+        for (uint32_t item = 0; !conflict && item <= depth; ++item) {
+            uint32_t left = stack_left[item];
+            uint32_t right = stack_right[item];
+            conflict = bit_test(context->used_left, left) ||
+                ((context->used_right[right >> 3] >> (right & 7)) & 1U);
+        }
+        if (!conflict) {
+            for (uint32_t item = 0; item <= depth; ++item) {
+                uint32_t left = stack_left[item];
+                uint32_t right = stack_right[item];
+                bit_set(context->used_left, left);
+                context->used_right[right >> 3] |=
+                    (unsigned char)(1U << (right & 7));
+                context->proposals[context->proposal_count++] = (assignment_t){
+                    left, right, stack_choice[item] | (item == 0 ? PATH_START : 0)};
             }
         }
+        if (no_space) {
+            atomic_store_explicit(&context->full, true, memory_order_relaxed);
+        }
+        pthread_mutex_unlock(&context->commit);
     }
-    valid = valid && kh_wire_write_response(STDOUT_FILENO, 0, proposal_count) &&
+    atomic_fetch_add_explicit(&context->scans, local_scans, memory_order_relaxed);
+    free(stack_left); free(stack_cursor); free(stack_right); free(stack_choice);
+}
+
+static bool handle_propose(shard_t *shard, uint64_t count) {
+    uint32_t shortest;
+    uint32_t root_begin;
+    uint32_t root_end;
+    if (count > 1 || !kh_wire_read_u32(STDIN_FILENO, &shortest) ||
+        !kh_wire_read_u32(STDIN_FILENO, &root_begin) ||
+        !kh_wire_read_u32(STDIN_FILENO, &root_end) ||
+        shortest == 0 || shortest > shard->n || root_begin > root_end || root_end > shard->n) {
+        return false;
+    }
+    uint32_t proposal_capacity = shard->n < KH_SHARD_PROPOSAL_LIMIT
+                                 ? shard->n : KH_SHARD_PROPOSAL_LIMIT;
+    if (shortest > proposal_capacity) {
+        return false;
+    }
+    unsigned char *used_left = calloc(((size_t)shard->n + 7) / 8, 1);
+    unsigned char *used_right = calloc(((uint64_t)shard->q + 7) / 8, 1);
+    assignment_t *proposals = malloc((size_t)proposal_capacity * sizeof *proposals);
+    if (used_left == NULL || used_right == NULL || proposals == NULL) {
+        free(used_left); free(used_right); free(proposals);
+        return false;
+    }
+    propose_context_t context = {
+        .shard = shard,
+        .terminal_owned = count != 0,
+        .shortest = shortest,
+        .root_begin = root_begin,
+        .proposals = proposals,
+        .used_left = used_left,
+        .used_right = used_right,
+        .proposal_capacity = proposal_capacity,
+        .proposal_count = 0,
+        .scans = 0,
+        .valid = true,
+        .full = false,
+    };
+    if (pthread_mutex_init(&context.commit, NULL) != 0) {
+        free(used_left); free(used_right); free(proposals);
+        return false;
+    }
+    kh_shard_parallel(shard->graph, root_end - root_begin, propose_range, &context);
+    bool valid = atomic_load_explicit(&context.valid, memory_order_relaxed);
+    uint64_t scans = atomic_load_explicit(&context.scans, memory_order_relaxed);
+    valid = valid && kh_wire_write_response(STDOUT_FILENO, 0, context.proposal_count) &&
             kh_wire_write_u64(STDOUT_FILENO, scans);
-    for (uint32_t position = 0; valid && position < proposal_count; ++position) {
+    for (uint32_t position = 0; valid && position < context.proposal_count; ++position) {
         valid = kh_wire_write_u32(STDOUT_FILENO, proposals[position].left) &&
                 kh_wire_write_u32(STDOUT_FILENO, proposals[position].right) &&
                 kh_wire_write_u32(STDOUT_FILENO, proposals[position].choice);
     }
-    free(stack_left);
-    free(stack_cursor);
-    free(stack_right);
-    free(stack_choice);
-    free(used_left);
-    free(used_right);
-    free(proposals);
+    pthread_mutex_destroy(&context.commit);
+    free(used_left); free(used_right); free(proposals);
     return valid;
 }
 
@@ -408,7 +573,7 @@ static bool handle_apply(shard_t *shard, uint64_t count) {
     }
     assignment_t *assignments = malloc((size_t)count * sizeof *assignments);
     bool valid = count == 0 || assignments != NULL;
-    memset(shard->seen_left, 0, shard->n);
+    memset(shard->seen_left, 0, ((size_t)shard->n + 7) / 8);
     memset(shard->right_bits, 0, ((uint64_t)shard->q + 7) / 8);
     for (uint64_t position = 0; valid && position < count; ++position) {
         assignment_t *item = &assignments[position];
@@ -417,12 +582,12 @@ static bool handle_apply(shard_t *shard, uint64_t count) {
                 kh_wire_read_u32(STDIN_FILENO, &item->right) &&
                 kh_wire_read_u32(STDIN_FILENO, &item->choice) &&
                 item->left < shard->n && item->right < shard->q &&
-                item->choice < shard->f && !shard->seen_left[item->left] &&
+                item->choice < shard->f && !bit_test(shard->seen_left, item->left) &&
                 !((shard->right_bits[item->right >> 3] >> (item->right & 7)) & 1U) &&
                 kh_shard_neighbor(shard->graph, item->left, item->choice, &actual) &&
                 actual == item->right;
         if (valid) {
-            shard->seen_left[item->left] = 1;
+            bit_set(shard->seen_left, item->left);
             shard->right_bits[item->right >> 3] |= (unsigned char)(1U << (item->right & 7));
         }
     }

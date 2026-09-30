@@ -68,13 +68,14 @@ class Cluster:
         self.processes.append(process)
         return process
 
-    def worker(self, name: str, cpu_count: int) -> subprocess.Popen[bytes]:
+    def worker(self, name: str, cpu_count: int, slots: int = 1) -> subprocess.Popen[bytes]:
         """Start name with cpu_count allowed CPUs and private mutable/storage roots."""
 
         address = f"127.0.0.1:{free_port()}"
         cpus = sorted(os.sched_getaffinity(0))[:cpu_count]
         return self.start(name, [str(ROOT / "agent.py"), "run", "--leader", self.url,
                                 "--name", name, "--cpus", ",".join(map(str, cpus)),
+                                "--slots", str(slots),
                                 "--work-root", str(self.root / name / "work"),
                                 "--storage-root", str(self.root / name / "blobs"),
                                 "--storage-listen", address, "--storage-url", f"http://{address}",
@@ -353,6 +354,47 @@ class LeaseTests(unittest.TestCase):
             with leader.connect(database) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM lease_history").fetchone()[0], 2)
                 self.assertEqual(connection.execute("SELECT state FROM runs").fetchone()[0], "running")
+
+    def test_generation_aware_batched_revalidation(self) -> None:
+        """Reuse metadata on the same disk but demand hashes after storage replacement."""
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            generation = "11111111-1111-4111-8111-111111111111"
+            old = {"node_name": "worker", "session_id": "first",
+                   "storage_generation": generation, "address": "http://worker:8042"}
+            handler.dispatch_post("/v1/register", old)
+            digest = "a" * 64
+            with leader.connect(database) as connection:
+                connection.execute(
+                    "INSERT INTO artifacts(artifact_hash,target_replicas,created,size) VALUES(?,3,1,9)",
+                    (digest,))
+                connection.execute(
+                    "INSERT INTO replicas(artifact_hash,node_name,location,created) VALUES(?,?,?,1)",
+                    (digest, "worker", f"http://worker:8042/blobs/{digest}"))
+            new = {**old, "session_id": "second"}
+            registration = handler.dispatch_post("/v1/register", new)
+            self.assertEqual(registration["storage_validation_mode"], "metadata")
+            batch = handler.dispatch_post("/v1/revalidation-batch", new)
+            self.assertEqual(batch["mode"], "metadata")
+            self.assertEqual(batch["records"][0]["members"],
+                             [{"digest": digest, "size": 9}])
+            result = handler.dispatch_post("/v1/revalidation-batch-done", {
+                **new, "records": [{"kind": "artifact", "digest": digest, "valid": True}],
+            })
+            self.assertEqual(result["remaining"], 0)
+            with leader.connect(database) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT COUNT(*) FROM replicas WHERE node_name='worker'").fetchone()[0], 1)
+                self.assertEqual(connection.execute(
+                    "SELECT storage_validation_mode FROM nodes WHERE node_name='worker'").fetchone()[0],
+                    "verified")
+
+            replaced = {**new, "session_id": "third",
+                        "storage_generation": "22222222-2222-4222-8222-222222222222"}
+            registration = handler.dispatch_post("/v1/register", replaced)
+            self.assertEqual(registration["storage_validation_mode"], "hash")
 
 
 # Validate real DP snapshots and failover through live agent processes.

@@ -25,7 +25,10 @@ CREATE TABLE IF NOT EXISTS distributed_tiles (
     PRIMARY KEY(parent_run_id,row,column)
 );
 CREATE INDEX IF NOT EXISTS distributed_children ON distributed_tiles(child_run_id);
+CREATE INDEX IF NOT EXISTS distributed_attempts ON runs(calculation_id,created);
 """
+
+REUSE_BATCH = 128
 
 
 # Store dependency ownership separately from ordinary run and lease history.
@@ -77,6 +80,89 @@ def artifact_record(connection: sqlite3.Connection, row: sqlite3.Row, now: float
     return {"sha256": row["artifact_hash"], "size": size, "locations": sources}
 
 
+def child_specification(parent: sqlite3.Row, row: int, column: int) -> dict[str, Any]:
+    """Build the exact child identity owned by this parent attempt."""
+    arguments = json.loads(parent["specification"])["arguments"]
+    result = {"program": "dp_tile", "arguments": {
+        "parent_run_id": parent["run_id"], "p": arguments["p"], "r": arguments["r"],
+        "row": row, "column": column,
+        "tile_side": int(arguments.get("tile_side", 4096)),
+        "threads": int(arguments.get("threads", 1)),
+        "max_tile_bytes": int(arguments.get("max_tile_bytes", 2 * 1024**3)),
+    }}
+    if "max_cpus" in arguments:
+        result["arguments"]["max_cpus"] = arguments["max_cpus"]
+    return result
+
+
+def reuse_tiles(connection: sqlite3.Connection, parent: sqlite3.Row, now: float) -> int:
+    """Import earlier exact attempt tiles only while two live replicas prove durability.
+
+    A new complete child preserves the new attempt's lineage and references the
+    same content-addressed blob. Queued children may be superseded atomically;
+    already leased children are never revoked or given a competing writer.
+    """
+    if parent["from_scratch"]:
+        return 0
+    sources = connection.execute(
+        "SELECT source.row,source.column,child.*,target.child_run_id AS target_child_id,"
+        "target_child.state AS target_state "
+        "FROM runs previous JOIN distributed_tiles source ON source.parent_run_id=previous.run_id "
+        "JOIN runs child ON child.run_id=source.child_run_id "
+        "JOIN distributed_tiles target ON target.parent_run_id=? "
+        "AND target.row=source.row AND target.column=source.column "
+        "LEFT JOIN runs target_child ON target_child.run_id=target.child_run_id "
+        "WHERE previous.calculation_id=? AND previous.parent_run_id IS NULL "
+        "AND previous.run_id<>? AND previous.created<=? AND child.state='complete' "
+        "AND (target.child_run_id IS NULL OR target_child.state IN "
+        "('queued','failed','cancelled')) "
+        "ORDER BY source.row,source.column,previous.created DESC,child.finished DESC",
+        (parent["run_id"], parent["calculation_id"], parent["run_id"], parent["created"]),
+    ).fetchall()
+    imported, seen = 0, set()
+    for source in sources:
+        key = (source["row"], source["column"])
+        if key in seen:
+            continue
+        descriptor = artifact_record(connection, source, now)
+        if descriptor is None or len(descriptor["locations"]) < 2:
+            continue
+        seen.add(key)
+        if source["target_state"] == "queued":
+            connection.execute(
+                "UPDATE runs SET state='cancelled',finished=?,progress_phase='cancelled',"
+                "progress_message='reused durable tile from earlier attempt' "
+                "WHERE run_id=? AND state='queued'",
+                (now, source["target_child_id"]),
+            )
+        specification = child_specification(parent, *key)
+        target = tile(specification["arguments"]["p"], specification["arguments"]["r"],
+                      specification["arguments"]["tile_side"], *key)
+        cells = target.value_bytes // 8
+        child = str(uuid.uuid4())
+        connection.execute(
+            "INSERT INTO runs(run_id,calculation_id,specification,state,priority,"
+            "from_scratch,created,started,finished,estimated_seconds,parent_run_id,"
+            "progress_done,progress_total,progress_checkpoint_done,progress_phase,"
+            "progress_units,progress_message,artifact_hash,artifact_location) "
+            "VALUES(?,?,?,'complete',?,0,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (child, calculation_id(specification), canonical_json(specification).decode(),
+             parent["priority"], now, now, now, parent["estimated_seconds"],
+             parent["run_id"], cells, cells, cells, "complete", "cells",
+             f"reused completed tile from {source['run_id']}",
+             source["artifact_hash"], descriptor["locations"][0]),
+        )
+        connection.execute(
+            "UPDATE distributed_tiles SET child_run_id=? "
+            "WHERE parent_run_id=? AND row=? AND column=?",
+            (child, parent["run_id"], *key),
+        )
+        imported += 1
+        if imported >= REUSE_BATCH:
+            break
+    return imported
+
+
 # Dispatch roots by creating only ready child leases; parent state contains no bulk arrays.
 def advance(connection: sqlite3.Connection, now: float) -> None:
     """Advance waiting DAGs inside the caller's transaction and queue reconstruction when durable."""
@@ -91,6 +177,7 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
             continue
         arguments = specification["arguments"]
         p, r, side = arguments["p"], arguments["r"], int(arguments.get("tile_side", 4096))
+        reuse_tiles(connection, parent, now)
         rows = connection.execute(
             "SELECT t.row,t.column,t.child_run_id,r.* FROM distributed_tiles t LEFT JOIN runs r ON r.run_id=t.child_run_id "
             "WHERE t.parent_run_id=? ORDER BY t.row,t.column", (parent["run_id"],),
@@ -115,11 +202,10 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
             target = tile(p,r,side,row["row"],row["column"])
             if any((item.row,item.column) not in durable for item in dependencies(p,r,side,target)):
                 continue
-            child_specification = {"program":"dp_tile","arguments": {"parent_run_id":parent["run_id"],"p":p,"r":r,"row":target.row,"column":target.column,
-                "tile_side":side,"threads":int(arguments.get("threads",1)),"max_tile_bytes":int(arguments.get("max_tile_bytes",2*1024**3))}}
+            child_specification_value = child_specification(parent, target.row, target.column)
             child = str(uuid.uuid4())
             connection.execute("INSERT INTO runs(run_id,calculation_id,specification,state,priority,from_scratch,created,estimated_seconds,parent_run_id) VALUES(?,?,?,'queued',?,0,?,?,?)",
-                               (child,calculation_id(child_specification),canonical_json(child_specification).decode(),parent["priority"],now,parent["estimated_seconds"],parent["run_id"]))
+                               (child,calculation_id(child_specification_value),canonical_json(child_specification_value).decode(),parent["priority"],now,parent["estimated_seconds"],parent["run_id"]))
             connection.execute("UPDATE distributed_tiles SET child_run_id=? WHERE parent_run_id=? AND row=? AND column=?",
                                (child,parent["run_id"],target.row,target.column))
 

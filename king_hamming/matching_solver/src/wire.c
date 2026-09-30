@@ -74,6 +74,48 @@ bool kh_wire_write_u64(int descriptor, uint64_t value) {
     return kh_wire_write(descriptor, bytes, sizeof bytes);
 }
 
+/* Amortize protocol syscalls without allocating in proportion to the message. */
+#define WIRE_U32_CHUNK 4096
+
+bool kh_wire_read_u32s(int descriptor, uint32_t *output, size_t count) {
+    unsigned char bytes[WIRE_U32_CHUNK * 4];
+    while (count != 0) {
+        size_t chunk = count < WIRE_U32_CHUNK ? count : WIRE_U32_CHUNK;
+        if (!kh_wire_read(descriptor, bytes, chunk * 4)) {
+            return false;
+        }
+        for (size_t index = 0; index < chunk; ++index) {
+            const unsigned char *item = bytes + index * 4;
+            output[index] = (uint32_t)item[0] | (uint32_t)item[1] << 8 |
+                            (uint32_t)item[2] << 16 | (uint32_t)item[3] << 24;
+        }
+        output += chunk;
+        count -= chunk;
+    }
+    return true;
+}
+
+bool kh_wire_write_u32s(int descriptor, const uint32_t *input, size_t count) {
+    unsigned char bytes[WIRE_U32_CHUNK * 4];
+    while (count != 0) {
+        size_t chunk = count < WIRE_U32_CHUNK ? count : WIRE_U32_CHUNK;
+        for (size_t index = 0; index < chunk; ++index) {
+            uint32_t value = input[index];
+            unsigned char *item = bytes + index * 4;
+            item[0] = (unsigned char)value;
+            item[1] = (unsigned char)(value >> 8);
+            item[2] = (unsigned char)(value >> 16);
+            item[3] = (unsigned char)(value >> 24);
+        }
+        if (!kh_wire_write(descriptor, bytes, chunk * 4)) {
+            return false;
+        }
+        input += chunk;
+        count -= chunk;
+    }
+    return true;
+}
+
 static bool read_magic(int descriptor, const char expected[4]) {
     char magic[4];
     return kh_wire_read(descriptor, magic, sizeof magic) &&

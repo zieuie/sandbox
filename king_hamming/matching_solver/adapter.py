@@ -18,6 +18,28 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_INLINE_DP = 700_000
 
 
+def distributed_memory_required(dp: dict, workers: int = 9,
+                                threads: int = 16) -> tuple[int, int]:
+    """Return native coordinator and replicated-shard allocation bounds."""
+    count, q, reserve = request_count(dp), dp["q"], 67_108_864
+    bit_count, bit_q = (count + 7) // 8, (q + 7) // 8
+    limit = min(count, 262_144)
+    coordinator_base = 18 * count + 4 * q
+    coordinator_scratch = max(
+        bit_count + bit_q + 2 * workers * limit * 12,
+        (workers + 1) * bit_q,
+    )
+    shard_base = 10 * count + bit_count + 8 * q + bit_q
+    shard_scratch = max(
+        4 * count + 4 * ((count + workers - 1) // workers) +
+        threads * (65_536 * 4 + 16),
+        bit_count + bit_q + limit * 12 + threads * 16 * (limit + 1),
+        workers * limit * 12,
+    )
+    return (coordinator_base + coordinator_scratch + reserve,
+            shard_base + shard_scratch + reserve)
+
+
 # Bound the queue request and bind each attempt to exact saved KHD1 bytes.
 def decode_input(specification: dict) -> tuple[dict, bytes, bytes]:
     """Return validated DP, exact bytes, and hash for one pinned matching specification."""
@@ -63,8 +85,8 @@ class MatchingAdapter(SolverAdapter):
             elements = arguments.get("max_field_elements", 1_000_000)
             workers = arguments.get("workers", 2)
             if (type(edges) is not int or not 1 <= edges <= 1_000_000_000_000_000 or
-                    type(elements) is not int or not 1 <= elements <= 100_000_000 or
-                    dp["q"] > elements or type(workers) is not int or not 2 <= workers <= 8 or
+                    type(elements) is not int or not 1 <= elements <= 2**32 - 1 or
+                    dp["q"] > elements or type(workers) is not int or not 2 <= workers <= 256 or
                     workers * threads > 256):
                 raise ValueError("distributed matching edge or field admission limit exceeded")
 
@@ -72,6 +94,18 @@ class MatchingAdapter(SolverAdapter):
         """Reserve the requested coordinator and partner group for a field attempt."""
         return (specification["arguments"].get("workers", 2)
                 if specification["program"] == "match_distributed" else 1)
+
+    def resource_requirements(self, specification):
+        """Account for the coordinator and shard colocated on the lease owner."""
+        arguments = specification["arguments"]
+        if specification["program"] != "match_distributed":
+            return {"coordinator_memory_bytes": int(arguments.get("max_bytes", 2**31)),
+                    "worker_memory_bytes": 0, "min_cpu_count": 1}
+        dp, _, _ = decode_input(specification)
+        coordinator, shard = distributed_memory_required(
+            dp, int(arguments.get("workers", 2)), int(arguments.get("threads", 1)))
+        return {"coordinator_memory_bytes": coordinator + shard,
+                "worker_memory_bytes": shard, "min_cpu_count": 1}
 
     def retry_elsewhere(self, specification):
         """Requeue a lost group under a newly fenced reservation rather than restarting stale pipes."""
@@ -83,6 +117,24 @@ class MatchingAdapter(SolverAdapter):
         polynomial = ",".join(map(str, specification["arguments"]["poly"]))
         return f"{dp['p']}^{dp['r']} {specification['program']} poly={polynomial}"
 
+    def status_details(self, specification, run, status):
+        """Describe conceptual permutation size and distributed shard occupancy."""
+        dp, _, _ = decode_input(specification)
+        rows = dp["theta"] * dp["f"] * dp["f"] + dp["q"]
+        entries = rows * (dp["q"] + 1)
+        details = [f"permutation={rows:,} x {dp['q'] + 1:,} "
+                   f"({entries:,} entries; {_byte_size(entries * 4)} at uint32)"]
+        if specification["program"] == "match_distributed":
+            total = int(specification["arguments"].get("workers", 0))
+            complete = total if run.get("state") == "complete" else 0
+            active = sum(node.get("reserved_for") == run["run_id"] or
+                         (run.get("state") == "running" and
+                          node.get("node_name") == run.get("node_name"))
+                         for node in status.get("nodes", []))
+            details.append(
+                f"shards={complete} complete, {total - complete} pending, {active} active")
+        return details
+
     def estimate(self, specification, rate):
         """Estimate search work from request count and field degree."""
         dp, _, _ = decode_input(specification)
@@ -92,7 +144,10 @@ class MatchingAdapter(SolverAdapter):
         """Cap pinned workers to assigned CPU affinity while preserving field identity."""
         result = json.loads(json.dumps(specification))
         arguments = result["arguments"]
-        arguments["threads"] = min(arguments.get("threads", 1), len(cpus))
+        if specification["program"] == "match_distributed":
+            arguments["local_threads"] = min(arguments.get("threads", 1), len(cpus))
+        else:
+            arguments["threads"] = min(arguments.get("threads", 1), len(cpus))
         return result
 
     def command(self, specification, output, checkpoint, checkpoint_seconds):
@@ -107,6 +162,7 @@ class MatchingAdapter(SolverAdapter):
                        "--max-field-elements", str(arguments.get("max_field_elements", 1_000_000)),
                        "--max-bytes", str(arguments.get("max_bytes", 2**31)),
                        "--threads-per-worker", str(arguments.get("threads", 1)),
+                       "--checkpoint-seconds", str(checkpoint_seconds),
                        "--restart-attempts", "0"]
             command.extend(["--worker", "local"])
             return command
@@ -128,13 +184,20 @@ class MatchingAdapter(SolverAdapter):
             if len(partners) != expected:
                 raise ValueError("distributed matching lease has the wrong reserved partner count")
             commands = []
+            requested_threads = specification["arguments"].get("threads", 1)
+            worker_threads = [specification["arguments"].get("local_threads", requested_threads)]
             for partner in partners:
                 address = urlparse(partner["address"])
                 if address.scheme != "http" or not address.hostname or not address.port:
                     raise ValueError("reserved partner has no usable peer address")
                 commands.extend(["--worker", partner["address"]])
+                cpu_count = len([cpu for cpu in partner.get("cpu_set", "").split(",") if cpu])
+                if cpu_count < 1:
+                    raise ValueError("reserved partner has no usable CPU allocation")
+                worker_threads.append(min(requested_threads, cpu_count))
             commands.extend(["--peer-run-id", job["run_id"],
-                             "--peer-lease-token", job["lease_token"]])
+                             "--peer-lease-token", job["lease_token"],
+                             "--worker-threads", ",".join(map(str, worker_threads))])
             if (directory / "solver.checkpoint.json").exists():
                 commands.extend(["--resume", str(directory / "solver.checkpoint.json")])
             return commands
@@ -147,9 +210,9 @@ class MatchingAdapter(SolverAdapter):
         nodes = self.required_nodes(specification)
         if worker_count != nodes or not 1 <= worker_index < worker_count:
             raise ValueError("reserved matching shard identity is invalid")
-        threads = specification["arguments"].get("threads", 1)
-        if len(cpus) < threads:
-            raise ValueError("reserved matching shard exceeds the agent CPU allocation")
+        threads = min(specification["arguments"].get("threads", 1), len(cpus))
+        if threads < 1:
+            raise ValueError("reserved matching shard has no allocated CPU")
         return [str(ROOT / "matching_solver/kh_match_worker"),
                 "--index", str(worker_index), "--count", str(worker_count),
                 "--cpus", ",".join(map(str, cpus[:threads]))]
@@ -215,7 +278,7 @@ class MatchingAdapter(SolverAdapter):
     def runtime_files(self):
         """Bundle cluster bridges, codecs, and compiled native kernels on workers."""
         names = ("adapter.py", "artifacts.py", "cluster_checkpoints.py", "cluster_solver.py",
-                 "native_coordinator.py", "prototype_checkpoint.py",
+                 "native_coordinator.py", "polynomials.py", "prototype_checkpoint.py",
                  "worker_transport.py")
         package = [(ROOT / "matching_solver" / name, "matching_solver/" + name) for name in names]
         return package + [
@@ -230,3 +293,14 @@ class MatchingAdapter(SolverAdapter):
         summary = verify(output, dp, digest, specification["arguments"].get("max_bytes", 2**31))
         if summary["polynomial"] != specification["arguments"]["poly"]:
             raise ValueError("matching result polynomial differs from pinned job")
+
+
+def _byte_size(value: int) -> str:
+    """Format conceptual matching output size without allocating it."""
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
+    amount = float(value)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            return f"{amount:.1f}{unit}" if unit != "B" else f"{value}B"
+        amount /= 1024
+    raise AssertionError("unreachable")

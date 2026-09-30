@@ -27,6 +27,7 @@ from urllib.request import Request, urlopen
 from common import calculation_id, canonical_json, store_blob
 from blob_store import blob_path, fetch_blob, file_digest, storage_transaction, sync_directory
 import adapters
+from outcomes import SolverOutcome, classify
 from checkpoints import DEFAULT_MAX_BYTES, capture_checkpoint, fetch_checkpoint, restore_checkpoint, validate_manifest
 
 
@@ -115,6 +116,47 @@ def parse_cpu_list(value: str) -> list[int]:
         raise ValueError("CPU list is empty or includes an unavailable CPU")
 
     return sorted(result)
+
+
+def process_group_usage(group: int) -> tuple[int, int] | None:
+    """Return Linux process-group CPU microseconds and resident bytes, tolerating races."""
+    ticks = os.sysconf("SC_CLK_TCK")
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    cpu_ticks = rss_pages = 0
+    found = False
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            if int(fields[2]) != group:
+                continue
+            cpu_ticks += int(fields[11]) + int(fields[12])
+            rss_pages += max(0, int(fields[21]))
+            found = True
+        except (FileNotFoundError, PermissionError, ValueError, IndexError):
+            continue
+    if not found:
+        return None
+    return cpu_ticks * 1_000_000 // ticks, rss_pages * page_size
+
+
+def storage_generation(root: Path) -> str:
+    """Return a durable UUID identifying this storage tree, creating it once."""
+    path = root / ".kh-storage-generation"
+    try:
+        with path.open("x") as output:
+            value = str(uuid.uuid4())
+            output.write(value + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        sync_directory(root)
+    except FileExistsError:
+        value = path.read_text().strip()
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as error:
+        raise ValueError("invalid retained storage generation file") from error
 
 
 # Build a read-only content-addressed blob server.
@@ -260,6 +302,7 @@ def make_storage_handler(storage_root: Path, leader: str | None = None,
             def fence_monitor() -> None:
                 """Terminate a peer worker promptly when its group lease is fenced."""
                 deadline = time.monotonic() + 60
+                next_resource = time.monotonic() + 10
                 while not closed.wait(1):
                     try:
                         request_json(leader, "/v1/peer-authorize", identity)
@@ -269,6 +312,18 @@ def make_storage_handler(storage_root: Path, leader: str | None = None,
                             break
                     except OSError:
                         pass
+                    if time.monotonic() >= next_resource:
+                        usage = process_group_usage(child.pid)
+                        if usage is not None:
+                            try:
+                                request_json(leader, "/v1/resource-usage", {
+                                    "run_id": run_id, "lease_token": lease_token,
+                                    "component": "shard", "shard_index": worker_index,
+                                    "cpu_microseconds": usage[0], "peak_rss_bytes": usage[1],
+                                })
+                            except (HTTPError, OSError):
+                                pass
+                        next_resource = time.monotonic() + 10
                     if time.monotonic() >= deadline:
                         break
                 if not closed.is_set() and child.poll() is None:
@@ -460,6 +515,30 @@ def replicate_once(
 
     with storage_transaction(storage_root):
         identity = {"node_name": node_name, "session_id": session_id}
+        batch = request_json(leader, "/v1/revalidation-batch", identity)
+        records = batch.get("records", [])
+        if records:
+            mode = batch.get("mode")
+            if mode not in {"metadata", "hash"}:
+                raise ValueError("leader returned invalid storage validation mode")
+            checked: dict[tuple[str, int, str], bool] = {}
+            results = []
+            for record in records:
+                valid = True
+                for member in record["members"]:
+                    digest, size = member["digest"], member["size"]
+                    key = (digest, size, mode)
+                    if key not in checked:
+                        path = blob_path(storage_root, digest)
+                        checked[key] = bool(
+                            path.is_file() and path.stat().st_size == size and
+                            (mode == "metadata" or file_digest(path) == digest))
+                    valid = valid and checked[key]
+                results.append({"kind": record["kind"], "digest": record["digest"],
+                                "valid": valid})
+            request_json(leader, "/v1/revalidation-batch-done",
+                         {**identity, "records": results})
+            return True
         response = request_json(leader, "/v1/replication", identity)
         task = response.get("replication")
 
@@ -602,6 +681,7 @@ def supervise_solver(
     forced = False
     stop_deadline: float | None = None
     next_control = time.monotonic()
+    next_resource = time.monotonic() + 10
     stdout_buffer = bytearray()
     stderr_tail = bytearray()
     latest: dict[str, Any] = {"done": 0, "total": 0, "checkpoint_done": 0}
@@ -672,6 +752,27 @@ def supervise_solver(
 
                 if keeper is not None:
                     keeper.check()
+
+                if now >= next_resource:
+                    usage = process_group_usage(process.pid)
+                    if usage is not None:
+                        component = "coordinator" if job.get("reserved_workers") else "solver"
+                        shard_index = -1 if component == "coordinator" else 0
+                        try:
+                            request_json(leader, "/v1/resource-usage", {
+                                "run_id": job["run_id"], "lease_token": job["lease_token"],
+                                "component": component, "shard_index": shard_index,
+                                "cpu_microseconds": usage[0], "peak_rss_bytes": usage[1],
+                            })
+                        except HTTPError as error:
+                            if error.code == 409:
+                                raise LeaseLost("resource usage rejected for stale lease") from error
+                            raise
+                        except OSError:
+                            if keeper is None:
+                                raise
+                            keeper.check()
+                    next_resource = now + 10
 
                 # Acknowledge only after the complete immutable image has been published.
                 if pending_snapshot is not None and pending_snapshot.done():
@@ -795,6 +896,7 @@ def run_job(
     checkpoint = run_directory / "solver.checkpoint.json"
     maximum = int(job.get("max_checkpoint_bytes", DEFAULT_MAX_BYTES))
     keeper = LeaseKeeper(leader, job, control_seconds)
+    failure_kind = SolverOutcome.ENGINE_FAILURE.value
 
     # Acknowledge snapshot capture only while this attempt still owns the calculation.
     def snapshot(cursor: int, cancelled: threading.Event) -> None:
@@ -843,7 +945,9 @@ def run_job(
             keeper.check()
 
             if keeper.stopped:
-                request_json(leader, "/v1/requeue", identity)
+                request_json(leader, "/v1/requeue", {
+                    **identity, "reason": SolverOutcome.INTENTIONAL_STOP.value,
+                })
                 return
 
             candidate = request_json(leader, "/v1/recovery", {**identity, "exclude": excluded})
@@ -883,18 +987,20 @@ def run_job(
             result = supervise_solver(command, leader, job, control_seconds, stop_grace_seconds, keeper, snapshot)
             return_code = result["return_code"]
             keeper.check()
+            outcome = classify(return_code, result["stopped"], result["forced"],
+                               adapter.retry_elsewhere(specification))
 
-            if return_code == 0:
+            if outcome is SolverOutcome.COMPLETE:
                 break
 
-            if result["stopped"] and (
-                return_code in {75, -signal.SIGTERM} or
-                (result["forced"] and return_code == -signal.SIGKILL)
-            ):
-                request_json(leader, "/v1/requeue", identity)
+            if outcome is SolverOutcome.INTENTIONAL_STOP:
+                request_json(leader, "/v1/requeue", {
+                    **identity, "reason": outcome.value,
+                })
                 return
 
-            if result["stopped"]:
+            if outcome is SolverOutcome.STOP_FAILURE:
+                failure_kind = outcome.value
                 raise RuntimeError(f"solver failed while stopping (exit {return_code}): {result['stderr'].strip()}")
 
             if restart_count >= 1:
@@ -903,7 +1009,9 @@ def run_job(
             if adapter.retry_elsewhere(specification):
                 if int(job.get("engine_failures", 0)) >= 1:
                     raise RuntimeError(f"distributed solver failed after retry: {result['stderr'].strip()}")
-                request_json(leader, "/v1/requeue", {**identity, "engine_failure": True})
+                request_json(leader, "/v1/requeue", {
+                    **identity, "reason": outcome.value,
+                })
                 return
             restart_count += 1
             print(f"restarting solver for {run_id} from its checkpoint", file=sys.stderr, flush=True)
@@ -923,7 +1031,10 @@ def run_job(
     except Exception as error:
         try:
             keeper.check()
-            request_json(leader, "/v1/fail", {**identity, "error": str(error)})
+            request_json(leader, "/v1/fail", {
+                **identity, "error": str(error),
+                "failure_kind": failure_kind,
+            })
         except (OSError, LeaseLost):
             print(f"lease ended without a failure submission: {error}", file=sys.stderr, flush=True)
     finally:
@@ -943,19 +1054,36 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--leader", default="http://127.0.0.1:8041")
     run.add_argument("--name", default=socket.gethostname())
     run.add_argument("--cpus", default="auto", help="auto or a Linux CPU list such as 0-3,6")
+    run.add_argument("--slots", default="1",
+                     help="1 for whole-host compatibility, auto for one process slot per CPU, or a count")
     run.add_argument("--storage-only", action="store_true", help="serve and replicate data without leasing calculations")
     run.add_argument("--leader-node", action="store_true", help="reserve one physical core")
     run.add_argument("--work-root", type=Path, default=Path("state/work"))
     run.add_argument("--storage-root", type=Path, default=Path("state/blobs"))
     run.add_argument("--storage-listen", default="0.0.0.0:8042", metavar="HOST:PORT")
     run.add_argument("--storage-url", default="http://127.0.0.1:8042")
+    run.add_argument("--runtime-version", default="",
+                     help="SHA-256 identity of the deployed runtime bundle")
     run.add_argument("--poll-seconds", type=float, default=2.0)
     run.add_argument("--control-seconds", type=float, default=1.0)
     run.add_argument("--stop-grace-seconds", type=float, default=1800.0)
     return parser
 
 
-# Register, heartbeat, serve blobs, and execute one lease at a time.
+def register_node(leader: str, record: dict[str, Any], retry_seconds: float = 180) -> dict:
+    """Retry transient startup failures with the same idempotent session identity."""
+    deadline = time.monotonic() + retry_seconds
+    while True:
+        try:
+            return request_json(leader, "/v1/register", record)
+        except OSError as error:
+            if (isinstance(error, HTTPError) and error.code < 500) or time.monotonic() >= deadline:
+                raise
+            print(f"registration delayed; retrying: {error}", file=sys.stderr, flush=True)
+            time.sleep(1)
+
+
+# Register, heartbeat, serve blobs, and execute fenced CPU-team leases.
 def main() -> int:
     """Run the selected agent command and return an exit status."""
 
@@ -980,6 +1108,24 @@ def main() -> int:
 
     if not cpus:
         parser.error("no CPUs remain after reservation")
+    try:
+        slot_count = len(cpus) if arguments.slots == "auto" else int(arguments.slots)
+    except ValueError:
+        parser.error("--slots must be auto or a positive integer")
+    if not 1 <= slot_count <= len(cpus):
+        parser.error("--slots must not exceed the assigned CPU count")
+    slot_cpus = [cpus[index::slot_count] for index in range(slot_count)]
+
+    physical_cores = set()
+    for cpu in cpus:
+        topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
+        try:
+            package = int((topology / "physical_package_id").read_text())
+            core = int((topology / "core_id").read_text())
+        except (OSError, ValueError):
+            physical_cores.clear()
+            break
+        physical_cores.add((package, core))
 
     arguments.storage_root.mkdir(parents=True, exist_ok=True)
     arguments.work_root.mkdir(parents=True, exist_ok=True)
@@ -990,6 +1136,12 @@ def main() -> int:
         "storage_root": str(arguments.storage_root.resolve()),
         "session_id": str(uuid.uuid4()),
         "storage_only": arguments.storage_only,
+        "memory_bytes": os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"),
+        "runtime_version": arguments.runtime_version,
+        "physical_core_count": len(physical_cores),
+        "storage_generation": storage_generation(arguments.storage_root),
+        "slots": [{"slot_id": index, "cpu_set": ",".join(map(str, values))}
+                  for index, values in enumerate(slot_cpus)],
     }
 
     storage_host, storage_port = arguments.storage_listen.rsplit(":", 1)
@@ -999,7 +1151,7 @@ def main() -> int:
     )
     storage_thread = threading.Thread(target=storage_server.serve_forever, daemon=True)
     storage_thread.start()
-    registration = request_json(arguments.leader, "/v1/register", node_record)
+    registration = register_node(arguments.leader, node_record)
     stop_event = threading.Event()
     heartbeat = threading.Thread(
         target=heartbeat_loop,
@@ -1013,44 +1165,63 @@ def main() -> int:
         daemon=True,
     )
     replication.start()
-    print(f"agent {arguments.name} using CPUs {node_record['cpu_set']}", flush=True)
+    print(f"agent {arguments.name} using CPUs {node_record['cpu_set']} in {slot_count} slots",
+          flush=True)
+    lease_gate = threading.Lock()
+    next_idle_poll = [0.0]
 
-    try:
-        while True:
+    def lease_loop(slot_id: int, assigned: list[int]) -> None:
+        """Poll and supervise the independent fenced lease owned by one CPU slot."""
+
+        while not stop_event.is_set():
             if arguments.storage_only:
-                time.sleep(arguments.poll_seconds)
+                stop_event.wait(arguments.poll_seconds)
                 continue
-
             try:
-                lease = request_json(
-                    arguments.leader, "/v1/lease",
-                    {"node_name": arguments.name, "session_id": node_record["session_id"]},
-                )
+                with lease_gate:
+                    delay = next_idle_poll[0] - time.monotonic()
+                    if delay > 0:
+                        lease = None
+                    else:
+                        lease = request_json(
+                            arguments.leader, "/v1/lease",
+                            {"node_name": arguments.name,
+                             "session_id": node_record["session_id"],
+                             "slot_id": slot_id},
+                        )
+                        next_idle_poll[0] = (time.monotonic() if lease.get("job") is not None
+                                             else time.monotonic() + arguments.poll_seconds)
             except HTTPError as error:
                 if error.code == 409:
-                    break
-                raise
+                    stop_event.set()
+                    return
+                print(f"slot {slot_id} lease error; retrying: {error}", file=sys.stderr, flush=True)
+                stop_event.wait(arguments.poll_seconds)
+                continue
             except OSError as error:
                 print(f"leader unavailable; retrying: {error}", file=sys.stderr, flush=True)
-                time.sleep(arguments.poll_seconds)
+                stop_event.wait(arguments.poll_seconds)
                 continue
-
+            if lease is None:
+                stop_event.wait(min(arguments.poll_seconds, max(0.01, delay)))
+                continue
             job = lease.get("job")
-
             if job is None:
-                time.sleep(arguments.poll_seconds)
+                stop_event.wait(arguments.poll_seconds)
                 continue
+            actual = parse_cpu_list(job.get("assigned_cpu_set", ",".join(map(str, assigned))))
+            run_job(arguments.leader, job, actual, arguments.work_root,
+                    arguments.storage_root, arguments.storage_url,
+                    arguments.control_seconds, arguments.stop_grace_seconds)
 
-            run_job(
-                arguments.leader,
-                job,
-                cpus,
-                arguments.work_root,
-                arguments.storage_root,
-                arguments.storage_url,
-                arguments.control_seconds,
-                arguments.stop_grace_seconds,
-            )
+    try:
+        workers = [threading.Thread(target=lease_loop, args=(index, values), daemon=True)
+                   for index, values in enumerate(slot_cpus)]
+        for worker in workers:
+            worker.start()
+        while not stop_event.wait(1):
+            if not all(worker.is_alive() for worker in workers):
+                raise RuntimeError("compute slot loop stopped unexpectedly")
     except KeyboardInterrupt:
         pass
     finally:

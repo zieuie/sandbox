@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -33,16 +34,18 @@ def main() -> int:
         phases = temporary / "phases"
         launch(source, "--poly", "2,3,0,1", "-o", temporary / "paused.khmatch",
                "--worker", "local", "--worker", "local",
-               "--checkpoint-dir", phases, "--stop-after-phases", 2,
+               "--checkpoint-dir", phases, "--worker-threads", "1,1",
+               "--phase-batch-roots", 20, "--checkpoint-seconds", 0, "--stop-after-phases", 2,
                "--max-edges", 1_000_000, expected=3)
         checkpoint = phases / "phase-00000000000000000002.khstate"
         dp, digest = load_dp(source)
         phase, matched, _ = prototype_checkpoint.load(checkpoint, dp, digest, [2, 3, 0, 1])
-        assert phase == 2 and 0 < matched < dp["q"]
+        assert phase == 2 and 0 < matched <= 40, "checkpoint should be inside the first augmentation phase"
         output = temporary / "resumed.khmatch"
         launch(source, "--poly", "2,3,0,1", "-o", output,
                "--worker", "local", "--worker", "local", "--worker", "local",
-               "--checkpoint-dir", temporary / "resumed-phases", "--resume", checkpoint,
+               "--worker-threads", "1,1,1", "--checkpoint-dir", temporary / "resumed-phases",
+               "--resume", checkpoint,
                "--max-edges", 1_000_000)
         assert verify(output, dp, digest)["status"] == "full_matching"
 
@@ -53,6 +56,13 @@ def main() -> int:
                "--max-edges", 10_000_000)
         larger_dp, larger_digest = load_dp(larger)
         assert verify(larger_output, larger_dp, larger_digest)["status"] == "full_matching"
+        # Exercise repeated dynamic chunks and uneven per-host CPU allocations.
+        uneven = temporary / "uneven.khmatch"
+        threads = min(4, len(os.sched_getaffinity(0)))
+        launch(larger, "--poly", "4,1,0,0,0,1", "-o", uneven,
+               "--worker", "local", "--worker", "local",
+               "--worker-threads", f"1,{threads}", "--max-edges", 10_000_000)
+        assert verify(uneven, larger_dp, larger_digest)["status"] == "full_matching"
     print("native distributed matching, portable resume, and KHM1 verification passed")
     return 0
 

@@ -67,6 +67,81 @@ class EstimateTests(unittest.TestCase):
 class QueueTests(unittest.TestCase):
     """Manual priorities override runtime order while duplicate and rerun history remain intact."""
 
+    def test_disjoint_slots_run_tiles_concurrently_but_block_exclusive_work(self) -> None:
+        """Two immutable tiles share a host; a whole-host root cannot overlap them."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            handler.dispatch_post("/v1/register", {
+                "node_name": "slotted", "cpu_set": "0,1,2",
+                "memory_bytes": 10 * 1024**3,
+                "slots": [{"slot_id": index, "cpu_set": str(index)} for index in range(3)],
+            })
+            for p in (3, 5):
+                handler.dispatch_post("/v1/enqueue", {"specification": {
+                    "program": "dp_distributed", "arguments": {
+                        "p": p, "r": 3, "tile_side": 4, "threads": 3, "max_cpus": 1,
+                        "max_visits": 10**9, "max_tile_bytes": 2 * 1024**3,
+                    },
+                }})
+            first = handler.dispatch_post("/v1/lease", {
+                "node_name": "slotted", "slot_id": 0})["job"]
+            second = handler.dispatch_post("/v1/lease", {
+                "node_name": "slotted", "slot_id": 1})["job"]
+            self.assertEqual(first["specification"]["program"], "dp_tile")
+            self.assertEqual(second["specification"]["program"], "dp_tile")
+            self.assertEqual(first["assigned_cpu_set"], "0")
+            self.assertEqual(second["assigned_cpu_set"], "1")
+            handler.dispatch_post("/v1/enqueue", {"specification": {
+                "program": "dp", "arguments": {"p": 3, "r": 3},
+            }})
+            self.assertIsNone(handler.dispatch_post("/v1/lease", {
+                "node_name": "slotted", "slot_id": 2})["job"])
+
+    def test_tile_borrows_all_free_cpus_without_overlapping_leases(self) -> None:
+        """An old one-thread spec gets a full team, with memory-safe fallback."""
+        from dp_solver.tiles import tile, memory_bytes
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            handler.dispatch_post("/v1/register", {
+                "node_name": "elastic", "cpu_set": "1,3,5,7",
+                "memory_bytes": 10 * 1024**3,
+                "slots": [{"slot_id": i, "cpu_set": str(cpu)}
+                          for i, cpu in enumerate((1, 3, 5, 7))],
+            })
+            for p in (3, 5):
+                handler.dispatch_post("/v1/enqueue", {"specification": {
+                    "program": "dp_distributed", "arguments": {
+                        "p": p, "r": 3, "tile_side": 4, "threads": 1,
+                    }}})
+            first = handler.dispatch_post("/v1/lease", {
+                "node_name": "elastic", "slot_id": 2})["job"]
+            self.assertEqual(first["assigned_cpu_set"], "1,3,5,7")
+            adapter = adapters.get(first["specification"])
+            local = adapter.worker_specification(first["specification"], [1, 3, 5, 7])
+            self.assertEqual(local["arguments"]["threads"], 4)
+            self.assertEqual(first["specification"]["arguments"]["threads"], 1)
+            self.assertIsNone(handler.dispatch_post("/v1/lease", {
+                "node_name": "elastic", "slot_id": 0})["job"])
+            # Stop/release fences every CPU in the team, not only its slot ID.
+            handler.dispatch_post("/v1/requeue", {
+                "run_id": first["run_id"], "lease_token": first["lease_token"]})
+            second = handler.dispatch_post("/v1/lease", {
+                "node_name": "elastic", "slot_id": 0})["job"]
+            self.assertEqual(second["assigned_cpu_set"], "1,3,5,7")
+            spec = second["specification"]
+            args = spec["arguments"]
+            target = tile(args["p"], args["r"], args["tile_side"], 0, 0)
+            args["max_tile_bytes"] = memory_bytes(args["p"], target, 2)
+            self.assertEqual(adapter.cpu_width(spec, 14), 2)
+            self.assertEqual(adapter.cpu_width(spec, 0), 0)
+            args["max_tile_bytes"] -= 1
+            self.assertEqual(adapter.cpu_width(spec, 14), 1)
+
     def test_runtime_order_priority_duplicates_and_upgrade(self) -> None:
         """Late cheap jobs run first; priority overrides and a retained rerun remain distinct."""
 
@@ -147,8 +222,12 @@ class QueueTests(unittest.TestCase):
                     "SELECT node_name,component,shard_index,cpu_microseconds,peak_rss_bytes "
                     "FROM resource_usage ORDER BY shard_index"
                 ))
+                samples = connection.execute(
+                    "SELECT COUNT(*) FROM resource_usage_samples WHERE run_id=?",
+                    (queued["run_id"],)).fetchone()[0]
             self.assertEqual(tuple(usage[0]), ("match-2", "coordinator", -1, 100, 200))
             self.assertEqual(tuple(usage[1]), ("match-1", "shard", 2, 300, 400))
+            self.assertEqual(samples, 3)
             with self.assertRaises(ValueError):
                 handler.dispatch_post("/v1/resource-usage", {
                     **identity, "component": "shard", "shard_index": 4,
@@ -160,6 +239,259 @@ class QueueTests(unittest.TestCase):
                     "run_id": queued["run_id"], "lease_token": job["lease_token"],
                     "worker_index": 3, "worker_count": 4,
                 })
+
+
+    def test_run_scoped_pause_resume_cancel_and_priority(self) -> None:
+        """Control one run without stopping dispatch or changing unrelated work."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            handler.dispatch_post("/v1/register", {"node_name": "worker"})
+            first = handler.dispatch_post("/v1/enqueue", {"specification": {"program": "demo"}, "rerun": True})
+            second = handler.dispatch_post("/v1/enqueue", {"specification": {"program": "demo"}, "rerun": True})
+            self.assertEqual(handler.dispatch_post("/v1/run-command", {
+                "run_id": first["run_id"], "action": "pause",
+            })["state"], "paused")
+            handler.dispatch_post("/v1/run-command", {
+                "run_id": first["run_id"], "action": "reprioritize", "priority": 7,
+            })
+            leased = handler.dispatch_post("/v1/lease", {"node_name": "worker"})["job"]
+            self.assertEqual(leased["run_id"], second["run_id"] )
+            identity = {"run_id": second["run_id"], "lease_token": leased["lease_token"]}
+            result = handler.dispatch_post("/v1/run-command", {
+                "run_id": second["run_id"], "action": "pause",
+            })
+            self.assertEqual(result["target_state"], "paused")
+            self.assertTrue(handler.dispatch_post("/v1/run-control", identity)["stop_requested"] )
+            handler.dispatch_post("/v1/requeue", identity)
+            handler.dispatch_post("/v1/run-command", {"run_id": second["run_id"], "action": "resume"})
+            handler.dispatch_post("/v1/run-command", {"run_id": second["run_id"], "action": "cancel"})
+            handler.dispatch_post("/v1/run-command", {"run_id": first["run_id"], "action": "resume"})
+            resumed = handler.dispatch_post("/v1/lease", {"node_name": "worker"})["job"]
+            self.assertEqual(resumed["run_id"], first["run_id"] )
+            with leader.connect(database) as connection:
+                row = connection.execute("SELECT state,priority FROM runs WHERE run_id=?", (second["run_id"],)).fetchone()
+                self.assertEqual((row["state"], row["priority"]), ("cancelled", 0))
+
+    def test_distributed_root_resume_returns_to_dependency_scheduler(self) -> None:
+        """A partially materialized tile DAG cannot lease reconstruction on resume."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            specification = {"program": "dp_distributed", "arguments": {
+                "p": 5, "r": 3, "tile_side": 7, "threads": 1,
+                "artifact_format": "KHD1",
+            }}
+            queued = handler.dispatch_post(
+                "/v1/enqueue", {"specification": specification})
+            self.assertEqual(queued["state"], "waiting")
+            self.assertEqual(handler.dispatch_post("/v1/run-command", {
+                "run_id": queued["run_id"], "action": "pause",
+            })["state"], "paused")
+            resumed = handler.dispatch_post("/v1/run-command", {
+                "run_id": queued["run_id"], "action": "resume",
+            })
+            self.assertEqual(resumed["state"], "waiting")
+            with leader.connect(database) as connection:
+                row = connection.execute(
+                    "SELECT state,progress_phase,progress_message FROM runs WHERE run_id=?",
+                    (queued["run_id"],),
+                ).fetchone()
+                self.assertEqual(tuple(row), ("waiting", "tiles", "resumed"))
+
+            # A worker may lease ready tile children, never the parent reconstruction.
+            handler.dispatch_post("/v1/register", {"node_name": "worker"})
+            leased = handler.dispatch_post(
+                "/v1/lease", {"node_name": "worker"})["job"]
+            self.assertNotEqual(leased["run_id"], queued["run_id"])
+            self.assertEqual(leased["specification"]["program"], "dp_tile")
+
+    def test_startup_repairs_a_legacy_queued_distributed_root(self) -> None:
+        """An already-misclassified partial root is reconciled before it can lease."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            queued = handler.dispatch_post("/v1/enqueue", {"specification": {
+                "program": "dp_distributed", "arguments": {
+                    "p": 5, "r": 3, "tile_side": 7, "threads": 1,
+                    "artifact_format": "KHD1",
+                },
+            }})
+            with leader.connect(database) as connection:
+                connection.execute(
+                    "UPDATE runs SET state='queued',progress_phase='queued' WHERE run_id=?",
+                    (queued["run_id"],),
+                )
+            leader.initialize(database, 1800)
+            with leader.connect(database) as connection:
+                row = connection.execute(
+                    "SELECT state,progress_phase,progress_message FROM runs WHERE run_id=?",
+                    (queued["run_id"],),
+                ).fetchone()
+                self.assertEqual(tuple(row), (
+                    "waiting", "tiles", "reconciling durable tile frontier"))
+
+    def test_startup_repairs_stop_induced_tile_failure(self) -> None:
+        """Retain completed frontier links and retry a child misfailed during stop."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            queued = handler.dispatch_post("/v1/enqueue", {"specification": {
+                "program": "dp_distributed", "arguments": {
+                    "p": 5, "r": 3, "tile_side": 7, "threads": 1,
+                    "artifact_format": "KHD1",
+                },
+            }})
+            with leader.connect(database) as connection:
+                child = connection.execute(
+                    "SELECT child_run_id FROM distributed_tiles "
+                    "WHERE parent_run_id=? AND child_run_id IS NOT NULL LIMIT 1",
+                    (queued["run_id"],)).fetchone()[0]
+                error = "solver failed while stopping (exit 1): C tile kernel exited -15"
+                connection.execute(
+                    "UPDATE runs SET state='failed',error=?,failure_kind='stop_failure' "
+                    "WHERE run_id=?", (error, child))
+                connection.execute(
+                    "UPDATE runs SET state='failed',error=?,finished=1 WHERE run_id=?",
+                    (f"tile 0,0: {error}", queued["run_id"]))
+
+            leader.initialize(database, 1800)
+            with leader.connect(database) as connection:
+                parent = connection.execute(
+                    "SELECT state,error,finished,progress_phase,progress_message "
+                    "FROM runs WHERE run_id=?", (queued["run_id"],)).fetchone()
+                linked = connection.execute(
+                    "SELECT child_run_id FROM distributed_tiles WHERE parent_run_id=?",
+                    (queued["run_id"],)).fetchall()
+                self.assertEqual(tuple(parent), (
+                    "waiting", None, None, "tiles",
+                    "recovering interrupted tile frontier"))
+                self.assertNotIn(child, [row[0] for row in linked])
+
+    def test_nine_node_heterogeneous_matching_resources(self) -> None:
+        """Admit nine nodes and pass each shard its actual allocation up to the requested cap."""
+
+        from matching_solver.submit import specification
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            for index in range(9):
+                cpus = ",".join(map(str, range(12))) if index == 0 else "0,1"
+                handler.dispatch_post("/v1/register", {
+                    "node_name": f"node-{index}", "address": f"http://127.0.0.1:{9100 + index}",
+                    "cpu_set": cpus,
+                })
+            job_spec = specification(ROOT.parent / "examples/3_3.khdp",
+                                     "1,2,0,1", 12, 2**31, distributed=True, workers=9)
+            queued = handler.dispatch_post("/v1/enqueue", {"specification": job_spec})
+            job = handler.dispatch_post("/v1/lease", {"node_name": "node-8"})["job"]
+            self.assertEqual(job["run_id"], queued["run_id"] )
+            adapter = adapters.get(job_spec)
+            local = adapter.worker_specification(job_spec, [0, 1])
+            extra = adapter.prepare(local, root, job, "unused")
+            counts = extra[extra.index("--worker-threads") + 1]
+            self.assertEqual(counts, "2,12,2,2,2,2,2,2,2")
+
+    def test_matching_coordinator_placement_respects_aggregate_memory(self) -> None:
+        """A coordinator plus local shard cannot land on an undersized host."""
+
+        from matching_solver.submit import specification
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            for name, memory in (("small", 1), ("large", 16 * 1024**3),
+                                 ("partner", 16 * 1024**3)):
+                handler.dispatch_post("/v1/register", {
+                    "node_name": name, "address": "http://127.0.0.1:1",
+                    "cpu_set": "0", "memory_bytes": memory,
+                })
+            job_spec = specification(ROOT.parent / "examples/3_3.khdp",
+                                     "1,2,0,1", 1, 2**31,
+                                     distributed=True, workers=2)
+            queued = handler.dispatch_post(
+                "/v1/enqueue", {"specification": job_spec})
+            self.assertIsNone(handler.dispatch_post(
+                "/v1/lease", {"node_name": "small"})["job"])
+            leased = handler.dispatch_post(
+                "/v1/lease", {"node_name": "large"})["job"]
+            self.assertEqual(leased["run_id"], queued["run_id"])
+            self.assertEqual(leased["node_name"], "large")
+
+    def test_adapter_may_reserve_more_than_nine_nodes(self) -> None:
+        """The generic scheduler follows adapter/native limits rather than a fleet-size constant."""
+
+        from matching_solver.submit import specification
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            for index in range(10):
+                handler.dispatch_post("/v1/register", {
+                    "node_name": f"node-{index:02d}", "cpu_set": "0",
+                    "address": f"http://127.0.0.1:{9300 + index}",
+                })
+            job_spec = specification(ROOT.parent / "examples/3_3.khdp",
+                                     "1,2,0,1", 1, 2**31,
+                                     distributed=True, workers=10)
+            queued = handler.dispatch_post(
+                "/v1/enqueue", {"specification": job_spec})
+            job = handler.dispatch_post(
+                "/v1/lease", {"node_name": "node-00"})["job"]
+            self.assertEqual(job["run_id"], queued["run_id"])
+            self.assertEqual(len(job["reserved_workers"]), 9)
+    def test_priority_group_waits_for_busy_nodes_instead_of_starving(self) -> None:
+        """Idle nodes coalesce behind a high-priority group before taking more DP work."""
+        from matching_solver.submit import specification
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            for index in range(4):
+                handler.dispatch_post("/v1/register", {
+                    "node_name": f"node-{index}",
+                    "address": f"http://127.0.0.1:{9200 + index}", "cpu_set": "0",
+                })
+            occupied = []
+            for index in range(3):
+                queued = handler.dispatch_post("/v1/enqueue", {
+                    "specification": {"program": "dp", "arguments": {"p": 3, "r": 3}},
+                    "rerun": True,
+                })
+                occupied.append(queued["run_id"])
+                handler.dispatch_post("/v1/lease", {"node_name": f"node-{index}"})
+            group = specification(ROOT.parent / "examples/3_3.khdp", "1,2,0,1",
+                                  1, 2**31, distributed=True, workers=4)
+            queued_group = handler.dispatch_post("/v1/enqueue", {
+                "specification": group, "priority": 100,
+            })
+            handler.dispatch_post("/v1/enqueue", {
+                "specification": {"program": "dp", "arguments": {"p": 5, "r": 3}},
+            })
+            self.assertIsNone(handler.dispatch_post(
+                "/v1/lease", {"node_name": "node-3"})["job"])
+            for index in range(2):
+                with leader.connect(database) as connection:
+                    connection.execute("UPDATE runs SET state='complete' WHERE run_id=?",
+                                       (occupied[index],))
+                self.assertIsNone(handler.dispatch_post(
+                    "/v1/lease", {"node_name": f"node-{index}"})["job"])
+            with leader.connect(database) as connection:
+                connection.execute("UPDATE runs SET state='complete' WHERE run_id=?",
+                                   (occupied[2],))
+            leased = handler.dispatch_post("/v1/lease", {"node_name": "node-2"})["job"]
+            self.assertEqual(leased["run_id"], queued_group["run_id"])
+            self.assertEqual(len(leased["reserved_workers"]), 3)
 
 
 # Help-only invocation performs no test workloads or network requests.

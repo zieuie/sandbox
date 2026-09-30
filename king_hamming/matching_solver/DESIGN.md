@@ -9,8 +9,8 @@ verified KHM1 artifacts. A bounded multi-node native engine now splits one
 attempt across congruence shards, with one native process per node and native
 threads across that node's allocated cores. Python only establishes and passes
 cluster-owned streams. The
-generic cluster reserves 2-8 agents, replicates shard-count-independent KHS1
-phase images, and restarts a fenced group after partner failure.
+generic cluster reserves 2-9 agents, assigns each shard its actual CPU allocation
+up to the requested ceiling, replicates shard-count-independent KHS1 commit images, and restarts a fenced group after partner failure.
 Small frozen KHD1 compatibility fixtures remain in `../examples/`; the
 superseded reference engines have been removed.
 
@@ -111,7 +111,7 @@ runs report their outcome rather than silently changing the polynomial.
    independent field attempts across workers. Reuse leases, immutable storage,
    replication, intentional stop, and retry fencing. Keep DP queue behavior intact.
 4. **Implemented as a bounded native engine:** distribute one matching across
-   2-256 shard processes, including 2-8 reserved cluster machines. Each node
+   2-256 shard processes, including 2-9 reserved cluster machines. Each node
    builds one compact native field and scans across its allocated cores. A C
    coordinator owns canonical pair state, path conflict resolution, Hall
    extraction, KHS1, and KHM1. Every shard keeps replicated committed pairs and
@@ -158,10 +158,11 @@ replace the previously committed file. A requested pause exits 3 after a
 checkpoint and does not publish a final certificate. Resume may use a different
 thread count because no in-flight BFS or proposal scratch is stored.
 
-The default 30-minute cadence is checked at phase boundaries. A phase longer
-than the interval cannot be interrupted at a consistent matching boundary by
-the current implementation, so its work can be lost on failure. Cluster
-replication and multi-generation retention are implemented through the adapter.
+The local single-host engine checks its 30-minute cadence at phase boundaries.
+The distributed engine additionally commits bounded root ranges during
+direct-path phases, checks the interval at those boundaries, and can resume the
+canonical partial matching with a different shard count. Cluster replication
+and multi-generation retention are implemented through the adapter.
 
 ## Memory, recovery, and storage
 
@@ -176,7 +177,8 @@ copy per thread or an unconditional full copy on every worker.
 The local engine checkpoints at the configured phase-boundary interval; the
 cluster adapter distributes and retains those snapshots. It reports cardinality
 after each completed phase, while agent liveness is tracked independently.
-A single long phase currently gives no finer grained solver progress. Keep shutdown intentional and
+The distributed direct-path phase reports bounded commit progress; later
+augmentation phases still report at their complete barriers. Keep shutdown intentional and
 separate from failure recovery. Do not assume automatic agent restart or machine
 reboot is already installed.
 
@@ -213,8 +215,9 @@ resume the C kernel checks every saved edge against the rebuilt field.
 
 A pinned Hall obstruction is a successful *calculation* and a certified KHM1
 artifact, even though it is not a full matching. Automatic attempts across
-polynomials remain a later stage. The current half-hour cadence occurs at committed
-phase boundaries, so a long phase may exceed the nominal interval.
+polynomials remain a later stage. The distributed half-hour cadence is checked at bounded direct-path commits and
+at all completed augmentation barriers. The local single-host engine remains
+phase-boundary based.
 
 ## Follow-up: cluster-wide matching and queue control
 

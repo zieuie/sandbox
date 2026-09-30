@@ -30,7 +30,7 @@ The built-in demo adapter tests the lifecycle. The configured DP adapter owns
 whole-worker DP, distributed DP, and internal tile jobs. Its frontier controls
 are delegated through the compatibility `kh.py campaign` command. The matching
 adapter registers `match` and `match_distributed`. For the latter, the leader
-atomically reserves the requested 2-8 agent group beside the coordinator lease;
+atomically reserves the requested multi-agent group beside the coordinator lease;
 reservations block other compute leases and are cleared on completion or fencing.
 Each reserved node exposes one fenced native shard stream; that process builds
 one field and uses its assigned CPU set for field construction and scans. A partner
@@ -44,6 +44,15 @@ generation are native.
 The leader checks the current reservation before the stream starts, and the
 agent monitors the lease while serving it; pairwise SSH between workers is
 not required.
+
+The adapter resource response is normalized by `resources.py`, the single
+authority for CPU counting, reserved operating-system memory, role-specific
+fit, and theoretical disjoint-slot capacity. The current scheduler still grants
+at most one lease per host. Keeping `safe_slots()` informational until leases,
+scratch ownership, aggregate reservations, and fencing carry a slot identity is
+intentional: reporting possible concurrency must not silently enable unsafe
+oversubscription. See [ADAPTER_GUIDE.md](ADAPTER_GUIDE.md) for the reusable
+project boundary.
 
 ## Durable queue and workflow extensions
 
@@ -142,12 +151,13 @@ to the registered algorithm with optional checksum and work limits.
 | Component | Responsibility |
 | --- | --- |
 | `adapters.py` | Solver contract, trusted registry, lifecycle dispatch |
-| `leader.py`, `common.py` | HTTP control, SQLite queue, canonical identity |
+| `leader.py`, `common.py`, `resources.py` | HTTP control, SQLite queue, identity and admission arithmetic |
 | `agent.py`, `affinity_exec.py` | Leases, supervision, CPU placement |
 | `blob_store.py`, `deployment.py` | CAS transfers, storage transactions, SSH deployment |
 | `checkpoints.py`, `recovery.py`, `retention.py` | Generic manifests, fencing, restore, retirement |
 | `kh.py`, `verify_artifact.py` | Operator commands and adapter-selected verification |
 | `tests/fixtures/demo_adapter.py`, `tests/fixtures/demo_solver.py` | Deterministic test-only lifecycle backend |
+| `../campaigns/king_hamming.py` | Project policy layered above the generic runtime |
 
 Legacy DP launch and experiment filenames here are thin compatibility wrappers;
 their implementations are in `dp_solver/`. Existing campaign state remains in

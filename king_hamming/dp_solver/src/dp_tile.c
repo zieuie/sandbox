@@ -16,10 +16,17 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+typedef struct {
+    uint32_t du;
+    uint32_t dv;
+    uint32_t id;
+} hot_transition_t;
+
 // One bounded tile plus the predecessor rectangle shared by all local threads.
 typedef struct {
     kh_parameters_t parameters;
     kh_transition_table_t transitions;
+    hot_transition_t *hot_transitions;
     uint64_t *values;
     uint32_t *choices;
     uint32_t first_u;
@@ -62,20 +69,20 @@ static void evaluate(void *context, uint32_t u, uint32_t v) {
     // Both predecessor coordinates strictly decrease, including at tile boundaries.
     for (uint32_t index = 0; index < tile->transitions.count; ++index) {
         kh_transition_t transition = tile->transitions.entries[index];
-        uint32_t du = (uint32_t)transition.a * transition.t;
-        uint32_t dv = (uint32_t)transition.b * transition.t;
+        hot_transition_t hot = tile->hot_transitions[index];
 
         // Global affordability is distinct from position within the local rectangle.
-        if (du > u || dv > v) {
+        if (hot.du > u || hot.dv > v) {
             continue;
         }
-        size_t predecessor = (size_t)(u - du - tile->origin_u) * tile->width + v - dv - tile->origin_v;
+        size_t predecessor = (size_t)(u - hot.du - tile->origin_u) * tile->width +
+                             v - hot.dv - tile->origin_v;
         uint64_t candidate = tile->values[predecessor] + transition.gain;
 
         // Reduced transitions retain original scan order and choice identifiers.
         if (candidate > tile->values[cell]) {
             tile->values[cell] = candidate;
-            tile->choices[choice] = kh_transition_id(tile->parameters.p, &transition);
+            tile->choices[choice] = hot.id;
         }
     }
 }
@@ -303,6 +310,19 @@ int main(int argc, char **argv) {
         fprintf(stderr, "kh_dp_tile: input or transition construction failed\n");
         return 1;
     }
+    tile.hot_transitions = malloc((size_t)tile.transitions.count * sizeof *tile.hot_transitions);
+    if (tile.hot_transitions == NULL) {
+        fprintf(stderr, "kh_dp_tile: cannot allocate precomputed transitions\n");
+        return 1;
+    }
+    for (uint32_t index = 0; index < tile.transitions.count; ++index) {
+        kh_transition_t *transition = &tile.transitions.entries[index];
+        tile.hot_transitions[index] = (hot_transition_t){
+            (uint32_t)transition->a * transition->t,
+            (uint32_t)transition->b * transition->t,
+            kh_transition_id(tile.parameters.p, transition),
+        };
+    }
     kh_pool_t *pool = kh_pool_create((uint32_t)arguments[6], evaluate, &tile, &error);
 
     if (pool == NULL) {
@@ -347,6 +367,7 @@ int main(int argc, char **argv) {
         }
     }
     free(tile.transitions.entries);
+    free(tile.hot_transitions);
     free(tile.values);
     free(tile.choices);
 

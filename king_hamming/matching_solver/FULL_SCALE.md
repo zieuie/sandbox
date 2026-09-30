@@ -1,79 +1,70 @@
 # Full-scale matching readiness
 
-The retained `match-overnight` campaign is stopped. Of 44 admitted saved DP
-fields, 41 have complete certificates; 2^25, 7^9, and 5^11 retain unfinished
-queue records. The matching agents are separate from the DP campaign. When the
-campaign is active, its watcher archives each completed KHM1, retries the next
-primitive polynomial only after a verified Hall obstruction, admits newly
-collected DP fields within the current limits, and reattaches dead
-campaign-owned processes. The per-job address-space cap is 2 GiB; admission
-mirrors the native C kernel's peak-memory estimate. The status table is
-`../cluster/deployments/match-overnight/STATUS.md`.
+The retained unified campaign at `192.168.4.151:8061` uses this compact,
+checkpoint-compatible bundle. Its conservative 6 GiB matching admission and
+100,000,000-element field gate remain in force pending physical calibration.
+See [`../docs/CONTINUOUS_CAMPAIGN.md`](../docs/CONTINUOUS_CAMPAIGN.md) for live
+status and control commands.
 
-The three remaining saved fields exceed that cap:
+## Compact replicated design
 
-| Field | q | Implicit edges | Native estimated peak |
+The reduced distributed engine still replicates the hot matching state on each
+shard, avoiding a network lookup for every implicit edge. Its deployed memory
+layout is:
+
+- the unused coordinator edge-offset table is gone;
+- choices use 16 bits after validating `f <= 65535`;
+- left-claim maps use one bit per vertex;
+- each shard's path reply is bounded to 262,144 assignments;
+- coordinator checkpoint restore applies assignments in bounded chunks;
+- BFS replies are deduplicated directly into the coordinator frontier instead
+  of retaining a full reply array for every shard;
+- shard discovery lists allocate fixed chunks only as discoveries occur rather
+  than reserving a full-graph array at every level.
+
+The matching and checkpoint formats remain unchanged. A path deeper than the
+bounded assignment reply is rejected as a resource failure, not reported as a
+mathematical obstruction.
+
+Conservative admission estimates for nine shards and sixteen
+threads per shard are:
+
+| Field | Implicit edges | Coordinator | Each shard |
 | --- | ---: | ---: | ---: |
-| 3^17 | 129,140,163 | 847,288,609,443 | 4.44 GiB |
-| 2^27 | 134,217,728 | 1,099,511,627,776 | 4.61 GiB |
-| 2^29 | 536,870,912 | 8,796,093,022,208 | 18.20 GiB |
+| 2^25 | 137,438,953,472 | 0.81 GiB | 0.78 GiB |
+| 7^9 | 96,889,010,407 | 0.95 GiB | 0.92 GiB |
+| 5^11 | 152,587,890,625 | 1.13 GiB | 1.10 GiB |
+| 3^17 | 847,288,609,443 | 2.86 GiB | 2.80 GiB |
+| 2^29 | 8,796,093,022,208 | 11.69 GiB | 11.41 GiB |
 
-`3^17` and `2^27` could use a larger per-host allocation if core affinity,
-concurrent DP load, and physical RAM leave enough headroom. `2^29` requires
-sharding or external-memory state. The multi-node production engine now keeps
-all mathematical work in C. Python only establishes leased process streams. One
-native coordinator owns matching state, BFS, augmentation, KHS1, and KHM1; one
-native field process per node scans across that node's cores. Each shard now
-keeps replicated matching and distance state, consumes generated labels locally,
-and returns only BFS discoveries or complete path proposals. The coordinator
-merges nonconflicting paths and broadcasts committed deltas. No edge-label stream
-crosses machines.
+These are allocation bounds, not a deployment authorization. At `2^29`, a
+small host has only modest headroom above an 11.41 GiB shard, while Merlin must
+hold its local shard and coordinator together. Measure a physical calibration
+and include the agent, Python bridge, kernel, allocator, and operating-system
+overhead before raising the live field or memory limits.
 
-For the unfinished household matching jobs, the reduced engine's conservative
-per-process admission estimates are:
+## Verification completed
 
-| Field | Requests | Coordinator | Each native shard |
-| --- | ---: | ---: | ---: |
-| 2^25 | 33,554,432 | 1.82 GiB | 1.63 GiB |
-| 7^9 | 40,353,607 | 2.18 GiB | 1.95 GiB |
-| 5^11 | 48,828,125 | 2.62 GiB | 2.35 GiB |
+- Full matching and cluster suites pass.
+- Native distributed matching, portable KHS1 resume, group recovery, and KHM1
+  verification pass with the compact layout.
+- A focused 13^5 run exercised depth-two BFS, bounded restore-compatible state,
+  and independently valid full matching output.
+- The feeder's source admission formula is regression-tested for `2^29` below
+  12 GiB on both coordinator and shard sides.
 
-Only 2^25 fits both sides of the present 2 GiB limit, and only narrowly. These
-are allocation bounds, not measured resident sets; measure resident memory on a
-larger calibration before changing the stopped campaign.
+## Safe progression
 
-Before raising the frontier, finish these implementation items:
+1. Let the deployed `5^11` attempt finish and retain coordinator and shard peak RSS.
+2. Run `3^17` first in an isolated calibration campaign with a 4–6 GiB cap and
+   verify its KHM1, recovery path,
+   per-thread affinity, wall time, and combined coordinator-plus-local-shard RSS.
+3. Calibrate the compact engine on a synthetic allocation or intermediate field
+   before granting a 12–13 GiB per-process cap for `2^29`.
+4. Admit `2^29` only with a disk-space check, frequent portable checkpoints,
+   and enough local memory headroom on every selected host.
 
-1. Make checkpoints possible within a very long native matching phase. Current
-   snapshots occur only at phase boundaries, so a single phase can exceed the
-   configured 30-minute interval.
-2. Measure per-node resident memory and network traffic on a larger real-cluster
-   calibration. The current replicas admit 2^25 under the 2 GiB estimate, but
-   only narrowly; 7^9 and 5^11 require a larger cap or partitioned state. New
-   runs automatically retain per-coordinator and per-shard CPU time and peak RSS
-   in the leader database for this comparison.
-3. Add a local node supervisor that detects a hung but still-live agent, restarts
-   it, and requests at most one host reboot if the restart does not restore
-   heartbeat. The current watcher restarts only processes that have exited.
-4. Test restart and certificate retrieval after a real agent replacement,
-   including reuse of the registered storage port, and run a multi-hour failure
-   injection with DP workers concurrently active.
-
-The saved 13^5 benchmark progressed through three architectures on the same
-local topology: 115.7 seconds with Python interpreting every edge, 23.81 seconds
-with a C coordinator receiving every label, and 2.02 seconds after moving BFS
-reduction and path proposals into the shards. Four local shards with two native
-threads each completed in 1.83 seconds. Both reduced runs independently verified
-all 371,293 assignments. This is a 57x improvement over the Python path.
-
-A private two-machine 13^5 run on `.107` and `.108`, with two native threads per
-node, completed in 10.74 seconds including a deliberate partner failure and
-recovery. The replacement lease restored 368,414 committed assignments from
-two checkpoint replicas, and the final KHM1 independently verified. This
-validates the reduced wire protocol and recovery path on real hosts, but it does
-not authorize `2^25`: that field still has a narrow 2 GiB margin and no
-intra-phase checkpoint for its potentially very long first phase.
-
-Do not describe either native engine as covering the full uint32 field range.
-Keep the retained campaign stopped while the remaining readiness work is
-implemented and tested.
+If the physical peak does not fit reliably, the next architecture is ownership
+partitioning of `left`, `right`, distance, and frontier state with batched
+cross-node exchanges. That removes replication but is a separate distributed
+algorithm and should not be mixed into the compact-layout deployment.

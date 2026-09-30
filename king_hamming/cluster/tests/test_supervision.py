@@ -20,11 +20,32 @@ sys.path.insert(0, str(ROOT))
 
 import agent
 import leader
+from outcomes import SolverOutcome, classify
 
 
 # Check supervisor behavior that short normal solvers cannot reliably exercise.
 class SupervisionTests(unittest.TestCase):
     """Exercise intentional stopping independently of solver stdout."""
+
+    def test_registration_retries_same_session_after_timeout(self) -> None:
+        record = {"node_name": "worker", "session_id": "stable-session"}
+        with patch.object(agent, "request_json", side_effect=[TimeoutError("busy"), {"ok": True}]) as request:
+            with patch.object(agent.time, "sleep"):
+                self.assertEqual(agent.register_node("http://leader", record), {"ok": True})
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[0], request.call_args_list[1])
+        with patch.object(agent, "request_json", side_effect=TimeoutError("busy")):
+            with self.assertRaises(TimeoutError):
+                agent.register_node("http://leader", record, retry_seconds=0)
+
+    def test_solver_exit_classification_is_typed(self) -> None:
+        """Classify stop and failure exits without inspecting stderr strings."""
+
+        self.assertIs(classify(0, False, False, False), SolverOutcome.COMPLETE)
+        self.assertIs(classify(1, True, False, True), SolverOutcome.INTENTIONAL_STOP)
+        self.assertIs(classify(75, True, False, False), SolverOutcome.INTENTIONAL_STOP)
+        self.assertIs(classify(1, True, False, False), SolverOutcome.STOP_FAILURE)
+        self.assertIs(classify(1, False, False, True), SolverOutcome.ENGINE_FAILURE)
 
     def test_scheduler_retries_database_lock(self) -> None:
         """A transient writer lock must not permanently stop queue advancement."""
@@ -211,6 +232,32 @@ class SupervisionTests(unittest.TestCase):
             self.assertEqual(supervisor.call_count, 1)
             self.assertEqual(request.call_args.args[1], "/v1/fail")
             self.assertIn("failed while stopping", request.call_args.args[2]["error"])
+
+    def test_immutable_tile_wrapper_failure_while_stopping_is_requeued(self) -> None:
+        """A stopped tile wrapper cannot turn an intentional pause into root failure."""
+
+        with tempfile.TemporaryDirectory(prefix="kh-tile-stop-test-") as directory:
+            root = Path(directory)
+            result = {
+                "return_code": 1, "stopped": True, "forced": False,
+                "stderr": "C tile kernel exited -15", "progress": {},
+            }
+            job = {
+                "run_id": "tile-stop", "lease_token": "token",
+                "specification": {"program": "dp_tile", "arguments": {}},
+            }
+
+            with patch.object(agent, "supervise_solver", return_value=result):
+                with patch.object(agent, "request_json", return_value={}) as request:
+                    agent.run_job("unused", job, [min(os.sched_getaffinity(0))],
+                                  root, root, "unused")
+
+            routes = [item.args[1] for item in request.call_args_list]
+            self.assertIn("/v1/requeue", routes)
+            self.assertNotIn("/v1/fail", routes)
+            requeue = next(item.args[2] for item in request.call_args_list
+                           if item.args[1] == "/v1/requeue")
+            self.assertEqual(requeue["reason"], "intentional_stop")
 
     # Existing run records survive idempotent database upgrades.
     def test_schema_migration_retains_runs(self) -> None:

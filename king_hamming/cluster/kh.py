@@ -48,20 +48,31 @@ def build_parser() -> argparse.ArgumentParser:
     adapters.default_campaign().configure_campaign(campaign)
     status = commands.add_parser("status", help="show nodes and recent runs")
     status.add_argument("--watch", type=float, metavar="SECONDS", help="refresh periodically")
+    status.add_argument("--verbose", action="store_true",
+                        help="include artifacts, completed history, checkpoints, and resources")
     stop = commands.add_parser("stop", help="stop dispatch without recovery escalation")
     stop.add_argument("--all", action="store_true", help="explicitly select the whole campaign")
     resume = commands.add_parser("resume", help="resume dispatch")
     resume.add_argument("--all", action="store_true", help="explicitly select the whole campaign")
+    cancel = commands.add_parser("cancel", help="cancel one queued, paused, or running run")
+    cancel.add_argument("run_id")
+    pause = commands.add_parser("pause-run", help="pause one queued or running run")
+    pause.add_argument("run_id")
+    resume_run = commands.add_parser("resume-run", help="resume one paused run")
+    resume_run.add_argument("run_id")
+    priority = commands.add_parser("reprioritize", help="change one run's queue priority")
+    priority.add_argument("run_id")
+    priority.add_argument("priority", type=int)
     return parser
 
 
-# Format the compact human-readable status table.
-def print_status(status: dict[str, Any]) -> None:
-    """Print campaign, node, and run status."""
+def print_status(status: dict[str, Any], verbose: bool = False) -> None:
+    """Print concise current status, with retained history only when verbose."""
 
     scheduler = status.get("scheduler", {})
     scheduler_text = f" scheduler={scheduler.get('status', 'unknown')}"
-    print(f"campaign: {status['campaign_state']} checkpoint={status['checkpoint_seconds']}s "
+    print(f"campaign: {status['campaign_state']} schema={status.get('schema_version', 'legacy')} "
+          f"checkpoint={status['checkpoint_seconds']}s "
           f"lease={status.get('lease_seconds', 'unknown')}s keep={status.get('checkpoint_keep', 'unknown')}"
           f"{scheduler_text}")
     if scheduler.get("last_error"):
@@ -73,33 +84,69 @@ def print_status(status: dict[str, Any]) -> None:
             descriptions[run["run_id"]] = adapters.get(specification).describe(specification)
         except (KeyError, ValueError, TypeError):
             descriptions[run["run_id"]] = "unknown calculation"
-    active = {run["node_name"]: run for run in status["runs"]
-              if run["state"] == "running" and run["node_name"]}
+    active = {}
+    for run in status["runs"]:
+        if run["state"] == "running" and run["node_name"]:
+            active.setdefault(run["node_name"], []).append(run)
     print("nodes:")
 
     for node in status["nodes"]:
         role = "compute+storage" if node.get("compute_enabled", 1) else "storage"
-        current = active.get(node["node_name"])
+        current = active.get(node["node_name"], [])
         reserved = node.get("reserved_for")
-        work = (f" calculating={descriptions.get(current['run_id'], 'unknown')}"
+        calculations = ",".join(descriptions.get(run["run_id"], "unknown")
+                                for run in current)
+        work = (f" calculating={calculations}"
                 if current else f" reserved_for={descriptions.get(reserved, reserved)}"
-                if reserved else " idle")
-        print(f"  {node['node_name']}: {node['state']} role={role} cpus={node['cpu_set']}{work}")
+                if reserved else f" idle={node.get('idle_reason', 'unknown')}")
+        version = (f" version={node['runtime_version'][:12]}"
+                   if verbose and node.get("runtime_version") else "")
+        topology = (f" physical_cores={node['physical_core_count']}"
+                    if verbose and node.get("physical_core_count") else "")
+        slots = (f" slots={len(json.loads(node.get('slots_json') or '[]'))}"
+                 if verbose else "")
+        allocated = {cpu for run in current
+                     for cpu in (run.get("assigned_cpu_set") or node["cpu_set"]).split(",")
+                     if cpu}
+        if reserved:
+            allocated.update(cpu for cpu in node["cpu_set"].split(",") if cpu)
+        capacity = len([cpu for cpu in node["cpu_set"].split(",") if cpu])
+        print(f"  {node['node_name']}: {node['state']} role={role} cpus={node['cpu_set']}"
+              f" allocated={len(allocated)}/{capacity}{topology}{slots}{version}{work}")
 
-    print("artifacts:")
+    if verbose:
+        print("artifacts:")
+        for artifact in status.get("artifacts", []):
+            print(
+                f"  {artifact['artifact_hash']} replicas="
+                f"{artifact['replicas']}/{artifact['target_replicas']}"
+            )
 
-    for artifact in status.get("artifacts", []):
-        print(
-            f"  {artifact['artifact_hash']} replicas="
-            f"{artifact['replicas']}/{artifact['target_replicas']}"
-        )
+    runs = status["runs"] if verbose else [
+        run for run in status["runs"]
+        if run.get("parent_run_id") is None and
+        run.get("state") not in {"complete", "failed", "cancelled"}
+    ]
+    print("runs:" if verbose else "in progress:")
 
-    print("runs:")
-
-    for run in status["runs"]:
+    if not runs:
+        print("  none")
+    for run in runs:
         progress = f"{run['progress_done']}/{run['progress_total']} {run['progress_units']}"
         print(f"  {run['run_id']} {run['state']:8} {progress:>12} node={run['node_name'] or '-'} "
               f"calculation={descriptions[run['run_id']]}")
+
+        specification = json.loads(run["specification"])
+        try:
+            details = adapters.get(specification).status_details(
+                specification, run, status)
+        except (KeyError, TypeError, ValueError):
+            details = []
+        if details:
+            print("    " + "; ".join(details))
+
+        if not verbose:
+            continue
 
         heartbeat_at = run["last_solver_heartbeat"]
         heartbeat_age = "unknown" if heartbeat_at is None else f"{max(0, time.time() - heartbeat_at):.0f}s"
@@ -110,6 +157,13 @@ def print_status(status: dict[str, Any]) -> None:
             f"heartbeat_age={heartbeat_age} "
             f"durable={run['progress_checkpoint_done']} checkpoint_age={checkpoint_age}"
         )
+        try:
+            progress_details = json.loads(run.get("progress_details") or "{}")
+        except (TypeError, ValueError):
+            progress_details = {}
+        if progress_details:
+            detail = " ".join(f"{key}={value}" for key, value in progress_details.items())
+            print(f"    activity {detail}")
 
         print(
             f"    replicated={run.get('replicated_checkpoint_done', 0)} "
@@ -128,6 +182,9 @@ def print_status(status: dict[str, Any]) -> None:
             print(
                 f"    resources attempt={usage.get('attempt') or '?'} node={usage['node_name']} "
                 f"{component} cpu={cpu_seconds:.3f}s peak_rss={peak_mib:.1f}MiB"
+                + (f" assigned_cpu={usage['assigned_cpu_utilization']:.0%}"
+                   f"/{usage['sample_seconds']:.0f}s"
+                   if "assigned_cpu_utilization" in usage else "")
             )
 
         if run["artifact_location"]:
@@ -174,7 +231,8 @@ def main() -> int:
     elif arguments.command == "status":
         try:
             while True:
-                print_status(request_json(arguments.leader, "GET", "/v1/status"))
+                print_status(request_json(arguments.leader, "GET", "/v1/status"),
+                             verbose=arguments.verbose)
 
                 if arguments.watch is None:
                     break
@@ -183,6 +241,12 @@ def main() -> int:
                 time.sleep(arguments.watch)
         except KeyboardInterrupt:
             pass
+    elif arguments.command in {"cancel", "pause-run", "resume-run", "reprioritize"}:
+        action = {"pause-run": "pause", "resume-run": "resume"}.get(arguments.command, arguments.command)
+        body = {"run_id": arguments.run_id, "action": action}
+        if arguments.command == "reprioritize":
+            body["priority"] = arguments.priority
+        print(json.dumps(request_json(arguments.leader, "POST", "/v1/run-command", body), indent=2, sort_keys=True))
     else:
         state = "stopped" if arguments.command == "stop" else "running"
         print(json.dumps(request_json(arguments.leader, "POST", "/v1/control", {"state": state})))

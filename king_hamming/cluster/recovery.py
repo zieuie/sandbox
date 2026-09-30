@@ -63,7 +63,13 @@ def initialize(connection: sqlite3.Connection, lease_seconds: float, max_bytes: 
         "runs": {"lease_expires": "REAL", "lease_attempt": "INTEGER NOT NULL DEFAULT 0",
                  "recovery_count": "INTEGER NOT NULL DEFAULT 0", "engine_failures": "INTEGER NOT NULL DEFAULT 0", "restored_hash": "TEXT",
                  "restored_done": "INTEGER NOT NULL DEFAULT 0"},
-        "nodes": {"session_id": "TEXT NOT NULL DEFAULT ''", "compute_enabled": "INTEGER NOT NULL DEFAULT 1"},
+        "nodes": {"session_id": "TEXT NOT NULL DEFAULT ''", "compute_enabled": "INTEGER NOT NULL DEFAULT 1",
+                  "memory_bytes": "INTEGER NOT NULL DEFAULT 0",
+                  "runtime_version": "TEXT NOT NULL DEFAULT ''",
+                  "physical_core_count": "INTEGER NOT NULL DEFAULT 0",
+                  "storage_generation": "TEXT NOT NULL DEFAULT ''",
+                  "storage_validation_mode": "TEXT NOT NULL DEFAULT 'verified'",
+                  "slots_json": "TEXT NOT NULL DEFAULT '[]'"},
         "artifacts": {"size": "INTEGER"},
     }
 
@@ -103,10 +109,12 @@ def retire(connection: sqlite3.Connection, row: sqlite3.Row, now: float, reason:
         (now, reason, row["lease_token"]),
     )
     connection.execute("DELETE FROM node_reservations WHERE lease_token=?", (row["lease_token"],))
+    target = row["control_state"] if row["control_state"] in {"paused", "cancelled"} else "queued"
     connection.execute(
-        "UPDATE runs SET state='queued', node_name=NULL, lease_token=NULL, lease_expires=NULL, "
-        "recovery_count=recovery_count+1, progress_phase='recovering', progress_message=? WHERE run_id=?",
-        (reason, row["run_id"]),
+        "UPDATE runs SET state=?, node_name=NULL, lease_token=NULL, lease_expires=NULL, finished=?, "
+        "recovery_count=recovery_count+1, progress_phase=?, progress_message=? WHERE run_id=?",
+        (target, now if target == "cancelled" else None,
+         "recovering" if target == "queued" else target, reason, row["run_id"]),
     )
 
 
@@ -281,11 +289,26 @@ def invalidate_blob(connection: sqlite3.Connection, node: str, digest: str) -> N
 def add_status(connection: sqlite3.Connection, runs: list[dict[str, Any]], now: float) -> None:
     """Augment runs in place with their latest retained replicated snapshot and live copies."""
 
+    if not runs:
+        return
+    identifiers = [run["run_id"] for run in runs]
+    placeholders = ",".join("?" for _ in identifiers)
+    snapshots_by_run: dict[str, list[sqlite3.Row]] = {identifier: [] for identifier in identifiers}
+    for row in connection.execute(
+        f"SELECT * FROM checkpoints WHERE retired_at IS NULL AND run_id IN ({placeholders}) "
+        "ORDER BY run_id,cursor DESC,created DESC", identifiers,
+    ):
+        snapshots_by_run[row["run_id"]].append(row)
+    cutoff = now - setting(connection, "lease_seconds")
+    live_copies = {row["manifest_hash"]: row["copies"] for row in connection.execute(
+        f"SELECT r.manifest_hash,COUNT(*) AS copies FROM checkpoint_replicas r "
+        f"JOIN nodes n USING(node_name) JOIN checkpoints c USING(manifest_hash) "
+        f"WHERE c.run_id IN ({placeholders}) AND n.last_heartbeat>? GROUP BY r.manifest_hash",
+        [*identifiers, cutoff],
+    )}
     for run in runs:
-        snapshots = connection.execute(
-            "SELECT * FROM checkpoints WHERE run_id=? AND retired_at IS NULL ORDER BY cursor DESC, created DESC", (run["run_id"],),
-        ).fetchall()
-        eligible = [(row, len(sources(connection, row["manifest_hash"], now))) for row in snapshots]
+        snapshots = snapshots_by_run[run["run_id"]]
+        eligible = [(row, live_copies.get(row["manifest_hash"], 0)) for row in snapshots]
         recoverable = next((row for row, count in eligible if count), None)
         replicated = next(((row, count) for row, count in eligible if count and row["durable_at"] is not None), None)
         row = None if replicated is None else replicated[0]
@@ -298,10 +321,20 @@ def add_status(connection: sqlite3.Connection, runs: list[dict[str, Any]], now: 
 
 # A restarted agent must prove its retained disk content before regaining old replica claims.
 def revalidation(connection: sqlite3.Connection, node: str, now: float) -> dict[str, Any] | None:
-    """Return node's oldest retained-content validation task, or None if its inventory is current."""
+    """Return one useful retained-content validation task without scanning the whole queue."""
 
-    rows=connection.execute("SELECT * FROM node_revalidation WHERE node_name=? ORDER BY created,kind,digest",(node,)).fetchall()
-    for row in rows:
+    while True:
+        row=connection.execute(
+            "SELECT validation.* FROM node_revalidation validation "
+            "WHERE validation.node_name=? ORDER BY CASE WHEN validation.kind='artifact' "
+            "AND validation.digest IN (SELECT child.artifact_hash FROM distributed_tiles tile "
+            "JOIN runs parent ON parent.run_id=tile.parent_run_id "
+            "JOIN runs child ON child.run_id=tile.child_run_id "
+            "WHERE parent.state='waiting') "
+            "THEN 0 ELSE 1 END,validation.created,validation.kind,validation.digest LIMIT 1",
+            (node,)).fetchone()
+        if row is None:
+            return None
         if row["kind"]=="checkpoint":
             snapshot=connection.execute("SELECT * FROM checkpoints WHERE manifest_hash=? AND retired_at IS NULL",(row["digest"],)).fetchone()
             if snapshot is not None:
@@ -313,4 +346,45 @@ def revalidation(connection: sqlite3.Connection, node: str, now: float) -> dict[
             if artifact is not None:
                 return {"kind":"revalidate_artifact",**dict(artifact)}
         connection.execute("DELETE FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?",(node,row["kind"],row["digest"]))
-    return None
+
+
+def revalidation_batch(connection: sqlite3.Connection, node: str, limit: int = 512) -> list[dict[str, Any]]:
+    """Return a bounded retained inventory with every expected member and size."""
+    rows = connection.execute(
+        "SELECT validation.* FROM node_revalidation validation WHERE validation.node_name=? "
+        "ORDER BY CASE WHEN validation.kind='artifact' AND validation.digest IN ("
+        "SELECT child.artifact_hash FROM distributed_tiles tile JOIN runs parent ON parent.run_id=tile.parent_run_id "
+        "JOIN runs child ON child.run_id=tile.child_run_id WHERE parent.state='waiting') "
+        "THEN 0 ELSE 1 END,"
+        "validation.created,validation.kind,validation.digest LIMIT ?", (node, limit),
+    ).fetchall()
+    result = []
+    for row in rows:
+        if row["kind"] == "artifact":
+            artifact = connection.execute(
+                "SELECT size FROM artifacts WHERE artifact_hash=?", (row["digest"],)
+            ).fetchone()
+            if artifact is not None and artifact["size"] is not None:
+                result.append({"kind": "artifact", "digest": row["digest"],
+                               "members": [{"digest": row["digest"],
+                                            "size": artifact["size"]}]})
+                continue
+        else:
+            snapshot = connection.execute(
+                "SELECT manifest FROM checkpoints WHERE manifest_hash=? AND retired_at IS NULL",
+                (row["digest"],),
+            ).fetchone()
+            if snapshot is not None:
+                manifest = json.loads(snapshot["manifest"])
+                members = [{"digest": row["digest"],
+                            "size": len(canonical_json(manifest))}]
+                members.extend({"digest": item["sha256"], "size": item["size"]}
+                               for item in manifest["files"])
+                result.append({"kind": "checkpoint", "digest": row["digest"],
+                               "members": members})
+                continue
+        connection.execute(
+            "DELETE FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?",
+            (node, row["kind"], row["digest"]),
+        )
+    return result

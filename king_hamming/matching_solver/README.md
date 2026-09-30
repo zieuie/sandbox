@@ -60,10 +60,10 @@ does not create `pending.khmatch`. The second verifies the checkpoint's DP
 hash, polynomial, graph layout, checksum, and every selected edge before
 continuing. An ordinary run omits `--stop-after-phases`. The local checkpoint
 path is replaced atomically at later phases; use separate paths to keep old
-local snapshots. The cluster adapter saves each committed phase through the generic checkpoint
-handshake. The worker waits until the checkpoint has been indexed and replicated
-before continuing. A single phase longer than the checkpoint interval finishes
-before its next snapshot can be taken.
+local snapshots. The distributed cluster adapter also creates bounded commit points inside the
+initial augmentation phase. It checks the configured interval at each root batch,
+then waits until each selected KHS1 image has been indexed before continuing.
+Recovery imports the canonical partial matching and recomputes transient BFS state.
 
 The certificate records one neighbor index per left request, the referenced DP
 hash, primitive polynomial, and checksum. The verifier reconstructs field
@@ -79,9 +79,10 @@ python3 king_hamming/matching_solver/submit.py king_hamming/matching_solver/exam
 python3 king_hamming/cluster/kh.py --leader http://127.0.0.1:8041 status
 ```
 
-Add `--distributed --workers N` to reserve 2-8 agents for one matching.
-`--threads C` gives each node's single native shard process C assigned CPUs, so
-`--workers 8 --threads 2` uses eight compact field copies and sixteen cores.
+Add `--distributed --workers N` to reserve 2-9 agents for one matching.
+`--threads C` is a per-node ceiling. Each native shard uses the smaller of C and
+that agent's registered CPU allocation, allowing heterogeneous groups such as a
+12-core Merlin shard plus smaller household workers.
 For example:
 
 ```sh
@@ -110,7 +111,7 @@ The [distributed matching engine](DISTRIBUTED.md) runs as a
 `match_distributed` cluster job. The leader atomically reserves the requested
 agent group, runs one native shard per node across its allocated cores, and gives
 their binary streams to a native coordinator. It replicates every committed KHS1
-phase through the generic checkpoint store, and fences the group if any partner
+barrier through the generic checkpoint store, and fences the group if any partner
 agent restarts or loses its heartbeat.
 An isolated cluster test kills and restarts a reserved partner, then verifies
 recovery and the final KHM1 certificate. A private two-host test on `.107` and
@@ -123,8 +124,7 @@ and edge admission limits. Each shard now
 consumes edge labels locally, keeps replicated committed matching/BFS state, and
 returns only discovered vertices or complete path proposals. The coordinator
 merges proposals and broadcasts assignment deltas; edge labels no longer cross
-the cluster. Larger-field resident-memory validation and intra-phase checkpoints
-remain necessary before another giant field is submitted.
+the cluster. Larger-field resident-memory validation remains necessary before another giant field is submitted.
 
 Each native solver, coordinator, and distributed shard reads its own process
 usage at shutdown. Cluster runs store approximate user-plus-system CPU time and
@@ -141,8 +141,8 @@ before assuming its state. It does not replace the ongoing DP agents. When activ
 eight matching agents use CPUs 0 and 1 at lower process priority. Its persistent
 leader database, launch identities, and locally archived certificates are under
 [`cluster/deployments/match-overnight/`](../cluster/deployments/match-overnight/).
-Of the 44 admitted saved DP fields, 41 have complete certificates; 2^25, 7^9,
-and 5^11 retain unfinished queue records. Admission checks the native kernel's
+Of the 44 admitted saved DP fields, 43 have complete certificates; only 2^25
+remains active. 7^9 and 5^11 are archived. Admission checks the native kernel's
 conservative memory estimate against a 2 GiB per-job cap, as well as a 50 million
 element and 160 billion implicit-edge cap.
 
@@ -180,3 +180,16 @@ workers still run the older bundle. Individual native phases cannot be checkpoin
 until they complete. Fields above the current 2 GiB admission cap need a
 sharded matching path before the campaign can cover the full uint32 range.
 The exact remaining fields and readiness work are in [FULL_SCALE.md](FULL_SCALE.md).
+
+## Analyze and independently render certificates
+
+`analyze_choices.py` measures a certificate's choice/delta entropy and ordinary
+compression ratio. It is diagnostic, not verification:
+
+```sh
+python3 king_hamming/matching_solver/analyze_choices.py result.khmatch --dp result.khdp
+```
+
+For the stronger sanity check, `row_verifier/kh_verify_rows` independently
+rebuilds the field and P/Q sets, renders the actual P&E permutations, and
+exhaustively checks their pairwise distances within explicit work limits.

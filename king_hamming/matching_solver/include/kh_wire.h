@@ -29,6 +29,8 @@ bool kh_wire_read_u32(int descriptor, uint32_t *output);
 bool kh_wire_read_u64(int descriptor, uint64_t *output);
 bool kh_wire_write_u32(int descriptor, uint32_t value);
 bool kh_wire_write_u64(int descriptor, uint64_t value);
+bool kh_wire_read_u32s(int descriptor, uint32_t *output, size_t count);
+bool kh_wire_write_u32s(int descriptor, const uint32_t *input, size_t count);
 
 /* KHW1 requests and KHR1 responses use the same fixed 16-byte envelope. */
 bool kh_wire_read_request(int descriptor, kh_wire_header_t *header);

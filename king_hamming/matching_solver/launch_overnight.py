@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "cluster"))
 from deployment import bundle, deploy, remote, request, wait
-from matching_solver.artifacts import load_dp, primitive, request_count
+from matching_solver.artifacts import load_dp, request_count
+from matching_solver.polynomials import first_primitive
 from matching_solver.submit import specification
 
 THREADS = 2
@@ -38,23 +39,6 @@ def save(path: Path, value: dict) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n")
     temporary.replace(path)
-
-
-# Search packed lower coefficients in deterministic order for generator X.
-def first_primitive(p: int, r: int, q: int) -> list[int]:
-    """Return the first primitive monic polynomial of degree r."""
-    for packed in range(1, q):
-        if packed % p == 0:
-            continue
-        value = packed
-        coefficients = []
-        for _ in range(r):
-            coefficients.append(value % p)
-            value //= p
-        polynomial = coefficients + [1]
-        if primitive(p, r, polynomial):
-            return polynomial
-    raise ValueError(f"no primitive polynomial found for {p}^{r}")
 
 
 # Mirror native admission so no queued field is guaranteed to exceed the worker cap.

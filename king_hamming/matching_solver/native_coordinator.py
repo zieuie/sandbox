@@ -109,7 +109,13 @@ def run(args: argparse.Namespace) -> int:
     if args.output.exists():
         raise FileExistsError(f"output already exists: {args.output}")
     available = sorted(os.sched_getaffinity(0))
-    if args.worker.count("local") * args.threads_per_worker > len(available):
+    worker_threads = ([args.threads_per_worker] * len(args.worker)
+                      if args.worker_threads is None else args.worker_threads)
+    if (len(worker_threads) != len(args.worker) or
+            any(not 1 <= value <= 1024 for value in worker_threads) or
+            sum(worker_threads) > 256):
+        raise ValueError("--worker-threads must give one positive count per worker")
+    if sum(worker_threads[index] for index, host in enumerate(args.worker) if host == "local") > len(available):
         raise ValueError("local native workers exceed assigned CPU affinity")
     workers: list[NativeWorker] = []
     local_offset = 0
@@ -122,8 +128,8 @@ def run(args: argparse.Namespace) -> int:
                                     index, len(args.worker)))
                 continue
             if host == "local":
-                cpus = available[local_offset:local_offset + args.threads_per_worker]
-                local_offset += args.threads_per_worker
+                cpus = available[local_offset:local_offset + worker_threads[index]]
+                local_offset += worker_threads[index]
                 executable = Path(__file__).with_name("kh_match_worker")
                 command = [str(executable), "--index", str(index), "--count", str(len(args.worker)),
                            "--cpus", ",".join(map(str, cpus))]
@@ -139,9 +145,12 @@ def run(args: argparse.Namespace) -> int:
         coordinator = [str(Path(__file__).with_name("kh_match_distributed")),
                        str(args.dp), str(args.output), "--poly", args.poly,
                        "--threads-per-worker", str(args.threads_per_worker),
+                       "--worker-threads", ",".join(map(str, worker_threads)),
                        "--max-bytes", str(args.max_bytes),
                        "--max-edges", str(args.max_edges),
-                       "--max-field-elements", str(args.max_field_elements)]
+                       "--max-field-elements", str(args.max_field_elements),
+                       "--checkpoint-seconds", str(args.checkpoint_seconds)]
+        coordinator.extend(["--phase-batch-roots", str(args.phase_batch_roots)])
         if args.checkpoint_dir:
             coordinator.extend(["--checkpoint-dir", str(args.checkpoint_dir)])
         if args.resume:
@@ -174,6 +183,7 @@ def main() -> int:
     parser.add_argument("--stage-remote", action="store_true")
     parser.add_argument("--remote-cpus")
     parser.add_argument("--threads-per-worker", type=int, default=1)
+    parser.add_argument("--worker-threads", type=lambda value: [int(item) for item in value.split(",")])
     parser.add_argument("--peer-run-id")
     parser.add_argument("--peer-lease-token")
     parser.add_argument("--max-edges", type=int, default=100_000_000)
@@ -184,6 +194,7 @@ def main() -> int:
     parser.add_argument("--stop-after-phases", type=int, default=0)
     parser.add_argument("--restart-attempts", type=int, default=0)
     parser.add_argument("--checkpoint-seconds", type=int, default=0)
+    parser.add_argument("--phase-batch-roots", type=int, default=65536)
     parser.add_argument("--checkpoint-handshake", action="store_true")
     if len(sys.argv) == 1:
         parser.print_help()
@@ -193,7 +204,8 @@ def main() -> int:
         parser.error("DP, --poly, and --output are required")
     if (not 1 <= args.threads_per_worker <= 1024 or args.max_edges < 1 or
             args.max_field_elements < 1 or args.max_bytes < 1 or
-            args.stop_after_phases < 0 or args.restart_attempts != 0):
+            args.stop_after_phases < 0 or args.checkpoint_seconds < 0 or
+            args.phase_batch_roots < 1 or args.restart_attempts != 0):
         parser.error("invalid native resource controls")
     if args.stage_remote:
         remote_hosts = sorted({host for host in args.worker if host != "local"

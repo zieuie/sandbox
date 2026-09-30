@@ -22,31 +22,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "cluster"))
 from deployment import request
-from matching_solver.artifacts import file_hash, load_dp, primitive, request_count
+from matching_solver.artifacts import file_hash, load_dp, request_count
 from matching_solver.launch_overnight import LEADER, RESULTS, STATE, MAX_BYTES, THREADS, memory_required, repair, save
+from matching_solver.polynomials import next_primitive
 from matching_solver.submit import specification
 
 MANIFEST = STATE / "manifest.json"
 ARCHIVE = STATE / "results"
 DP_SYNC = STATE / "dp-sync.json"
-
-
-# Continue primitive-X candidates only after a verified Hall obstruction.
-def next_primitive(p: int, r: int, q: int, prior: list[int]) -> list[int] | None:
-    """Return the next primitive polynomial after prior in packed order."""
-    start = 1 + sum(value * p**index for index, value in enumerate(prior[:-1]))
-    for packed in range(start, q):
-        if packed % p == 0:
-            continue
-        value = packed
-        coefficients = []
-        for _ in range(r):
-            coefficients.append(value % p)
-            value //= p
-        polynomial = coefficients + [1]
-        if primitive(p, r, polynomial):
-            return polynomial
-    return None
 
 
 # Store the verified result bytes centrally, retaining the leader's content hash.

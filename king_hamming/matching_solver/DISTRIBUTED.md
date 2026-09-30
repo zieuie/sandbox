@@ -1,7 +1,7 @@
 # Native multi-node matching engine
 
 `native_coordinator.py` runs one exact matching across 2-256 native shard
-processes (2-8 when scheduled through the generic cluster). Python performs only
+processes (2-9 when scheduled through the generic cluster). Python performs only
 cluster work: it opens local, SSH, or lease-authorized agent streams and passes
 their file descriptors to `kh_match_distributed`. It never decodes a frontier,
 edge, matching assignment, checkpoint, or certificate payload.
@@ -34,11 +34,15 @@ peak RSS bytes in the final native wire response. The C coordinator reports
 those records, plus its own process usage, through the authenticated cluster
 lease. SQLite retains every lease attempt rather than collapsing recovery runs.
 
-After each complete augmentation barrier, the coordinator atomically writes a
-KHS1 phase image. It contains the exact DP SHA-256, dimensions, primitive
-polynomial, phase, cardinality, compact assignments, and SHA-256. A fresh group
+During the potentially long initial augmentation, the coordinator commits bounded
+root ranges and may atomically write KHS1 before the full augmentation phase ends.
+It checks the configured checkpoint interval at each bounded range and always at
+a complete augmentation barrier. A restored group starts from that canonical
+matching and recomputes transient BFS state, so shard-count changes remain safe.
+A KHS1 image contains the exact DP SHA-256, dimensions, primitive
+polynomial, commit sequence, cardinality, compact assignments, and SHA-256. A fresh group
 of any supported size can import it and validate every selected edge against its
-rebuilt fields. A failure within a phase loses only that in-flight phase and
+rebuilt fields. A failure loses at most the work since the latest bounded commit and
 cannot publish a partial certificate.
 
 From the repository root, a local four-process check is:
@@ -70,11 +74,14 @@ python3 king_hamming/matching_solver/native_coordinator.py \
 The first command exits 3 and leaves no `pending.khmatch`. Wrong-input,
 damaged, or mathematically invalid KHS1 files are rejected before search resumes.
 
-The generic cluster runs this path as `match_distributed`. One agent coordinates
-and holds the solver lease; the leader atomically reserves the requested 2-8 node
+The generic cluster runs this path as `match_distributed`. `--threads` is a per-shard
+ceiling: every reserved node contributes the smaller of that ceiling and its
+registered CPU allocation, so a 12-core coordinator can work alongside smaller
+workers without underusing the larger host. One agent coordinates
+and holds the solver lease; the leader atomically reserves the requested 2-9 node
 group. Partner agents expose separately authorized opaque streams and launch only
 the trusted C shard command. Pairwise SSH credentials are not required. Each
-KHS1 phase enters the generic content-addressed checkpoint store before the next
+KHS1 commit enters the generic content-addressed checkpoint store before the next
 phase starts. If a partner restarts or its heartbeat expires, the leader fences
 the group and a fresh group restores the latest replicated phase.
 

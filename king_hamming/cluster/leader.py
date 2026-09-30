@@ -24,6 +24,9 @@ from checkpoints import DEFAULT_MAX_BYTES
 import recovery
 import retention
 import adapters
+from resources import ResourceRequest, fits as resource_fits, normalized_slots
+
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -64,6 +67,18 @@ CREATE TABLE IF NOT EXISTS resource_usage (
 );
 CREATE INDEX IF NOT EXISTS resource_usage_run
 ON resource_usage(run_id, recorded);
+CREATE TABLE IF NOT EXISTS resource_usage_samples (
+    run_id TEXT NOT NULL REFERENCES runs(run_id),
+    lease_token TEXT NOT NULL,
+    node_name TEXT NOT NULL,
+    component TEXT NOT NULL,
+    shard_index INTEGER NOT NULL,
+    cpu_microseconds INTEGER NOT NULL,
+    rss_bytes INTEGER NOT NULL,
+    recorded REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS resource_samples_identity
+ON resource_usage_samples(lease_token,component,shard_index,recorded DESC);
 CREATE TABLE IF NOT EXISTS nodes (
     node_name TEXT PRIMARY KEY,
     address TEXT NOT NULL,
@@ -152,6 +167,64 @@ class SchedulerHealth:
             }
 
 
+def annotate_idle_reasons(connection: sqlite3.Connection, nodes: list[dict[str, Any]],
+                          runs: list[dict[str, Any]], campaign: str,
+                          lease_seconds: float, now: float) -> None:
+    """Explain each idle node using current queue, resource, and dependency state."""
+    active = {run["node_name"] for run in runs
+              if run["state"] == "running" and run.get("node_name")}
+    reserved = {node["node_name"] for node in nodes if node.get("reserved_for")}
+    free = [node for node in nodes if node.get("compute_enabled", 1) and
+            node["node_name"] not in active | reserved and
+            now - node["last_heartbeat"] <= lease_seconds]
+    queued = connection.execute(
+        "SELECT specification FROM runs WHERE state='queued' "
+        "ORDER BY priority DESC,estimated_seconds,created LIMIT 100").fetchall()
+    waiting = any(run["state"] == "waiting" for run in runs)
+
+    for node in nodes:
+        if now - node["last_heartbeat"] > lease_seconds:
+            node["idle_reason"] = "unavailable"
+        elif not node.get("compute_enabled", 1):
+            node["idle_reason"] = "intentionally reserved/storage-only"
+        elif node["node_name"] in active:
+            node["idle_reason"] = "running"
+        elif node["node_name"] in reserved:
+            node["idle_reason"] = "matching partner reservation"
+        elif campaign != "running":
+            node["idle_reason"] = "campaign dispatch stopped"
+        elif connection.execute(
+                "SELECT 1 FROM node_revalidation WHERE node_name=? LIMIT 1",
+                (node["node_name"],)).fetchone() is not None:
+            node["idle_reason"] = "validating retained storage"
+        elif not queued:
+            node["idle_reason"] = ("no dependency-ready tile or artifact replicas"
+                                   if waiting else "queue empty")
+        else:
+            coordinator_fit = False
+            partners_short = False
+            for candidate in queued:
+                specification = json.loads(candidate["specification"])
+                adapter = adapters.get(specification)
+                requirement = ResourceRequest.from_adapter(
+                    adapter.resource_requirements(specification))
+                if not resource_fits(node, requirement, "coordinator"):
+                    continue
+                coordinator_fit = True
+                required = adapter.required_nodes(specification)
+                partners = sum(other["node_name"] != node["node_name"] and
+                               resource_fits(other, requirement, "worker")
+                               for other in free)
+                if partners >= required - 1:
+                    node["idle_reason"] = "awaiting scheduler handoff"
+                    break
+                partners_short = partners_short or required > 1
+            else:
+                node["idle_reason"] = ("waiting for matching partners" if partners_short
+                                       else "memory/CPU admission" if not coordinator_fit
+                                       else "resource admission")
+
+
 # Initialize schema and the stopped-generation setting.
 def initialize(
     database: Path, checkpoint_seconds: int, lease_seconds: float = 60.0,
@@ -178,7 +251,14 @@ def initialize(
             "progress_checkpoint_done": "INTEGER NOT NULL DEFAULT 0",
             "progress_phase": "TEXT NOT NULL DEFAULT 'starting'",
             "progress_units": "TEXT NOT NULL DEFAULT 'steps'",
+            "progress_details": "TEXT NOT NULL DEFAULT '{}'",
             "parent_run_id": "TEXT REFERENCES runs(run_id)",
+            "control_state": "TEXT NOT NULL DEFAULT 'running'",
+            "failure_kind": "TEXT",
+            "slot_id": "INTEGER",
+            "assigned_cpu_set": "TEXT",
+            "reserved_memory_bytes": "INTEGER NOT NULL DEFAULT 0",
+            "exclusive_host": "INTEGER NOT NULL DEFAULT 1",
         }
 
         for name, definition in additions.items():
@@ -186,6 +266,10 @@ def initialize(
                 connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
         connection.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('campaign_state', 'running')"
+        )
+        connection.execute(
+            "INSERT INTO settings(key,value) VALUES('schema_version',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),),
         )
         connection.execute(
             "INSERT INTO settings(key, value) VALUES('checkpoint_seconds', ?) "
@@ -278,7 +362,10 @@ def make_handler(
                         "SELECT value FROM settings WHERE key='checkpoint_seconds'"
                     ).fetchone()[0])
                     runs = [dict(row) for row in connection.execute(
-                        "SELECT * FROM runs WHERE parent_run_id IS NULL OR state='running' ORDER BY created DESC LIMIT 200"
+                        "SELECT * FROM runs WHERE state='running' OR run_id IN "
+                        "(SELECT run_id FROM runs WHERE parent_run_id IS NULL "
+                        "ORDER BY created DESC LIMIT 50) "
+                        "ORDER BY (state='running') DESC,created DESC"
                     )]
                     nodes = [dict(row) for row in connection.execute(
                         "SELECT * FROM nodes ORDER BY node_name"
@@ -289,28 +376,67 @@ def make_handler(
                     for participant in nodes:
                         participant["reserved_for"] = reservations.get(participant["node_name"])
                     recovery.add_status(connection, runs, time.time())
+                    adapters.augment_status(connection, runs, time.time())
+                    run_ids = [run["run_id"] for run in runs]
+                    placeholders = ",".join("?" for _ in run_ids)
+                    checkpoint_counts = {}
+                    usage_by_run = {run_id: [] for run_id in run_ids}
+                    if run_ids:
+                        checkpoint_counts = {row["run_id"]: row for row in connection.execute(
+                            f"SELECT run_id,COUNT(*) AS total,SUM(retired_at IS NULL) AS retained "
+                            f"FROM checkpoints WHERE run_id IN ({placeholders}) GROUP BY run_id", run_ids,
+                        )}
+                        for item in connection.execute(
+                            f"SELECT u.run_id,u.lease_token,u.node_name,u.component,u.shard_index,"
+                            f"u.cpu_microseconds,u.peak_rss_bytes,u.recorded,h.attempt "
+                            f"FROM resource_usage u LEFT JOIN lease_history h USING(lease_token) "
+                            f"WHERE u.run_id IN ({placeholders}) "
+                            f"ORDER BY u.run_id,COALESCE(h.attempt,0),u.shard_index,u.component", run_ids,
+                        ):
+                            usage = dict(item)
+                            samples = connection.execute(
+                                "SELECT cpu_microseconds,recorded FROM resource_usage_samples "
+                                "WHERE lease_token=? AND component=? AND shard_index=? "
+                                "ORDER BY recorded DESC LIMIT 2",
+                                (item["lease_token"], item["component"], item["shard_index"]),
+                            ).fetchall()
+                            if len(samples) == 2 and samples[0]["recorded"] > samples[1]["recorded"]:
+                                elapsed = samples[0]["recorded"] - samples[1]["recorded"]
+                                cpu = max(0, samples[0]["cpu_microseconds"] -
+                                          samples[1]["cpu_microseconds"]) / 1_000_000
+                                cpu_set = next((run.get("assigned_cpu_set") or ""
+                                                for run in runs
+                                                if run["run_id"] == item["run_id"] and
+                                                run["node_name"] == item["node_name"]), "")
+                                if not cpu_set:
+                                    cpu_set = next((node["cpu_set"] for node in nodes
+                                                    if node["node_name"] == item["node_name"]), "")
+                                assigned = max(1, len([value for value in cpu_set.split(",") if value]))
+                                usage["assigned_cpu_utilization"] = min(1.0, cpu / elapsed / assigned)
+                                usage["sample_seconds"] = elapsed
+                            usage_by_run[item["run_id"]].append(usage)
                     for run in runs:
-                        counts = connection.execute(
-                            "SELECT COUNT(*) AS total,SUM(retired_at IS NULL) AS retained FROM checkpoints WHERE run_id=?",
-                            (run["run_id"],),
-                        ).fetchone()
-                        run["retained_checkpoints"] = counts["retained"] or 0
-                        run["retired_checkpoints"] = counts["total"] - run["retained_checkpoints"]
-                        run["resource_usage"] = [dict(item) for item in connection.execute(
-                            "SELECT u.lease_token,u.node_name,u.component,u.shard_index,"
-                            "u.cpu_microseconds,u.peak_rss_bytes,u.recorded,h.attempt "
-                            "FROM resource_usage u LEFT JOIN lease_history h USING(lease_token) "
-                            "WHERE u.run_id=? ORDER BY COALESCE(h.attempt,0),u.shard_index,u.component",
-                            (run["run_id"],),
-                        )]
+                        counts = checkpoint_counts.get(run["run_id"])
+                        run["retained_checkpoints"] = 0 if counts is None else counts["retained"] or 0
+                        run["retired_checkpoints"] = (0 if counts is None else
+                            counts["total"] - run["retained_checkpoints"])
+                        run["resource_usage"] = usage_by_run[run["run_id"]]
                     lease_seconds = recovery.setting(connection, "lease_seconds")
                     checkpoint_keep = int(recovery.setting(connection, "checkpoint_keep"))
+                    schema_version = int(connection.execute(
+                        "SELECT value FROM settings WHERE key='schema_version'").fetchone()[0])
                     artifacts = [dict(row) for row in connection.execute(
-                        "SELECT a.artifact_hash, a.target_replicas, SUM(CASE WHEN n.last_heartbeat>? THEN 1 ELSE 0 END) AS replicas, COUNT(r.node_name) AS indexed_replicas "
-                        "FROM artifacts a LEFT JOIN replicas r USING(artifact_hash) LEFT JOIN nodes n USING(node_name) "
-                        "WHERE EXISTS (SELECT 1 FROM runs root WHERE root.artifact_hash=a.artifact_hash AND root.parent_run_id IS NULL) "
-                        "GROUP BY a.artifact_hash ORDER BY a.created DESC LIMIT 200", (time.time()-lease_seconds,),
+                        "WITH root_artifacts AS (SELECT DISTINCT artifact_hash FROM runs "
+                        "WHERE parent_run_id IS NULL AND artifact_hash IS NOT NULL) "
+                        "SELECT a.artifact_hash,a.target_replicas,"
+                        "SUM(CASE WHEN n.last_heartbeat>? THEN 1 ELSE 0 END) AS replicas,"
+                        "COUNT(r.node_name) AS indexed_replicas FROM root_artifacts root "
+                        "JOIN artifacts a USING(artifact_hash) LEFT JOIN replicas r USING(artifact_hash) "
+                        "LEFT JOIN nodes n USING(node_name) GROUP BY a.artifact_hash "
+                        "ORDER BY a.created DESC LIMIT 200", (time.time()-lease_seconds,),
                     )]
+                    annotate_idle_reasons(connection, nodes, runs, campaign,
+                                          lease_seconds, time.time())
 
                 # Keep deliberate stopping, solver liveness, and stalled work distinct.
                 now = time.time()
@@ -346,6 +472,7 @@ def make_handler(
                         "checkpoint_seconds": checkpoint_seconds,
                         "lease_seconds": lease_seconds,
                         "checkpoint_keep": checkpoint_keep,
+                        "schema_version": schema_version,
                         "scheduler": scheduler.snapshot(),
                         "runs": runs,
                         "nodes": nodes,
@@ -439,11 +566,63 @@ def make_handler(
 
                     return {"campaign_state": state}
 
+                if route == "/v1/run-command":
+                    run_id = request["run_id"]
+                    action = request["action"]
+                    row = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                    if row is None:
+                        raise ValueError("unknown run")
+                    if action == "reprioritize":
+                        priority = request.get("priority")
+                        if type(priority) is not int:
+                            raise ValueError("priority must be an integer")
+                        connection.execute("UPDATE runs SET priority=? WHERE run_id=?", (priority, run_id))
+                        return {"run_id": run_id, "state": row["state"], "priority": priority}
+                    if action not in {"cancel", "pause", "resume"}:
+                        raise ValueError("action must be cancel, pause, resume, or reprioritize")
+                    if action == "resume":
+                        if row["state"] != "paused":
+                            raise ValueError("only a paused run can be resumed")
+                        specification = json.loads(row["specification"])
+                        state, phase = adapters.get(specification).resume_transition(
+                            connection, row, specification, now,
+                        )
+                        if state not in {"queued", "waiting"} or not isinstance(phase, str):
+                            raise ValueError("adapter returned invalid resume transition")
+                        connection.execute(
+                            "UPDATE runs SET state=?, control_state='running', stop_requested=0, "
+                            "progress_phase=?, progress_message='resumed' WHERE run_id=?",
+                            (state, phase, run_id),
+                        )
+                        return {"run_id": run_id, "state": state}
+                    target = "cancelled" if action == "cancel" else "paused"
+                    if row["state"] in {"complete", "failed", "cancelled"}:
+                        raise ValueError("terminal runs cannot be controlled")
+                    if row["state"] == "running":
+                        connection.execute(
+                            "UPDATE runs SET control_state=?,stop_requested=1,progress_message=? WHERE run_id=?",
+                            (target, f"{action} requested", run_id),
+                        )
+                        return {"run_id": run_id, "state": "stopping", "target_state": target}
+                    connection.execute(
+                        "UPDATE runs SET state=?,control_state=?,finished=?,progress_phase=?,progress_message=? WHERE run_id=?",
+                        (target, target, now if target == "cancelled" else None, target, target, run_id),
+                    )
+                    return {"run_id": run_id, "state": target}
+
                 if route in {"/v1/register", "/v1/heartbeat"}:
                     existing = connection.execute(
                         "SELECT * FROM nodes WHERE node_name=?", (request["node_name"],),
                     ).fetchone()
                     session_id = str(request.get("session_id", ""))
+                    storage_generation = str(request.get("storage_generation", ""))
+                    if storage_generation:
+                        try:
+                            uuid.UUID(storage_generation)
+                        except ValueError as error:
+                            raise ValueError("invalid storage generation") from error
+                    same_storage = bool(existing is not None and storage_generation and
+                                        existing["storage_generation"] == storage_generation)
 
                     if route == "/v1/heartbeat":
                         recovery.require_node(connection, request)
@@ -473,16 +652,84 @@ def make_handler(
                         connection.execute("DELETE FROM replicas WHERE node_name=?", (request["node_name"],))
                         connection.execute("DELETE FROM checkpoint_replicas WHERE node_name=?", (request["node_name"],))
 
+                    validation_mode = (existing["storage_validation_mode"]
+                                       if route == "/v1/heartbeat" and existing is not None
+                                       else "metadata" if same_storage else "hash"
+                                       if existing is not None and existing["session_id"] != session_id
+                                       else "verified")
+                    if validation_mode != "verified" and connection.execute(
+                            "SELECT 1 FROM node_revalidation WHERE node_name=? LIMIT 1",
+                            (request["node_name"],)).fetchone() is None:
+                        validation_mode = "verified"
+                    slots = normalized_slots(
+                        request.get("slots") if route == "/v1/register" else
+                        json.loads(existing["slots_json"] or "[]") if existing is not None else None,
+                        request.get("cpu_set", existing["cpu_set"] if existing is not None else ""),
+                    )
                     connection.execute(
-                        "INSERT INTO nodes(node_name,address,cpu_set,storage_root,last_heartbeat,state,session_id,compute_enabled) "
-                        "VALUES(?,?,?,?,?,'healthy',?,?) ON CONFLICT(node_name) DO UPDATE SET "
+                        "INSERT INTO nodes(node_name,address,cpu_set,storage_root,last_heartbeat,state,session_id,compute_enabled,memory_bytes,runtime_version,physical_core_count,storage_generation,storage_validation_mode,slots_json) "
+                        "VALUES(?,?,?,?,?,'healthy',?,?,?,?,?,?,?,?) ON CONFLICT(node_name) DO UPDATE SET "
                         "address=excluded.address,cpu_set=excluded.cpu_set,storage_root=excluded.storage_root, "
                         "last_heartbeat=excluded.last_heartbeat,state='healthy',session_id=excluded.session_id, "
-                        "compute_enabled=excluded.compute_enabled",
+                        "compute_enabled=excluded.compute_enabled,memory_bytes=excluded.memory_bytes,"
+                        "runtime_version=excluded.runtime_version,physical_core_count=excluded.physical_core_count,"
+                        "storage_generation=excluded.storage_generation,storage_validation_mode=excluded.storage_validation_mode,"
+                        "slots_json=excluded.slots_json",
                         (request["node_name"], request.get("address", ""), request.get("cpu_set", ""),
-                         request.get("storage_root", ""), now, session_id, int(not request.get("storage_only", False))),
+                         request.get("storage_root", ""), now, session_id,
+                         int(not request.get("storage_only", False)),
+                         max(0, int(request.get(
+                             "memory_bytes", existing["memory_bytes"] if existing is not None else 0))),
+                         str(request.get(
+                             "runtime_version", existing["runtime_version"] if existing is not None else ""))[:128],
+                         max(0, int(request.get(
+                             "physical_core_count",
+                             existing["physical_core_count"] if existing is not None else 0))),
+                         storage_generation, validation_mode, json.dumps(slots, separators=(",", ":"))),
                     )
-                    return {"ok": True, "heartbeat_seconds": min(10.0, lease_seconds / 3)}
+                    return {"ok": True, "heartbeat_seconds": min(10.0, lease_seconds / 3),
+                            "storage_validation_mode": validation_mode}
+
+                if route == "/v1/revalidation-batch":
+                    node = recovery.require_node(connection, request)
+                    records = recovery.revalidation_batch(connection, node["node_name"])
+                    return {"mode": node["storage_validation_mode"], "records": records}
+
+                if route == "/v1/revalidation-batch-done":
+                    node = recovery.require_node(connection, request)
+                    records = request.get("records")
+                    if not isinstance(records, list) or len(records) > 512:
+                        raise ValueError("invalid revalidation batch")
+                    for record in records:
+                        kind, digest, valid = record.get("kind"), record.get("digest"), record.get("valid")
+                        if kind not in {"artifact", "checkpoint"} or not valid_digest(digest) or type(valid) is not bool:
+                            raise ValueError("invalid revalidation result")
+                        pending = connection.execute(
+                            "SELECT 1 FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?",
+                            (node["node_name"], kind, digest),
+                        ).fetchone()
+                        if pending is None:
+                            raise ValueError("revalidation result is not pending")
+                        if valid and kind == "artifact":
+                            connection.execute(
+                                "INSERT OR REPLACE INTO replicas(artifact_hash,node_name,location,created) "
+                                "VALUES(?,?,?,?)", (digest, node["node_name"],
+                                f"{node['address'].rstrip('/')}/blobs/{digest}", now))
+                        elif valid:
+                            recovery.acknowledge(connection, digest, node["node_name"], now)
+                        connection.execute(
+                            "DELETE FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?",
+                            (node["node_name"], kind, digest),
+                        )
+                    remaining = connection.execute(
+                        "SELECT COUNT(*) FROM node_revalidation WHERE node_name=?",
+                        (node["node_name"],),
+                    ).fetchone()[0]
+                    if not remaining:
+                        connection.execute(
+                            "UPDATE nodes SET storage_validation_mode='verified' WHERE node_name=?",
+                            (node["node_name"],))
+                    return {"ok": True, "remaining": remaining}
 
                 if route == "/v1/gc-plan":
                     node = recovery.require_node(connection, request)
@@ -573,8 +820,19 @@ def make_handler(
                     if not node["compute_enabled"]:
                         return {"job": None, "campaign_state": "storage-only"}
 
+                    slots = normalized_slots(json.loads(node["slots_json"] or "[]"),
+                                             node["cpu_set"])
+                    requested_slot = request.get("slot_id", 0)
+                    if type(requested_slot) is not int:
+                        raise ValueError("invalid slot identity")
+                    slot = next((item for item in slots
+                                 if item["slot_id"] == requested_slot), None)
+                    if slot is None:
+                        raise ValueError("unregistered slot identity")
                     if connection.execute(
-                        "SELECT 1 FROM runs WHERE node_name=? AND state='running'", (node["node_name"],),
+                        "SELECT 1 FROM runs WHERE node_name=? AND state='running' "
+                        "AND (slot_id=? OR exclusive_host=1)",
+                        (node["node_name"], requested_slot),
                     ).fetchone() is not None or connection.execute(
                         "SELECT 1 FROM node_reservations WHERE node_name=?", (node["node_name"],),
                     ).fetchone() is not None:
@@ -587,7 +845,7 @@ def make_handler(
                         return {"job": None, "campaign_state": campaign}
 
                     candidates = connection.execute(
-                        "SELECT run_id, specification, from_scratch, lease_attempt, engine_failures FROM runs "
+                        "SELECT run_id, specification, priority, from_scratch, lease_attempt, engine_failures FROM runs "
                         "WHERE state='queued' AND NOT EXISTS (SELECT 1 FROM lease_history h WHERE h.run_id=runs.run_id "
                         "AND h.node_name=? AND h.outcome='engine retry' AND h.finished>?) "
                         "ORDER BY priority DESC, estimated_seconds ASC, created ASC, run_id ASC LIMIT 100",
@@ -595,22 +853,72 @@ def make_handler(
                     ).fetchall()
                     row = None
                     selected = []
+                    live_compute = connection.execute(
+                        "SELECT COUNT(*) FROM nodes WHERE compute_enabled=1 AND last_heartbeat>?",
+                        (now-lease_seconds,),
+                    ).fetchone()[0]
                     for candidate in candidates:
                         specification = json.loads(candidate["specification"])
-                        required = adapters.get(specification).required_nodes(specification)
-                        if type(required) is not int or not 1 <= required <= 8:
+                        adapter = adapters.get(specification)
+                        required = adapter.required_nodes(specification)
+                        if type(required) is not int or not 1 <= required <= 256:
                             raise ValueError("adapter requested invalid simultaneous node count")
-                        selected = connection.execute(
-                            "SELECT n.node_name,n.address,n.cpu_set FROM nodes n "
+                        resources = ResourceRequest.from_adapter(
+                            adapter.resource_requirements(specification))
+                        sharing = required == 1 and bool(adapter.allows_host_sharing(specification))
+                        active_on_host = connection.execute(
+                            "SELECT COUNT(*) AS count,COALESCE(SUM(reserved_memory_bytes),0) AS memory "
+                            "FROM runs WHERE node_name=? AND state='running'",
+                            (node["node_name"],),
+                        ).fetchone()
+                        if not sharing and active_on_host["count"]:
+                            continue
+                        participant = dict(node)
+                        participant["cpu_set"] = node["cpu_set"]
+                        if sharing and node["cpu_set"]:
+                            # Slots identify supervisor loops, not fixed one-core
+                            # solver allocations. Fence the entire granted team in
+                            # this transaction so no two leases overlap.
+                            occupied = {cpu for active in connection.execute(
+                                "SELECT assigned_cpu_set FROM runs "
+                                "WHERE node_name=? AND state='running'",
+                                (node["node_name"],))
+                                for cpu in (active[0] or node["cpu_set"]).split(",")}
+                            free = [cpu for cpu in node["cpu_set"].split(",")
+                                    if cpu not in occupied]
+                            width = adapter.cpu_width(specification, len(free))
+                            if type(width) is not int or not 0 <= width <= len(free):
+                                raise ValueError("adapter requested invalid CPU width")
+                            if width < resources.min_cpu_count:
+                                continue
+                            participant["cpu_set"] = ",".join(free[:width])
+                        required_memory = resources.coordinator_memory_bytes
+                        available_memory = max(0, int(node["memory_bytes"]) - 2 * 1024**3 -
+                                               int(active_on_host["memory"]))
+                        if (not resource_fits(participant, resources, "coordinator") or
+                                (int(node["memory_bytes"]) and required_memory > available_memory)):
+                            continue
+                        available = connection.execute(
+                            "SELECT n.node_name,n.address,n.cpu_set,n.memory_bytes FROM nodes n "
                             "WHERE n.compute_enabled=1 AND n.last_heartbeat>? AND n.node_name<>? "
                             "AND NOT EXISTS (SELECT 1 FROM runs active WHERE active.node_name=n.node_name AND active.state='running') "
                             "AND NOT EXISTS (SELECT 1 FROM node_reservations reserve WHERE reserve.node_name=n.node_name) "
-                            "ORDER BY n.node_name LIMIT ?",
-                            (now-lease_seconds, node["node_name"], required-1),
+                            "ORDER BY n.node_name",
+                            (now-lease_seconds, node["node_name"]),
                         ).fetchall() if required > 1 else []
+                        selected = [partner for partner in available
+                                    if resource_fits(partner, resources, "worker")][:required-1]
                         if len(selected) == required-1:
                             row = candidate
                             break
+                        # Let idle nodes accumulate for the highest-priority runnable
+                        # group instead of immediately consuming lower-priority
+                        # single-node work. Without this barrier a continually fed DP
+                        # queue can starve a distributed matching forever. An impossible
+                        # manual request must not block the campaign.
+                        if (required > 1 and required <= live_compute and
+                                candidate["priority"] == candidates[0]["priority"]):
+                            return {"job": None, "campaign_state": campaign}
                     if row is None:
                         return {"job": None, "campaign_state": campaign}
 
@@ -620,9 +928,12 @@ def make_handler(
                         "stop_requested=0, progress_phase='starting', last_solver_heartbeat=NULL, "
                         "last_progress_at=NULL, last_checkpoint_at=NULL, progress_done=0, "
                         "progress_checkpoint_done=0, lease_expires=?, lease_attempt=lease_attempt+1, "
-                        "restored_hash=NULL, restored_done=0, error=NULL "
+                        "restored_hash=NULL, restored_done=0, error=NULL,slot_id=?,"
+                        "assigned_cpu_set=?,reserved_memory_bytes=?,exclusive_host=? "
                         "WHERE run_id=? AND state='queued'",
-                        (now, request["node_name"], token, now + lease_seconds, row["run_id"]),
+                        (now, request["node_name"], token, now + lease_seconds,
+                         requested_slot, participant["cpu_set"], required_memory,
+                         int(not sharing), row["run_id"]),
                     )
                     connection.execute(
                         "INSERT INTO lease_history(lease_token,run_id,node_name,attempt,started) VALUES(?,?,?,?,?)",
@@ -642,6 +953,8 @@ def make_handler(
                             "lease_seconds": lease_seconds,
                             "max_checkpoint_bytes": int(recovery.setting(connection, "max_checkpoint_bytes")),
                             "lease_token": token,
+                            "slot_id": requested_slot,
+                            "assigned_cpu_set": participant["cpu_set"],
                             "reserved_workers": [dict(partner) for partner in selected],
                             "specification": json.loads(row["specification"]),
                             "from_scratch": bool(row["from_scratch"]),
@@ -732,6 +1045,14 @@ def make_handler(
                             (row["run_id"], row["lease_token"], node_name, component, shard_index,
                              cpu_microseconds, peak_rss_bytes, now),
                         )
+                        connection.execute(
+                            "INSERT INTO resource_usage_samples(run_id,lease_token,node_name,component,"
+                            "shard_index,cpu_microseconds,rss_bytes,recorded) VALUES(?,?,?,?,?,?,?,?)",
+                            (row["run_id"], row["lease_token"], node_name, component, shard_index,
+                             cpu_microseconds, peak_rss_bytes, now),
+                        )
+                        connection.execute(
+                            "DELETE FROM resource_usage_samples WHERE recorded<?", (now - 7 * 86400,))
                         return {"ok": True}
 
                     if adapters.input_route(route):
@@ -790,11 +1111,24 @@ def make_handler(
                         if not 0 <= checkpoint_done <= done <= total:
                             raise ValueError("invalid progress or checkpoint counts")
 
+                        core = {"run_id", "lease_token", "event", "done", "total",
+                                "checkpoint_done", "message", "phase", "units",
+                                "heartbeat"}
+                        details = {}
+                        for key, value in request.items():
+                            if key in core:
+                                continue
+                            if (not isinstance(key, str) or len(details) >= 32 or
+                                    not isinstance(value, (str, int, float, bool, type(None)))):
+                                continue
+                            details[key[:64]] = value[:256] if isinstance(value, str) else value
+                        encoded_details = canonical_json(details).decode("utf-8")
+
                         advanced = done > row["progress_done"]
                         checkpoint_advanced = checkpoint_done > row["progress_checkpoint_done"]
                         connection.execute(
                             "UPDATE runs SET progress_done=?, progress_total=?, progress_message=?, "
-                            "progress_checkpoint_done=?, progress_phase=?, progress_units=?, "
+                            "progress_checkpoint_done=?, progress_phase=?, progress_units=?, progress_details=?, "
                             "last_solver_heartbeat=?, last_progress_at=?, last_checkpoint_at=? WHERE run_id=?",
                             (
                                 done,
@@ -803,6 +1137,7 @@ def make_handler(
                                 checkpoint_done,
                                 str(request.get("phase", "computing")),
                                 str(request.get("units", "steps")),
+                                encoded_details,
                                 now,
                                 now if advanced or row["last_progress_at"] is None else row["last_progress_at"],
                                 now if checkpoint_advanced else row["last_checkpoint_at"],
@@ -844,21 +1179,33 @@ def make_handler(
                             ),
                         )
                     elif route == "/v1/fail":
+                        failure_kind = request.get("failure_kind", "engine_failure")
+                        if failure_kind not in {"engine_failure", "stop_failure"}:
+                            raise ValueError("invalid typed failure outcome")
                         connection.execute(
-                            "UPDATE runs SET state='failed', finished=?, error=?, progress_phase='failed' WHERE run_id=?",
-                            (now, str(request.get("error", "unknown failure")), request["run_id"]),
+                            "UPDATE runs SET state='failed', finished=?, error=?, failure_kind=?, "
+                            "progress_phase='failed' WHERE run_id=?",
+                            (now, str(request.get("error", "unknown failure")), failure_kind,
+                             request["run_id"]),
                         )
                     else:
+                        reason = request.get("reason", "intentional_stop")
+                        if reason not in {"intentional_stop", "engine_failure"}:
+                            raise ValueError("invalid typed requeue outcome")
+                        target_state = row["control_state"] if row["control_state"] in {"paused", "cancelled"} else "queued"
                         connection.execute(
-                            "UPDATE runs SET state='queued', node_name=NULL, lease_token=NULL, "
-                            "progress_message='stopped; checkpoint retained', progress_phase='stopped' WHERE run_id=?",
-                            (request["run_id"],),
+                            "UPDATE runs SET state=?, node_name=NULL, lease_token=NULL, "
+                            "finished=?, progress_message='stopped; checkpoint retained', progress_phase=? WHERE run_id=?",
+                            (target_state, now if target_state == "cancelled" else None,
+                             target_state if target_state != "queued" else "stopped", request["run_id"]),
                         )
 
                     outcome = route.rsplit("/", 1)[-1]
-                    if route == "/v1/requeue" and request.get("engine_failure", False):
+                    if route == "/v1/requeue" and request.get("reason") == "engine_failure":
                         connection.execute("UPDATE runs SET engine_failures=engine_failures+1 WHERE run_id=?", (row["run_id"],))
                         outcome = "engine retry"
+                    elif route == "/v1/requeue":
+                        outcome = request.get("reason", "intentional_stop")
                     connection.execute("DELETE FROM node_reservations WHERE lease_token=?", (row["lease_token"],))
                     connection.execute(
                         "UPDATE lease_history SET finished=?,outcome=? WHERE lease_token=?",

@@ -91,6 +91,8 @@ def main() -> int:
     threads = min(2, len(os.sched_getaffinity(0)))
     for p, r, side in ((2, 5, 3), (3, 3, 4), (5, 3, 7), (7, 5, 128)):
         compare(p, r, side, threads)
+    # Include narrow diagonals with fewer cells than pinned workers.
+    compare(5, 3, 4, min(8, len(os.sched_getaffinity(0))))
     print("bounded tile checks passed")
     return 0
 

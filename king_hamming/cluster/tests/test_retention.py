@@ -212,6 +212,19 @@ class RetentionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 retention.initialize(connection, 1)
 
+    def test_gc_defers_while_replacement_proves_storage(self) -> None:
+        """An inventory scan and deletion never race on the replacement agent's disk."""
+        for cursor in range(1, 7):
+            self.snapshot(cursor)
+        with leader.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO node_revalidation(node_name,kind,digest,created) "
+                "VALUES('a','artifact',?,?)", ("0" * 64, time.time()))
+        plan = self.plan()
+        self.assertEqual(plan["blob_hashes"], [])
+        self.assertEqual(plan["deferred"], "storage revalidation")
+        self.assertEqual(plan["revalidation_pending"], 1)
+
 
 # No-argument execution is descriptive and never performs computation or SSH.
 if __name__ == "__main__":

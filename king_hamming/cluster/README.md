@@ -6,6 +6,7 @@ uses the existing keys. See [DESIGN.md](DESIGN.md) for scheduling and recovery. 
 commands live in [dp_solver/](../dp_solver/README.md). Matching commands
 live in [matching_solver/](../matching_solver/README.md); legacy launcher paths
 below remain compatibility commands.
+To attach a different trusted solver, see [ADAPTER_GUIDE.md](ADAPTER_GUIDE.md).
 
 ## Build and check
 
@@ -86,6 +87,19 @@ binary output, set `"artifact_format": "KHD1"` in a distributed specification's
 `arguments`. Status includes artifact download URLs for manually submitted runs;
 launcher collection selects only runs listed in its manifest.
 
+Run-scoped controls do not stop unrelated work:
+
+```sh
+python3 king_hamming/cluster/kh.py --leader http://127.0.0.1:8041 pause-run RUN_ID
+python3 king_hamming/cluster/kh.py --leader http://127.0.0.1:8041 resume-run RUN_ID
+python3 king_hamming/cluster/kh.py --leader http://127.0.0.1:8041 reprioritize RUN_ID 20
+python3 king_hamming/cluster/kh.py --leader http://127.0.0.1:8041 cancel RUN_ID
+```
+
+A running pause or cancellation is latched through its current lease; the
+supervisor stops that attempt and preserves its latest committed checkpoint.
+Queued runs change state immediately.
+
 ## Submit a matching attempt
 
 A matching job consumes a saved KHD1 split and pins one primitive polynomial.
@@ -100,9 +114,9 @@ python3 king_hamming/matching_solver/submit.py \
 python3 king_hamming/cluster/kh.py --leader http://127.0.0.1:8041 status
 ```
 
-Add `--distributed --workers N` to reserve 2-8 agents for one matching;
-`--threads C` starts one multithreaded C shard per agent (up to its assigned
-CPUs). Python handles leases and stream setup; the matching algorithm,
+Add `--distributed --workers N` to reserve 2-9 agents for one matching;
+`--threads C` caps each agent's shard; every node uses its actual assigned
+CPUs up to that ceiling. Python handles leases and stream setup; the matching algorithm,
 checkpoints, and certificate bytes stay in C. This requires a freshly deployed bundle.
 The run's artifact URL serves a verified KHM1 matching or exact Hall
 obstruction. The status endpoint shows completed requests, committed
