@@ -32,6 +32,8 @@ DEFAULTS = {
     "max_dp_roots": 8, "target_ready_dp_tiles": 18,
     "max_matching_attempts": 3, "matching_retry_seconds": 300,
     "max_state_bytes": 16 * 1024**3, "max_visits": 30_000_000_000_000,
+    "frontier_max_prime": 19, "frontier_max_exponent": 11,
+    "frontier_max_visits": 200_000_000_000_000,
     "dp_threads": 16, "tile_side": 512, "max_tile_bytes": 2 * 1024**3,
     "matching_workers": 9, "matching_threads": 16,
     "matching_small_workers": 2, "matching_medium_workers": 4,
@@ -427,24 +429,55 @@ def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: d
         manifest["entries"].append({"specification": specification, **result})
         save(state / "manifest.json", manifest)
         added += 1
-    for candidate in scheduling.campaign(settings["max_state_bytes"], settings["max_visits"],
-                                         settings["dp_threads"], settings["tile_side"]):
+    # Count only fresh, measured worker storage. Reserve the uncompressed
+    # remaining bytes of active roots at three replica copies; actual gzip blobs
+    # may be smaller, but an optimistic compression ratio is unsafe admission.
+    storage = [max(0, int(node.get("storage_free_bytes") or 0) - settings["minimum_free_bytes"])
+               for node in healthy]
+    projected = 0
+    for entry in manifest["entries"]:
+        run = runs.get(entry["run_id"])
+        if run is None or run["state"] in TERMINAL:
+            continue
+        estimate = scheduling.dp_estimate(entry["specification"])
+        remaining = max(0, int(run.get("progress_total") or 0) - int(run.get("progress_done") or 0))
+        total = max(1, int(run.get("progress_total") or 0))
+        projected += (3 * estimate["state_bytes"] * remaining + total - 1) // total
+    if storage:
+        per_host_reserved = (projected + len(storage) - 1) // len(storage)
+        storage = [max(0, free - per_host_reserved) for free in storage]
+    disk_available = sum(storage)
+    pipeline["demand"]["worker_disk_available_bytes"] = disk_available
+    disk_blocked = []
+    for candidate in scheduling.regional_campaign(
+            settings["frontier_max_prime"], settings["frontier_max_exponent"],
+            settings["frontier_max_visits"], settings["dp_threads"], settings["max_tile_bytes"]):
         if added >= needed:
             break
         arguments = candidate["arguments"]
         field = (arguments["p"], arguments["r"])
         if field in known:
             continue
-        candidate["program"] = "dp_distributed"
-        arguments.update(max_tile_bytes=settings["max_tile_bytes"], artifact_format="KHD1")
+        disk_need = 3 * scheduling.dp_estimate(candidate)["state_bytes"]
+        balanced_need = (disk_need + len(storage) - 1) // len(storage) if storage else disk_need
+        if (len(storage) < 3 or
+                min(storage) < max(settings["max_tile_bytes"], balanced_need) or
+                disk_need > disk_available):
+            if len(disk_blocked) < 8:
+                disk_blocked.append(f"{field[0]}^{field[1]}")
+            continue
         result = request(manifest["leader"], "/v1/enqueue", {"specification": candidate})
         manifest["entries"].append({"specification": candidate, **result})
         save(state / "manifest.json", manifest)
         known.add(field)
+        storage = [free - balanced_need for free in storage]
+        disk_available = sum(storage)
         added += 1
-        if added >= needed:
-            break
-    pipeline["feeder_state"] = "running" if added or active else "frontier exhausted"
+    pipeline["demand"]["worker_disk_available_bytes"] = disk_available
+    pipeline["demand"]["disk_blocked_fields"] = disk_blocked
+    pipeline["feeder_state"] = ("running" if added or active else
+                                "waiting for worker disk" if disk_blocked else
+                                "regional frontier exhausted")
     return added
 
 
@@ -501,7 +534,8 @@ def validate_settings(settings: dict, policy_name="legacy") -> None:
     positive = ("target_dp_roots", "max_dp_roots", "target_ready_dp_tiles",
                 "max_ready_fields", "max_dp_attempts",
                 "max_matching_attempts", "matching_retry_seconds",
-                "max_state_bytes", "max_visits",
+                "max_state_bytes", "max_visits", "frontier_max_prime",
+                "frontier_max_exponent", "frontier_max_visits",
                 "dp_threads", "tile_side", "max_tile_bytes", "matching_workers",
                 "matching_small_workers", "matching_medium_workers",
                 "matching_small_requests", "matching_medium_requests",
@@ -511,6 +545,11 @@ def validate_settings(settings: dict, policy_name="legacy") -> None:
         raise ValueError("pipeline limits must be positive integers")
     if settings["target_dp_roots"] > settings["max_dp_roots"]:
         raise ValueError("target DP roots exceed the hard root cap")
+    if not (2 <= settings["frontier_max_prime"] <= 1621 and
+            3 <= settings["frontier_max_exponent"] <= 31 and
+            settings["frontier_max_exponent"] % 2 == 1 and
+            settings["frontier_max_visits"] <= 2**64 - 1):
+        raise ValueError("invalid regional DP frontier")
     if not 2 <= settings["matching_workers"] <= 256:
         raise ValueError("distributed matching requires 2-256 workers")
     if not 2 <= settings["matching_small_workers"] <= 256 or \

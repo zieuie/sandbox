@@ -26,9 +26,20 @@ CREATE TABLE IF NOT EXISTS distributed_tiles (
 );
 CREATE INDEX IF NOT EXISTS distributed_children ON distributed_tiles(child_run_id);
 CREATE INDEX IF NOT EXISTS distributed_attempts ON runs(calculation_id,created);
+CREATE TABLE IF NOT EXISTS distributed_tile_retries (
+    parent_run_id TEXT NOT NULL,
+    row INTEGER NOT NULL,
+    column INTEGER NOT NULL,
+    failures INTEGER NOT NULL,
+    next_retry REAL NOT NULL,
+    PRIMARY KEY(parent_run_id,row,column)
+);
 """
 
 REUSE_BATCH = 128
+TILE_RETRY_LIMIT = 3
+TILE_RETRY_BASE_SECONDS = 30
+TILE_RETRY_MAX_SECONDS = 300
 
 
 # Store dependency ownership separately from ordinary run and lease history.
@@ -188,16 +199,48 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
         done = sum((tile(p,r,side,*key).value_bytes//8) for key in durable)
         connection.execute("UPDATE runs SET progress_done=?,progress_checkpoint_done=?,last_progress_at=CASE WHEN progress_done<? THEN ? ELSE last_progress_at END,progress_message=? WHERE run_id=?",
                            (done, done, done, now, f"{len(durable)}/{len(rows)} replicated tiles", parent["run_id"]))
-        failed = next((row for row in rows if row["state"] == "failed"), None)
-        if failed is not None:
+        exhausted = None
+        for row in rows:
+            if row["state"] != "failed":
+                continue
+            key = (parent["run_id"], row["row"], row["column"])
+            prior = connection.execute(
+                "SELECT failures FROM distributed_tile_retries WHERE parent_run_id=? AND row=? AND column=?",
+                key).fetchone()
+            failures = (prior[0] if prior else 0) + 1
+            if failures > TILE_RETRY_LIMIT:
+                exhausted = row
+                break
+            delay = min(TILE_RETRY_MAX_SECONDS, TILE_RETRY_BASE_SECONDS * 2 ** (failures - 1))
+            connection.execute(
+                "INSERT INTO distributed_tile_retries(parent_run_id,row,column,failures,next_retry) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(parent_run_id,row,column) DO UPDATE SET "
+                "failures=excluded.failures,next_retry=excluded.next_retry",
+                (*key, failures, now + delay))
+            connection.execute(
+                "UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? AND row=? AND column=? "
+                "AND child_run_id=?", (*key, row["child_run_id"]))
+        if exhausted is not None:
             connection.execute("UPDATE runs SET state='failed',finished=?,error=?,progress_phase='failed' WHERE run_id=?",
-                               (now, f"tile {failed['row']},{failed['column']}: {failed['error']}", parent["run_id"]))
+                               (now, f"tile {exhausted['row']},{exhausted['column']} failed repeatedly: "
+                                f"{exhausted['error']}", parent["run_id"]))
             continue
+        connection.execute(
+            "DELETE FROM distributed_tile_retries WHERE parent_run_id=? AND EXISTS "
+            "(SELECT 1 FROM distributed_tiles t JOIN runs child ON child.run_id=t.child_run_id "
+            "WHERE t.parent_run_id=distributed_tile_retries.parent_run_id "
+            "AND t.row=distributed_tile_retries.row AND t.column=distributed_tile_retries.column "
+            "AND child.state='complete')", (parent["run_id"],))
         if len(durable) == len(rows):
             connection.execute("UPDATE runs SET state='queued',progress_phase='reconstructing' WHERE run_id=?", (parent["run_id"],))
             continue
         for row in rows:
             if row["child_run_id"]:
+                continue
+            retry = connection.execute(
+                "SELECT next_retry FROM distributed_tile_retries WHERE parent_run_id=? AND row=? AND column=?",
+                (parent["run_id"], row["row"], row["column"])).fetchone()
+            if retry is not None and now < retry[0]:
                 continue
             target = tile(p,r,side,row["row"],row["column"])
             if any((item.row,item.column) not in durable for item in dependencies(p,r,side,target)):

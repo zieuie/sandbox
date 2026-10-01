@@ -23,6 +23,7 @@ check:
 	python3 tests/test_tiles.py --run
 	python3 tests/test_tile_driver.py --run
 	python3 tests/test_distributed.py --run
+	python3 tests/test_tile_reuse.py
 
 clean:
 	rm -rf __pycache__ tests/__pycache__ state

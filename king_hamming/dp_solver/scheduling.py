@@ -80,3 +80,51 @@ def campaign(
 
     for _, _, _, _, specification in sorted(candidates):
         yield specification
+
+
+def regional_campaign(max_prime: int, max_exponent: int, max_visits: int,
+                      threads: int, max_tile_bytes: int, max_tiles: int = 10000
+                      ) -> Iterator[dict[str, Any]]:
+    """Visit missing-table candidates by expanding diagonals, with a fitting tile layout.
+
+    Disk capacity and already submitted fields are checked by the feeder. This
+    function enforces the field format, visit budget, and real per-tile memory.
+    """
+    from .tiles import memory_bytes, tile
+
+    if (min(max_prime, max_exponent, max_visits, threads, max_tile_bytes, max_tiles) <= 0 or
+            max_prime > 1621 or max_exponent > 31 or max_exponent < 3 or
+            max_exponent % 2 == 0 or max_visits > 2**64 - 1):
+        raise ValueError("invalid regional DP frontier")
+    primes = [p for p in range(2, max_prime + 1) if is_prime(p)]
+    exponents = list(range(3, max_exponent + 1, 2))
+    candidates = []
+    for pi, p in enumerate(primes):
+        for ri, r in enumerate(exponents):
+            try:
+                estimate = dp_estimate({"arguments": {"p": p, "r": r}})
+            except ValueError:
+                continue
+            if estimate["raw_visits"] > max_visits:
+                continue
+            side = None
+            for candidate_side in (512, 1024, 2048, 4096, 8192, 16384):
+                count = (estimate["budget"] + candidate_side - 1) // candidate_side
+                if count * count > max_tiles:
+                    continue
+                corners = {max(0, count - 2), count - 1}
+                peak = max(memory_bytes(p, tile(p, r, candidate_side, row, column), threads)
+                           for row in corners for column in corners)
+                if peak <= max_tile_bytes:
+                    side = candidate_side
+                    break
+            if side is None:
+                continue
+            specification = {"program": "dp_distributed", "arguments": {
+                "p": p, "r": r, "threads": threads, "tile_side": side,
+                "max_state_bytes": estimate["state_bytes"],
+                "max_visits": max_visits, "max_tile_bytes": max_tile_bytes,
+                "artifact_format": "KHD1"}}
+            candidates.append((pi + ri, max(pi, ri), ri, estimate["raw_visits"], specification))
+    for _, _, _, _, specification in sorted(candidates, key=lambda row: row[:-1]):
+        yield specification

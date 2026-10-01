@@ -100,6 +100,52 @@ class QueueTests(unittest.TestCase):
             self.assertIsNone(handler.dispatch_post("/v1/lease", {
                 "node_name": "slotted", "slot_id": 2})["job"])
 
+    def test_reconstruction_drains_one_host_before_more_tiles(self) -> None:
+        """Ready reconstruction outranks tiles, without idling other hosts."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            for name in ("a", "b"):
+                handler.dispatch_post("/v1/register", {
+                    "node_name": name, "cpu_set": "0,1",
+                    "memory_bytes": 10 * 1024**3,
+                    "slots": [{"slot_id": index, "cpu_set": str(index)}
+                              for index in range(2)],
+                })
+            roots = [handler.dispatch_post("/v1/enqueue", {"specification": {
+                "program": "dp_distributed", "arguments": {
+                    "p": p, "r": 3, "tile_side": 4, "threads": 1, "max_cpus": 1,
+                    "max_tile_bytes": 2 * 1024**3,
+                },
+            }})["run_id"] for p in (3, 5, 7)]
+            first = handler.dispatch_post("/v1/lease", {
+                "node_name": "a", "slot_id": 0})["job"]
+            second = handler.dispatch_post("/v1/lease", {
+                "node_name": "b", "slot_id": 0})["job"]
+            self.assertEqual(first["specification"]["program"], "dp_tile")
+            self.assertEqual(second["specification"]["program"], "dp_tile")
+            with leader.connect(database) as connection:
+                connection.execute(
+                    "UPDATE runs SET state='queued',progress_phase='reconstructing' "
+                    "WHERE run_id=?", (roots[0],))
+                connection.execute(
+                    "UPDATE runs SET priority=100 WHERE parent_run_id=? AND state='queued'",
+                    (roots[2],))
+            # Host a drains for reconstruction; host b continues high-priority tiles.
+            self.assertIsNone(handler.dispatch_post("/v1/lease", {
+                "node_name": "a", "slot_id": 1})["job"])
+            other = handler.dispatch_post("/v1/lease", {
+                "node_name": "b", "slot_id": 1})["job"]
+            self.assertEqual(other["specification"]["program"], "dp_tile")
+            handler.dispatch_post("/v1/requeue", {
+                "run_id": first["run_id"], "lease_token": first["lease_token"]})
+            reconstruction = handler.dispatch_post("/v1/lease", {
+                "node_name": "a", "slot_id": 1})["job"]
+            self.assertEqual(reconstruction["run_id"], roots[0])
+            self.assertEqual(reconstruction["specification"]["program"], "dp_distributed")
+
     def test_tile_borrows_all_free_cpus_without_overlapping_leases(self) -> None:
         """An old one-thread spec gets a full team, with memory-safe fallback."""
         from dp_solver.tiles import tile, memory_bytes

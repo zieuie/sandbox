@@ -18,6 +18,9 @@ sys.path.insert(0, str(ROOT.parent))
 from campaigns import king_hamming as campaign
 from matching_solver.artifacts import load_dp
 
+STORAGE_NODES = [{"compute_enabled": True, "state": "healthy",
+                  "storage_free_bytes": 100 * 1024**4} for _ in range(3)]
+
 
 class ContinuousCampaignTests(unittest.TestCase):
     """The feeder preserves exact artifacts, admission bounds, and idempotence."""
@@ -226,7 +229,7 @@ class ContinuousCampaignTests(unittest.TestCase):
             "13^5": {"p": 13, "r": 5, "dp_artifact": str(source),
                      "matching_attempts": []},
         }}
-        candidate = {"program": "dp", "arguments": {
+        candidate = {"program": "dp_distributed", "arguments": {
             "p": 17, "r": 3, "threads": 1, "tile_side": 4,
         }}
         manifest = {"leader": "http://private", "entries": []}
@@ -238,10 +241,10 @@ class ContinuousCampaignTests(unittest.TestCase):
             return {"run_id": "new-dp", "state": "queued", "reused": False}
 
         with tempfile.TemporaryDirectory() as directory, \
-                patch.object(campaign.scheduling, "campaign", return_value=iter([candidate])), \
+                patch.object(campaign.scheduling, "regional_campaign", return_value=iter([candidate])), \
                 patch.object(campaign, "request", side_effect=fake_request):
             added = campaign.replenish_dp(
-                Path(directory), manifest, {}, pipeline)
+                Path(directory), manifest, {}, pipeline, STORAGE_NODES)
 
         self.assertEqual(added, 1)
         self.assertEqual(pipeline["fields"]["13^5"]["matching_admission"],
@@ -267,7 +270,7 @@ class ContinuousCampaignTests(unittest.TestCase):
         pipeline = {"settings": settings, "fields": {}}
         runs = {"active": {"run_id": "active", "state": "waiting"}}
         with tempfile.TemporaryDirectory() as directory, \
-                patch.object(campaign.scheduling, "campaign", return_value=iter([candidate])), \
+                patch.object(campaign.scheduling, "regional_campaign", return_value=iter([candidate])), \
                 patch.object(campaign, "request") as submitted:
             added = campaign.replenish_dp(
                 Path(directory), manifest, runs, pipeline)
@@ -300,7 +303,7 @@ class ContinuousCampaignTests(unittest.TestCase):
             return {"run_id": "retry", "state": "waiting", "reused": False}
 
         with tempfile.TemporaryDirectory() as directory, \
-                patch.object(campaign.scheduling, "campaign", return_value=iter([candidate])), \
+                patch.object(campaign.scheduling, "regional_campaign", return_value=iter([candidate])), \
                 patch.object(campaign, "request", side_effect=fake_request):
             added = campaign.replenish_dp(
                 Path(directory), manifest, runs, pipeline)
@@ -336,10 +339,10 @@ class ContinuousCampaignTests(unittest.TestCase):
                     "reused": False}
 
         with tempfile.TemporaryDirectory() as directory, \
-                patch.object(campaign.scheduling, "campaign", return_value=iter(candidates)), \
+                patch.object(campaign.scheduling, "regional_campaign", return_value=iter(candidates)), \
                 patch.object(campaign, "request", side_effect=fake_request):
             added = campaign.replenish_dp(
-                Path(directory), manifest, runs, pipeline)
+                Path(directory), manifest, runs, pipeline, STORAGE_NODES)
         self.assertEqual(added, 3)
         self.assertEqual(len(submissions), 3)
 
@@ -361,7 +364,8 @@ class ContinuousCampaignTests(unittest.TestCase):
         pipeline = {"settings": settings, "fields": {}}
         runs = {"active": {"run_id": "active", "state": "waiting",
                            "_tile_metrics": True, "_ready_tiles": 1}}
-        nodes = [{"compute_enabled": True, "state": "healthy"} for _ in range(4)]
+        nodes = [{"compute_enabled": True, "state": "healthy",
+                  "storage_free_bytes": 100 * 1024**4} for _ in range(4)]
         submissions = []
 
         def fake_request(_leader, route, value=None):
@@ -370,13 +374,39 @@ class ContinuousCampaignTests(unittest.TestCase):
                     "reused": False}
 
         with tempfile.TemporaryDirectory() as directory, \
-                patch.object(campaign.scheduling, "campaign", return_value=iter(candidates)), \
+                patch.object(campaign.scheduling, "regional_campaign", return_value=iter(candidates)), \
                 patch.object(campaign, "request", side_effect=fake_request):
             added = campaign.replenish_dp(
                 Path(directory), manifest, runs, pipeline, nodes)
         self.assertEqual(added, 5)
         self.assertEqual(pipeline["demand"]["ready_tile_target"], 8)
         self.assertEqual(pipeline["demand"]["live_compute_nodes"], 4)
+
+    def test_regional_frontier_prefers_table_shape_and_fitting_tiles(self) -> None:
+        from dp_solver.scheduling import regional_campaign, dp_estimate
+        candidates = list(regional_campaign(19, 11, 200_000_000_000_000, 16, 2 * 1024**3))
+        positions = {(job["arguments"]["p"], job["arguments"]["r"]): index
+                     for index, job in enumerate(candidates)}
+        self.assertLess(positions[(11, 9)], positions[(17, 7)])
+        self.assertLess(positions[(17, 7)], positions[(19, 7)])
+        self.assertGreater(dp_estimate(candidates[positions[(11, 9)]])["state_bytes"], 16 * 1024**3)
+        self.assertEqual(candidates[positions[(11, 9)]]["program"], "dp_distributed")
+        self.assertGreaterEqual(candidates[positions[(11, 9)]]["arguments"]["tile_side"], 2048)
+
+    def test_regional_frontier_waits_for_measured_worker_disk(self) -> None:
+        settings = dict(campaign.DEFAULTS)
+        settings.update(target_dp_roots=1, minimum_free_bytes=1)
+        pipeline = {"settings": settings, "fields": {}}
+        manifest = {"leader": "http://private", "entries": []}
+        candidate = {"program": "dp_distributed", "arguments": {
+            "p": 11, "r": 9, "threads": 16, "tile_side": 2048}}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(campaign.scheduling, "regional_campaign", return_value=iter([candidate])), \
+                patch.object(campaign, "request") as enqueue:
+            self.assertEqual(campaign.replenish_dp(
+                Path(directory), manifest, {}, pipeline,
+                [{"compute_enabled": True, "state": "healthy"} for _ in range(3)]), 0)
+        enqueue.assert_not_called()
 
     def test_settings_reject_an_unreservable_thread_product(self) -> None:
         settings = dict(campaign.DEFAULTS)

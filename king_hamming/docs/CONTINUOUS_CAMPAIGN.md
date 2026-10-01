@@ -104,9 +104,24 @@ Stopping dispatch preserves the SQLite queue, worker blobs, checkpoints, and
 artifacts. Run-scoped `pause-run`, `resume-run`, `cancel`, and `reprioritize`
 commands are also available through `kh.py`.
 
-The DP frontier remains intentionally bounded by configured DP state, visits,
-and disk watermarks. Matching memory, edge count, and field size only decide
-whether a completed DP artifact can enter matching; they never suppress DP
-calculation. `field limit` means matching is deferred for that artifact, not
-that its DP result is discarded. Transiently failed DP roots are retried
-automatically, up to three attempts, before the feeder expands the frontier.
+The DP feeder now expands a configured prime-by-odd-exponent region
+(`frontier_max_prime`, `frontier_max_exponent`) by diagonals. Its old dense
+`max_state_bytes` estimate is not an admission limit for distributed roots:
+it describes the unpartitioned table, not the memory of one tile. Each new
+candidate must fit a tile layout under `max_tile_bytes`, stay below
+`frontier_max_visits`, and fit a conservative three-copy uncompressed
+projection in worker-reported free storage after reserving space for active
+roots. Unknown worker disk capacity blocks new fields. The status demand
+includes the remaining projected disk budget and skipped fields. The configured
+region defaults to primes through 19 and odd exponents through 11; unsupported
+fields and layouts are skipped. These settings do not raise matching limits.
+
+A failed DP tile is retried inside its current root after 30, 60, then 120
+seconds. The failed run remains in history, while its tile slot receives a new
+lease, possibly on the same healthy machine. Only a fourth consecutive failure
+of that coordinate fails the root. Completed, replicated tiles stay attached
+throughout; successful tiles clear their own failure streak. Previously
+failed roots retain the existing feeder retry behavior and can reuse durable
+tiles from earlier attempts. Matching memory, edge count, and field size only
+decide whether a completed DP artifact can enter matching; they never suppress
+DP calculation. `field limit` means matching is deferred, not discarded.

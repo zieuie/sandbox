@@ -97,7 +97,7 @@ class RolloutTests(unittest.TestCase):
                 call("192.0.2.1", "/srv/king_hamming/campaign", b"bundle"),
                 call("192.0.2.2", "/srv/king_hamming/campaign", b"bundle"),
             ])
-            self.assertEqual(build.call_count, 2)
+            self.assertEqual(build.call_count, 3)
             self.assertTrue(request.call_args_list)
             self.assertTrue(all(item.args[1] == "/v1/status"
                                 for item in request.call_args_list))

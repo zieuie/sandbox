@@ -111,6 +111,85 @@ class TileReuseTests(unittest.TestCase):
         fresh = self.enqueue(from_scratch=True)
         self.assertEqual(self.child(fresh)["state"], "queued")
 
+    def test_failed_tile_retries_in_same_root_with_backoff(self) -> None:
+        root = self.enqueue()
+        first = self.child(root)
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            connection.execute("UPDATE runs SET state='failed',error='connection reset' WHERE run_id=?",
+                               (first["run_id"],))
+            distributed.advance(connection, now)
+            slot = connection.execute(
+                "SELECT child_run_id FROM distributed_tiles WHERE parent_run_id=? AND row=0 AND column=0",
+                (root,)).fetchone()
+            self.assertIsNone(slot[0])
+            self.assertEqual(connection.execute(
+                "SELECT state FROM runs WHERE run_id=?", (root,)).fetchone()[0], "waiting")
+            distributed.advance(connection, now + 29)
+            self.assertIsNone(connection.execute(
+                "SELECT child_run_id FROM distributed_tiles WHERE parent_run_id=? AND row=0 AND column=0",
+                (root,)).fetchone()[0])
+            distributed.advance(connection, now + 31)
+            replacement = connection.execute(
+                "SELECT r.* FROM distributed_tiles t JOIN runs r ON r.run_id=t.child_run_id "
+                "WHERE t.parent_run_id=? AND t.row=0 AND t.column=0", (root,)).fetchone()
+            self.assertEqual(replacement["state"], "queued")
+            self.assertNotEqual(replacement["run_id"], first["run_id"])
+            self.assertEqual(connection.execute(
+                "SELECT failures FROM distributed_tile_retries WHERE parent_run_id=? AND row=0 AND column=0",
+                (root,)).fetchone()[0], 1)
+
+    def test_successful_retry_clears_its_coordinate_failure_streak(self) -> None:
+        root = self.enqueue()
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            first = connection.execute(
+                "SELECT child_run_id FROM distributed_tiles WHERE parent_run_id=? AND row=0 AND column=0",
+                (root,)).fetchone()[0]
+            connection.execute("UPDATE runs SET state='failed',error='transient' WHERE run_id=?", (first,))
+            distributed.advance(connection, now)
+            distributed.advance(connection, now + 31)
+            second = connection.execute(
+                "SELECT child_run_id FROM distributed_tiles WHERE parent_run_id=? AND row=0 AND column=0",
+                (root,)).fetchone()[0]
+            self.assertNotEqual(second, first)
+            digest = "b" * 64
+            connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created,size) "
+                               "VALUES(?,2,?,9)", (digest, now))
+            for name in ("a", "b"):
+                connection.execute("INSERT INTO replicas(artifact_hash,node_name,location,created) "
+                                   "VALUES(?,?,?,?)", (digest, name, f"http://{name}/blob", now))
+            connection.execute("UPDATE runs SET state='complete',artifact_hash=? WHERE run_id=?",
+                               (digest, second))
+            distributed.advance(connection, now + 32)
+            self.assertIsNone(connection.execute(
+                "SELECT failures FROM distributed_tile_retries WHERE parent_run_id=? AND row=0 AND column=0",
+                (root,)).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT state FROM runs WHERE run_id=?", (root,)).fetchone()[0], "waiting")
+
+    def test_repeated_failure_of_one_coordinate_is_bounded(self) -> None:
+        root = self.enqueue()
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            for attempt in range(4):
+                child = connection.execute(
+                    "SELECT r.* FROM distributed_tiles t JOIN runs r ON r.run_id=t.child_run_id "
+                    "WHERE t.parent_run_id=? AND t.row=0 AND t.column=0", (root,)).fetchone()
+                connection.execute("UPDATE runs SET state='failed',error='persistent failure' WHERE run_id=?",
+                                   (child["run_id"],))
+                distributed.advance(connection, now)
+                state = connection.execute(
+                    "SELECT state FROM runs WHERE run_id=?", (root,)).fetchone()[0]
+                if attempt < 3:
+                    self.assertEqual(state, "waiting")
+                    now += min(300, 30 * 2**attempt) + 1
+                    distributed.advance(connection, now)
+                else:
+                    self.assertEqual(state, "failed")
+            self.assertIn("failed repeatedly", connection.execute(
+                "SELECT error FROM runs WHERE run_id=?", (root,)).fetchone()[0])
+
 
 if __name__ == "__main__":
     unittest.main()

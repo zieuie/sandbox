@@ -385,7 +385,8 @@ def heartbeat_loop(
 
     while not stop_event.wait(interval):
         try:
-            request_json(leader, "/v1/heartbeat", node_record)
+            free = shutil.disk_usage(node_record["storage_root"]).free
+            request_json(leader, "/v1/heartbeat", {**node_record, "storage_free_bytes": free})
         except OSError as error:
             print(f"heartbeat failed: {error}", file=sys.stderr, flush=True)
 
@@ -1137,6 +1138,7 @@ def main() -> int:
         "session_id": str(uuid.uuid4()),
         "storage_only": arguments.storage_only,
         "memory_bytes": os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"),
+        "storage_free_bytes": shutil.disk_usage(arguments.storage_root).free,
         "runtime_version": arguments.runtime_version,
         "physical_core_count": len(physical_cores),
         "storage_generation": storage_generation(arguments.storage_root),

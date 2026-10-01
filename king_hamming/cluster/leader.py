@@ -113,6 +113,29 @@ def connect(database: Path, timeout: float = 30.0) -> sqlite3.Connection:
     return connection
 
 
+def reconstruction_drain_target(connection, now, lease_seconds, resources):
+    """Choose one suitable host to drain instead of idling the whole fleet."""
+
+    nodes = connection.execute(
+        "SELECT n.*,COUNT(active.run_id) AS active_count,"
+        "COALESCE(SUM(active.exclusive_host),0) AS exclusive_count "
+        "FROM nodes n LEFT JOIN runs active ON active.node_name=n.node_name "
+        "AND active.state='running' WHERE n.compute_enabled=1 "
+        "AND n.last_heartbeat>? AND NOT EXISTS "
+        "(SELECT 1 FROM node_reservations reserve WHERE reserve.node_name=n.node_name) "
+        "GROUP BY n.node_name ORDER BY active_count,n.node_name",
+        (now-lease_seconds,),
+    ).fetchall()
+    for node in nodes:
+        if node["exclusive_count"] or not resource_fits(node, resources, "coordinator"):
+            continue
+        if (int(node["memory_bytes"]) and
+                resources.coordinator_memory_bytes > int(node["memory_bytes"]) - 2 * 1024**3):
+            continue
+        return node["node_name"]
+    return None
+
+
 # Keep scheduler liveness separate from campaign policy and worker heartbeats.
 class SchedulerHealth:
     """Record whether the background queue advance loop is making progress."""
@@ -264,6 +287,9 @@ def initialize(
         for name, definition in additions.items():
             if name not in columns:
                 connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+        node_columns = {row["name"] for row in connection.execute("PRAGMA table_info(nodes)")}
+        if "storage_free_bytes" not in node_columns:
+            connection.execute("ALTER TABLE nodes ADD COLUMN storage_free_bytes INTEGER NOT NULL DEFAULT 0")
         connection.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('campaign_state', 'running')"
         )
@@ -668,14 +694,14 @@ def make_handler(
                         request.get("cpu_set", existing["cpu_set"] if existing is not None else ""),
                     )
                     connection.execute(
-                        "INSERT INTO nodes(node_name,address,cpu_set,storage_root,last_heartbeat,state,session_id,compute_enabled,memory_bytes,runtime_version,physical_core_count,storage_generation,storage_validation_mode,slots_json) "
-                        "VALUES(?,?,?,?,?,'healthy',?,?,?,?,?,?,?,?) ON CONFLICT(node_name) DO UPDATE SET "
+                        "INSERT INTO nodes(node_name,address,cpu_set,storage_root,last_heartbeat,state,session_id,compute_enabled,memory_bytes,runtime_version,physical_core_count,storage_generation,storage_validation_mode,slots_json,storage_free_bytes) "
+                        "VALUES(?,?,?,?,?,'healthy',?,?,?,?,?,?,?,?,?) ON CONFLICT(node_name) DO UPDATE SET "
                         "address=excluded.address,cpu_set=excluded.cpu_set,storage_root=excluded.storage_root, "
                         "last_heartbeat=excluded.last_heartbeat,state='healthy',session_id=excluded.session_id, "
                         "compute_enabled=excluded.compute_enabled,memory_bytes=excluded.memory_bytes,"
                         "runtime_version=excluded.runtime_version,physical_core_count=excluded.physical_core_count,"
                         "storage_generation=excluded.storage_generation,storage_validation_mode=excluded.storage_validation_mode,"
-                        "slots_json=excluded.slots_json",
+                        "slots_json=excluded.slots_json,storage_free_bytes=excluded.storage_free_bytes",
                         (request["node_name"], request.get("address", ""), request.get("cpu_set", ""),
                          request.get("storage_root", ""), now, session_id,
                          int(not request.get("storage_only", False)),
@@ -686,7 +712,8 @@ def make_handler(
                          max(0, int(request.get(
                              "physical_core_count",
                              existing["physical_core_count"] if existing is not None else 0))),
-                         storage_generation, validation_mode, json.dumps(slots, separators=(",", ":"))),
+                         storage_generation, validation_mode, json.dumps(slots, separators=(",", ":")),
+                         max(0, int(request.get("storage_free_bytes", 0)))),
                     )
                     return {"ok": True, "heartbeat_seconds": min(10.0, lease_seconds / 3),
                             "storage_validation_mode": validation_mode}
@@ -846,10 +873,11 @@ def make_handler(
                         return {"job": None, "campaign_state": campaign}
 
                     candidates = connection.execute(
-                        "SELECT run_id, specification, priority, from_scratch, lease_attempt, engine_failures FROM runs "
+                        "SELECT run_id, specification, priority, progress_phase, from_scratch, lease_attempt, engine_failures FROM runs "
                         "WHERE state='queued' AND NOT EXISTS (SELECT 1 FROM lease_history h WHERE h.run_id=runs.run_id "
                         "AND h.node_name=? AND h.outcome='engine retry' AND h.finished>?) "
-                        "ORDER BY priority DESC, estimated_seconds ASC, created ASC, run_id ASC LIMIT 100",
+                        "ORDER BY (progress_phase='reconstructing') DESC, "
+                        "priority DESC, estimated_seconds ASC, created ASC, run_id ASC LIMIT 100",
                         (node["node_name"], now-30),
                     ).fetchall()
                     row = None
@@ -873,6 +901,12 @@ def make_handler(
                             (node["node_name"],),
                         ).fetchone()
                         if not sharing and active_on_host["count"]:
+                            if candidate["progress_phase"] == "reconstructing":
+                                target = reconstruction_drain_target(
+                                    connection, now, lease_seconds, resources)
+                                if target == node["node_name"]:
+                                    # Leave this host's freed slots idle until its tiles finish.
+                                    return {"job": None, "campaign_state": campaign}
                             continue
                         participant = dict(node)
                         participant["cpu_set"] = node["cpu_set"]
