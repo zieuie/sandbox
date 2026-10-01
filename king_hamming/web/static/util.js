@@ -160,8 +160,16 @@ export async function api(path, { method = 'GET', body } = {}) {
     if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
   }
   const response = await fetch(path, {
-    method, headers, cache: 'no-store', body: body === undefined ? undefined : JSON.stringify(body),
+    method, headers, cache: 'no-store', redirect: 'manual',
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
+  // The dashboard's API never redirects. A redirect means something in front of
+  // it (Cloudflare Access, when its session expires) wants the browser itself:
+  // reload, so the top-level page goes through that sign-in and comes back.
+  if (response.type === 'opaqueredirect') {
+    location.reload();
+    throw new Error('signing in again');
+  }
   let value = null;
   try { value = await response.json(); } catch (error) { value = null; }
   if (response.status === 401 && path !== '/api/reauth' && path !== '/api/password') {

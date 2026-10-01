@@ -57,7 +57,7 @@ async function load(force = false) {
     snapshot = await api(force ? '/api/refresh' : '/api/snapshot', { method: force ? 'POST' : 'GET' });
     fetchError = null;
   } catch (error) {
-    fetchError = error.message;
+    if (error.message !== 'signing in again') fetchError = error.message;
   } finally {
     loading = false;
     refreshButton.disabled = false;
@@ -142,5 +142,5 @@ api('/api/session').then((session) => {
   account.mount(document.querySelector('.account'), session);
   load();
 }).catch((error) => {
-  if (error.message !== 'signed out') { fetchError = error.message; render(); }
+  if (error.message !== 'signed out' && error.message !== 'signing in again') { fetchError = error.message; render(); }
 });
