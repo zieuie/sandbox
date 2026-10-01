@@ -109,16 +109,36 @@ Status as of 2026-09-30.
       especially in the scheduler loop and in `advance()`, which works through
       every waiting root inside a single transaction.
 
+13. **The leader cannot see free disk on the workers.**
+    - **Effect:** a large field such as 11⁹ (about 290 GiB of DP state, kept in
+      two tile copies) could fill worker disks partway through. Nothing
+      reports or prevents that in advance.
+    - **Possible change:** agents report free and used space on their
+      storage roots in heartbeats. Admission of a new root then checks its
+      projected tile storage.
+    - **Dashboard workaround:** the submit preview states the disk the field
+      will need, but cannot compare it with what is free.
+
+14. **The tile layout limits are fixed or implicit.**
+    - **Cause:** `distributed.create()` caps a root at `max_tiles` (default
+      10,000), which no setting exposes. The feeder always uses its single
+      `tile_side`.
+    - **Effect:** large fields need a bigger tile side, and large primes have
+      tile halos too big for 2 GiB tiles; 127³ fits no layout at all.
+    - **Possible change:** choose the tile side per field when submitting, as
+      the dashboard's submit command does, and make `max_tiles` a feeder
+      setting.
+
 ## Operations and security
 
-13. **No process supervision.**
+15. **No process supervision.**
     - **Observed:** no work ran from about 03:50 to 08:41 on 2026-09-30, until
       the leader was restarted, and nothing raised an alert.
     - **Possible change:** run the leader, feeder and dashboard as systemd user
       services with `Restart=on-failure`. The dashboard's problems feed would
       then mainly show why a restart happened.
 
-14. **The leader has no authentication and listens on 0.0.0.0.**
+16. **The leader has no authentication and listens on 0.0.0.0.**
     - **Effect:** any device on the home network can stop dispatch or cancel
       runs.
     - **Possible change:** bind it to the LAN interface only, and require a

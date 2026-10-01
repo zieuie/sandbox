@@ -102,6 +102,17 @@ python3 king_hamming/web/server.py serve --trust-proxy
     running, queued, ready, blocked, or failed.
   - Also shows the dependency frontier and typical tile time.
   - Roots finished in the last 24 h are folded underneath.
+  - **Click a root** (its name, grid or **Open ↗**) for its focus view at
+    `#tiles/RUN_ID`:
+    - a large grid with row and column numbers and machine names on running
+      tiles
+    - the percentage complete, tiles finished in the last hour, and the time
+      left at that pace
+    - how far the anti-diagonal wave has swept, and where tiles are running
+  - **Click a tile** (in either view) to select it. Its details, with Pause/Resume
+    and Priority for operators, appear beside the grid, and the address becomes
+    `#tiles/RUN_ID/ROW,COL`, so a tile can be linked directly. The browser's
+    back button returns to the overview.
 
 - **Matching** (`#matching`, or `#matching/RUN_ID` to open one run):
   - **Now:** each live matching run, showing its polynomial, its machine group,
@@ -178,8 +189,22 @@ way:
 | Feeder, Problems | Retry… | Submits a new attempt for a field the feeder gave up on, recorded in `manifest.json` under the feeder's lock. |
 | Feeder | Edit… / Raise visit limit… | Edits `pipeline.json` under the feeder's lock, after the feeder's own `validate_settings` (password). Previews list newly eligible fields. |
 | Feeder | Add fields now… | Runs `launch_dp.py extend` while holding the feeder's lock (password). |
+| Results (empty cell, or Submit a field…), Feeder | Submit a field… | Queues a DP root for any supported p^r (p prime, r odd 3–31) and records it in the feeder's manifest, so its result is collected and matched like any other (password). Details below. |
 | Activity, Problems | Start / Restart feeder | Start runs `launch_dp.py ensure-feeder`; restart calls `restart_owned_feeder` so new feeder code loads (password). |
 | Activity | Upgrade workers… / leader… | `launch_dp.py upgrade-workers` / `upgrade-leader` (type the phrase, password). Blocked until no run is active, and the preview lists your uncommitted files. |
+
+**Submit a field** previews:
+
+- the field size, DP work, state size and priority
+- a tile layout: the smallest side (512–16384) that passes the leader's
+  limits of at most 10,000 tiles and each tile within `max_tile_bytes`. 11⁹,
+  for example, needs side 2048 (6,241 tiles), not the feeder's 512.
+- a runtime estimate from the throughput of recently completed roots
+- the worker disk needed for both tile copies
+- whether the field exceeds the matching limits
+
+Fields beyond the feeder's own limits need the field typed to confirm.
+Existing fields are refused; use Retry or Restart field for those.
 
 **Single tiles can't be cancelled while their root is active.** The leader
 never recreates a cancelled tile, so the field could never finish. Pause the

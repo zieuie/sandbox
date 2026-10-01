@@ -2,6 +2,7 @@
 import {
   html, setHTML, field, fmtInt, fmtCompact, fmtPoly, fmtTime, shortId,
 } from './util.js';
+import { button, isOperator } from './command.js';
 
 export const STATUS = {
   matched: { label: 'Matched', glyph: '^' },
@@ -36,7 +37,12 @@ export function render(container, snapshot, detail) {
     <th scope="row">${p}</th>
     ${results.exponents.map((r) => {
       const f = byKey.get(`${p},${r}`);
-      if (!f) return html`<td class="cell empty"></td>`;
+      if (!f) {
+        return isOperator()
+          ? html`<td class="cell empty"><button type="button" class="submit-cell" data-command="field.submit"
+              data-params="${JSON.stringify({ p, r })}" title="Submit ${field(p, r)}…" aria-label="Submit ${field(p, r)}">+</button></td>`
+          : html`<td class="cell empty"></td>`;
+      }
       const s = STATUS[f.status] || STATUS.unknown;
       const rows = f.metrics ? fmtCompact(f.metrics.rows) : '…';
       return html`<td class="cell st-${f.status}${selected === `${p},${r}` ? ' selected' : ''}">
@@ -48,10 +54,11 @@ export function render(container, snapshot, detail) {
 
   setHTML(container, html`
     <section class="panel">
-      <div class="panel-head">
+      <div class="panel-head row">
         <h2>Results across retained campaigns</h2>
-        <p class="hint">Each cell is the exact number of permutations (rows). Click a cell for details.</p>
+        ${button('field.submit.ask', {}, 'Submit a field…')}
       </div>
+      <p class="hint">Each cell is the exact number of permutations (rows). Click a cell for details${isOperator() ? '; click an empty cell to submit that field' : ''}.</p>
       <div class="legend">${legend}</div>
       <div class="results-scroll">
         <table class="results"><thead><tr><th scope="col">p</th>${header}</tr></thead>

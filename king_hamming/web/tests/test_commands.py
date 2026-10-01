@@ -187,6 +187,35 @@ class CommandTests(unittest.TestCase):
         self.assertIn("fake launcher: --state", job["tail"])
         self.assertIn("ensure-feeder", job["tail"])
 
+    def test_submit_new_field(self) -> None:
+        status, _, preview = self.preview("field.submit", {"p": "7", "r": "3", "priority": "4"})
+        self.assertEqual((status, preview["blockers"], preview["confirm_text"]), (200, [], None))
+        tiles = next(change["after"] for change in preview["changes"] if change["label"] == "Tiles")
+        self.assertIn("of side 512", tiles)
+        status, _, reply = self.run_command("field.submit", {"p": "7", "r": "3", "priority": "4"})
+        self.assertEqual(status, 200, reply)
+        path, body = self.leader.calls[-1]
+        self.assertEqual((path, body["priority"], body["specification"]["program"]), ("/v1/enqueue", 4, "dp_distributed"))
+        arguments = body["specification"]["arguments"]
+        self.assertEqual((arguments["p"], arguments["r"], arguments["artifact_format"]), (7, 3, "KHD1"))
+        manifest = json.loads((self.deployments / "live" / "manifest.json").read_text())
+        self.assertEqual(manifest["entries"][-1]["specification"], body["specification"])
+        # Now it exists, so a second submission is refused.
+        self.assertIn("already exists", self.preview("field.submit", {"p": 7, "r": 3})[2]["blockers"][0])
+
+    def test_submit_validation_and_big_fields(self) -> None:
+        self.assertEqual(self.preview("field.submit", {"p": 11, "r": 8})[0], 400)
+        self.assertEqual(self.preview("field.submit", {"p": 12, "r": 3})[0], 400)
+        self.assertIn("already exists", self.preview("field.submit", {"p": 5, "r": 3})[2]["blockers"][0])
+        big = self.preview("field.submit", {"p": 11, "r": 9})[2]
+        self.assertEqual((big["blockers"], big["confirm_text"]), ([], "11^9"))
+        self.assertIn("79 × 79 = 6,241 of side 2048",
+                      next(change["after"] for change in big["changes"] if change["label"] == "Tiles"))
+        self.assertTrue(any("matching field limit" in warning for warning in big["warnings"]))
+        self.assertIn("No tile side", self.preview("field.submit", {"p": 127, "r": 3})[2]["blockers"][0])
+        forced = self.preview("field.submit", {"p": 11, "r": 9, "tile_side": 512})[2]
+        self.assertIn("No tile side up to 512", forced["blockers"][0])
+
     def test_upgrade_blocked_while_runs_are_active(self) -> None:
         preview = self.preview("process.upgrade_workers")[2]
         self.assertIn("1 run(s) are active", preview["blockers"][0])

@@ -145,6 +145,18 @@ export function ask({ title, text, fields, submit }) {
   dialog.querySelector('input').focus();
 }
 
+// Ask for p, r and priority, then preview field.submit.
+export function submitField(p = '', r = '') {
+  ask({
+    title: 'Submit a field',
+    text: 'Queues a distributed DP for p^r (p prime, r odd from 3 to 31). You review its size, tiles and '
+      + 'cost before anything is submitted.',
+    fields: [{ name: 'p', label: 'Prime p', value: p }, { name: 'r', label: 'Exponent r', value: r },
+      { name: 'priority', label: 'Priority', value: '0', hint: 'DP uses 0; higher is leased first' }],
+    submit: (values) => open('field.submit', values),
+  });
+}
+
 // One delegated handler for every [data-command] button on the page.
 let installed = false;
 export function install() {
@@ -156,6 +168,10 @@ export function install() {
     event.preventDefault();
     let params = {};
     try { params = JSON.parse(target.dataset.params || '{}'); } catch (error) { params = {}; }
+    if (target.dataset.command === 'field.submit.ask') {
+      submitField(params.p ?? '', params.r ?? '');
+      return;
+    }
     if (target.dataset.command === 'run.priority' && params.priority === undefined) {
       ask({
         title: 'Change priority',

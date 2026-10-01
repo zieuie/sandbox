@@ -556,6 +556,144 @@ def feeder_extend(context: Context, params: dict) -> Plan:
     return plan
 
 
+TILE_SIDES = (512, 1024, 2048, 4096, 8192, 16384)
+MAX_TILES = 10_000  # dp_solver/distributed.py create() default
+
+
+def tile_plan(p: int, r: int, threads: int, max_tile_bytes: int, sides=TILE_SIDES) -> dict | None:
+    """The smallest tile side the leader will accept: the same tile-count and
+    per-tile memory checks as distributed.create(), so the root is not refused."""
+    import math
+    from dp_solver.scheduling import dp_estimate
+    from dp_solver.tiles import memory_bytes, tile
+    budget = dp_estimate({"arguments": {"p": p, "r": r}})["budget"]
+    for side in sides:
+        count = math.ceil(budget / side)
+        if count * count > MAX_TILES:
+            continue
+        corners = {max(0, count - 2), count - 1}
+        largest = max(memory_bytes(p, tile(p, r, side, row, column), threads)
+                      for row in corners for column in corners)
+        if largest <= max_tile_bytes:
+            return {"side": side, "per_side": count, "tiles": count * count, "tile_bytes": largest}
+    return None
+
+
+def measured_rate(context: Context, now_value: float) -> float | None:
+    """Median raw visits per second of DP roots completed in the last week (1e12+ visits)."""
+    import statistics
+    from dp_solver.scheduling import dp_estimate
+    rates = []
+    with context.database() as connection:
+        for encoded, created, finished in connection.execute(
+                "SELECT specification,created,finished FROM runs WHERE parent_run_id IS NULL "
+                "AND state='complete' AND finished>? AND specification LIKE '%dp_distributed%'",
+                (now_value - 7 * 86400,)):
+            arguments = json.loads(encoded)["arguments"]
+            visits = dp_estimate({"arguments": arguments})["raw_visits"]
+            if visits >= 1e12 and finished > created:
+                rates.append(visits / (finished - created))
+    return statistics.median(rates) if rates else None
+
+
+def submit_field(context: Context, params: dict) -> Plan:
+    """Submit a DP root for any supported field, outside the feeder's frontier."""
+    import time as time_module
+    from dp_solver.scheduling import dp_estimate
+    p, r = as_int(params.get("p"), "p"), as_int(params.get("r"), "r")
+    priority = as_int(params.get("priority", 0), "priority")
+    if not PRIORITY_RANGE[0] <= priority <= PRIORITY_RANGE[1]:
+        raise CommandError(f"priority must be from {PRIORITY_RANGE[0]} to {PRIORITY_RANGE[1]}")
+    try:
+        estimate = dp_estimate({"arguments": {"p": p, "r": r}})
+    except ValueError as error:
+        raise CommandError(f"{p}^{r} is not a supported field: {error}") from None
+    pipeline, manifest = feeder_files(context)
+    settings = pipeline.get("settings", {})
+    threads = settings.get("dp_threads", 16)
+    max_tile_bytes = settings.get("max_tile_bytes", 2 * 1024**3)
+    side = params.get("tile_side")
+    plan_tiles = tile_plan(p, r, threads, max_tile_bytes,
+                           (as_int(side, "tile_side"),) if side not in (None, "") else TILE_SIDES)
+    existing = [entry for entry in manifest.get("entries", [])
+                if entry["specification"].get("arguments", {}).get("p") == p
+                and entry["specification"]["arguments"].get("r") == r]
+    with context.database() as connection:
+        roots = [tuple(row) for row in connection.execute(
+            "SELECT run_id,state FROM runs WHERE parent_run_id IS NULL AND specification LIKE ? "
+            "AND specification LIKE ? AND specification LIKE '%\"program\":\"dp%'",
+            (f'%"p":{p},%', f'%"r":{r},%'))]
+        largest = 0
+        for (encoded,) in connection.execute(
+                "SELECT specification FROM runs WHERE parent_run_id IS NULL AND state='complete' "
+                "AND specification LIKE '%dp_distributed%'"):
+            largest = max(largest, dp_estimate({"arguments": json.loads(encoded)["arguments"]})["state_bytes"])
+    specification = {"program": "dp_distributed", "arguments": {
+        "p": p, "r": r, "threads": threads, "tile_side": plan_tiles["side"] if plan_tiles else 512,
+        "max_state_bytes": max(settings.get("max_state_bytes", 16 * 1024**3), estimate["state_bytes"]),
+        "max_visits": max(settings.get("max_visits", 30_000_000_000_000), estimate["raw_visits"]),
+        "max_tile_bytes": max_tile_bytes, "artifact_format": "KHD1"}}
+
+    def submit():
+        with PipelineLock(context.state):
+            fresh = context.manifest()
+            if any(entry["specification"].get("arguments", {}).get("p") == p and
+                   entry["specification"]["arguments"].get("r") == r for entry in fresh.get("entries", [])):
+                raise CommandError(f"{p}^{r} was submitted meanwhile; review again", 409)
+            result = context.leader("/v1/enqueue", {"specification": specification, "priority": priority})
+            fresh["entries"].append({"specification": specification, **result})
+            atomic_json(context.state / "manifest.json", fresh)
+        return result
+
+    gib = 1024**3
+    big = (estimate["raw_visits"] > settings.get("max_visits", 0) or
+           estimate["state_bytes"] > settings.get("max_state_bytes", 0))
+    plan = Plan(
+        title=f"Submit DP for {p}^{r}",
+        summary="Queues a new distributed DP root and records it in the feeder's manifest, so the feeder "
+                "collects the result and submits matching when the limits allow.",
+        facts={"field": [p, r], "existing": [entry.get("run_id") for entry in existing], "roots": roots,
+               "specification": specification, "priority": priority},
+        action=submit,
+        changes=[{"label": "Field size q", "before": None, "after": f"{estimate['q']:,}"},
+                 {"label": "DP work", "before": None, "after": f"{estimate['raw_visits']:.3g} raw visits"},
+                 {"label": "DP state", "before": None, "after": f"{estimate['state_bytes'] / gib:,.1f} GiB"},
+                 {"label": "Tiles", "before": None, "after": (
+                     f"{plan_tiles['per_side']} × {plan_tiles['per_side']} = {plan_tiles['tiles']:,} of side "
+                     f"{plan_tiles['side']} (≤ {plan_tiles['tile_bytes'] / 1024**2:,.0f} MiB each)")
+                     if plan_tiles else "no layout fits"},
+                 {"label": "Priority", "before": None, "after": priority}],
+        confirm_text=f"{p}^{r}" if big else None,
+        reauth=True)
+    if existing or roots:
+        states = ", ".join(sorted({state for _, state in roots})) or "submitted"
+        plan.blockers.append(f"{p}^{r} already exists ({states}). Use Retry on the Feeder tab or "
+                             "Restart field on the DP tiles tab instead.")
+    if not plan_tiles:
+        plan.blockers.append(f"No tile side up to {TILE_SIDES[-1] if side in (None, '') else side} keeps both "
+                             f"the tile count ≤ {MAX_TILES:,} and each tile within max_tile_bytes "
+                             f"({max_tile_bytes / 1024**3:g} GiB). Large primes have large tile halos; raising "
+                             "max_tile_bytes in the feeder limits would allow bigger tiles.")
+    rate = measured_rate(context, time_module.time())
+    if rate:
+        plan.warnings.append(f"Recent large roots ran at about {rate:.2g} visits/s, which suggests "
+                             f"roughly {estimate['raw_visits'] / rate / 3600:,.0f} h of DP "
+                             "(per-tile overhead adds more for many tiles).")
+    if largest and estimate["state_bytes"] > 2 * largest:
+        plan.warnings.append(
+            f"Its DP state is {estimate['state_bytes'] / largest:,.0f}× the largest completed so far "
+            f"({largest / gib:,.1f} GiB). Tiles are kept in two copies: about "
+            f"{2 * estimate['state_bytes'] / gib:,.0f} GiB of worker disk in total while it runs.")
+    if big:
+        plan.warnings.append("It is beyond the feeder's own limits (max_visits / max_state_bytes); the feeder "
+                             "would never have chosen it, but will still collect its result.")
+    if estimate["q"] > settings.get("max_field_elements", 100_000_000):
+        plan.warnings.append(f"q = {estimate['q']:,} exceeds the matching field limit "
+                             f"({settings.get('max_field_elements', 100_000_000):,}), so it will not be "
+                             "matched automatically under the current limits.")
+    return plan
+
+
 # ----- process jobs --------------------------------------------------------
 
 def busy_job(context: Context, plan: Plan) -> None:
@@ -667,6 +805,7 @@ COMMANDS: dict[str, Callable[[Context, dict], Plan]] = {
     "feeder.settings": feeder_settings,
     "feeder.retry": feeder_retry,
     "feeder.extend": feeder_extend,
+    "field.submit": submit_field,
     "process.ensure_feeder": ensure_feeder,
     "process.restart_feeder": restart_feeder,
     "process.upgrade_workers": lambda c, p: upgrade(c, p, "workers"),

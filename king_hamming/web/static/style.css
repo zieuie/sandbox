@@ -537,3 +537,39 @@ table.history > tbody > tr.history-detail > td { padding: 10px 14px 16px; }
 .state-obstructed { color: var(--st-obstructed); }
 .all-clear.neutral { color: var(--muted); }
 @media (max-width: 640px) { .match-grid { grid-template-columns: 1fr; } }
+td.cell.empty .submit-cell {
+  all: unset; box-sizing: border-box; display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%; cursor: pointer; color: transparent; border-radius: 6px; font-size: 16px;
+}
+td.cell.empty:has(.submit-cell) { opacity: 1; background: color-mix(in srgb, var(--soft) 45%, transparent); }
+td.cell.empty .submit-cell:hover, td.cell.empty .submit-cell:focus-visible {
+  color: var(--accent); outline: 1px dashed var(--accent);
+}
+
+/* ----- DP root focus view ----- */
+.root-link { color: inherit; text-decoration: none; }
+.root-link:hover { color: var(--accent); }
+.grid-link { display: block; cursor: zoom-in; }
+.card-foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+a.open-link { text-decoration: none; color: var(--ink); margin-left: auto; }
+.focus-head { display: flex; flex-direction: column; gap: 4px; }
+.focus-head h2 { display: flex; align-items: center; gap: 10px; font-size: 24px; }
+.focus-head .state { font-size: 14px; }
+.back-link { color: var(--accent); text-decoration: none; font-size: 13px; }
+.focus-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+.focus-grid {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px; box-shadow: var(--shadow); min-width: 0;
+}
+svg.tile-grid.focus { max-width: min(100%, calc(100vh - 150px)); }
+.grid-number { font-size: 6px; fill: var(--muted); text-anchor: middle; }
+rect.tile.selected { stroke: var(--ink); stroke-width: 1.4; }
+.focus-side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 80px; }
+.big-number { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.done-fill { fill: var(--t-durable); }
+.focus-side svg.bar { margin: 6px 0 10px; }
+.tile-detail p { margin: 0; font-size: 13px; line-height: 1.6; }
+@media (max-width: 900px) {
+  .focus-body { grid-template-columns: 1fr; }
+  .focus-side { position: static; }
+}

@@ -163,7 +163,8 @@ export function render(container, snapshot) {
           <div class="card"><h3>Next fields</h3>${upcoming}
             ${isOperator() ? html`<div class="cmd-row">
               <button type="button" class="cmd small" data-edit="max_visits">Raise visit limit…</button>
-              <button type="button" class="cmd small" data-extend>Add fields now…</button></div>` : ''}</div>
+              <button type="button" class="cmd small" data-extend>Add fields now…</button>
+              ${button('field.submit.ask', {}, 'Submit a field…', 'small')}</div>` : ''}</div>
           <div class="card"><h3>Recent passes</h3><ul class="passes">${history(feeder.history)}</ul></div>
         </div>
       </div>
