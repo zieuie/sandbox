@@ -3,11 +3,17 @@ import { html, setHTML, fmtDuration, ago, now, hideTooltip } from './util.js';
 import * as results from './results.js';
 import * as fleet from './fleet.js';
 import * as tiles from './tiles.js';
+import * as timeline from './timeline.js';
+import * as feeder from './feeder.js';
+import * as problems from './problems.js';
 
 const VIEWS = {
   results: { title: 'Results', module: results },
   fleet: { title: 'Fleet', module: fleet },
   tiles: { title: 'DP tiles', module: tiles },
+  timeline: { title: 'Timeline', module: timeline },
+  feeder: { title: 'Feeder', module: feeder },
+  problems: { title: 'Problems', module: problems },
 };
 const POLL_SECONDS = 30;
 
@@ -92,9 +98,16 @@ function renderUpdated() {
   updated.title = `Built in ${snapshot.build_seconds}s`;
 }
 
+function renderNav(name) {
+  const count = problems.badge(snapshot);
+  setHTML(nav, html`${Object.entries(VIEWS).map(([key, v]) => html`<a href="#${key}" data-view="${key}"
+    class="${key === name ? 'active' : ''}">${v.title}${key === 'problems' && count
+      ? html`<span class="nav-badge sev-${count.severity}">${count.count}</span>` : ''}</a>`)}`);
+}
+
 function render() {
   const name = currentView();
-  nav.querySelectorAll('a').forEach((a) => a.classList.toggle('active', a.dataset.view === name));
+  renderNav(name);
   document.title = `${VIEWS[name].title} · King Hamming`;
   renderStatus();
   renderBanner();
@@ -111,8 +124,6 @@ function render() {
   VIEWS[name].module.render(view, snapshot, currentDetail());
 }
 
-setHTML(nav, html`${Object.entries(VIEWS).map(([key, v]) =>
-  html`<a href="#${key}" data-view="${key}">${v.title}</a>`)}`);
 window.addEventListener('hashchange', render);
 refreshButton.addEventListener('click', () => load(true));
 document.addEventListener('visibilitychange', () => {

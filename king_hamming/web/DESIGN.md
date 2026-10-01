@@ -4,21 +4,26 @@ A read-only web dashboard for the continuous DP → matching campaign. It runs
 as its own process on merlin (`.151`) and never contacts the leader, so a
 dashboard bug cannot disturb the campaign.
 
-**Status:** the first version (three views, read-only) is built, and it is
-**not exposed to the internet**. Authentication, specified below, must be
+**Status:** six read-only views are built (results, fleet, DP tiles,
+timeline, feeder, problems), and the dashboard is **not exposed to the
+internet**. Authentication, specified below, must be
 implemented before the Cloudflare tunnel points at it.
 
 ## Scope
 
-First version: three views, read-only.
+Built, all read-only:
 
 1. **Results heatmap**: prime × exponent, coloured by outcome.
 2. **Fleet**: one card per machine.
 3. **DP tile grids**: one live grid per active DP root.
+4. **Machine timeline**: 24 h of leases per machine (`timeline.py`).
+5. **Feeder panel**: pipeline policy, gauges, fields in flight, next fields,
+   and pass history (`feeder.py`).
+6. **Problems feed**: current conditions plus 7 days of grouped events
+   (`problems.py`), with log lines timed by `logs.py`.
 
-Planned later (the design leaves room, nothing is built yet):
-authentication, campaign controls, machine timeline, feeder panel, problems
-feed, verifier row viewer, artifact/replica health, and per-root ETAs.
+Planned later: authentication, campaign controls, a verifier row viewer, and
+per-root ETAs.
 
 ## Architecture
 
@@ -206,11 +211,15 @@ web/
   README.md        how to run and test
   server.py        CLI (serve, snapshot), HTTP routing, security headers
   snapshot.py      read-only queries, snapshot building and caching
+  timeline.py      lease segments, merging and lanes
+  feeder.py        pipeline panel and the feeder process check
+  problems.py      current conditions and grouped recent events
+  logs.py          incremental, rotation-safe log watching; /proc process checks
   static/
-    index.html  style.css  icon.svg
-    app.js  results.js  fleet.js  tiles.js  util.js
+    index.html  style.css  icon.svg  app.js  util.js
+    results.js  fleet.js  tiles.js  timeline.js  feeder.js  problems.js
   tests/
-    fixture.py  test_snapshot.py  test_server.py
+    fixture.py  test_snapshot.py  test_server.py  test_views.py
   Makefile         `make -C king_hamming/web check`
 ```
 

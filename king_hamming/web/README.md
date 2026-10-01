@@ -1,7 +1,8 @@
 # Campaign dashboard
 
 A read-only web view of the continuous DP → matching campaign: a results
-heatmap, the nine-machine fleet, and live DP tile grids. It reads the retained
+heatmap, the nine-machine fleet, live DP tile grids, a machine timeline, the
+feeder, and a problems feed. It reads the retained
 campaign files and never contacts the leader. See [DESIGN.md](DESIGN.md).
 
 > **No login yet.** Keep it on loopback or the home network. Do not point the
@@ -60,6 +61,43 @@ Options: `--deployments DIR` (default `king_hamming/cluster/deployments`),
     running, queued, ready, blocked, or failed.
   - Also shows the dependency frontier and typical tile time.
   - Roots finished in the last 24 h are folded underneath.
+
+- **Timeline** (`#timeline`, or `#timeline/6h` for 3h/6h/12h/24h):
+  - One row per machine, with one bar per lease, coloured by field.
+  - Back-to-back tiles of one field are merged into one bar.
+  - Overlapping leases on a shared host stack into lanes.
+  - Bars that ended badly are outlined.
+  - Measured CPU use is shaded behind each row, with the fraction of the
+    window leased.
+- **Feeder** (`#feeder`):
+  - The process (checked against `/proc`), the last pass, and the
+    backpressure gauges.
+  - Every field still in flight, with DP tile progress, and the next fields the
+    feeder would add.
+  - Recent passes (identical ones collapsed) and the full limits.
+- **Problems** (`#problems`): the tab shows a count of current critical and
+  warning conditions.
+  - **Needs attention now:**
+    - offline machines
+    - stalled solvers
+    - fields the feeder gave up on
+    - tiles still running under a failed root
+    - feeder down, stale or failing
+    - disk watermark
+    - under-replicated results
+    - repeated leader errors in the last hour
+  - **Recent events (7 days)** are grouped by kind:
+    - DP root, tile and matching failures
+    - engine retries and expired leases
+    - leader log exceptions and feeder errors
+  - Info-level events are hidden by default. "New" marks events since your
+    last visit in this browser.
+
+The leader and feeder logs have no timestamps. The dashboard reads the
+existing log as an untimed baseline (for the leader, only the current
+session). Every later line is timed by when the dashboard first saw it, so log
+times are only as fine as the page's refreshes, and they restart when the
+server restarts.
 
 ## Test
 

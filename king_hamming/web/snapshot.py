@@ -29,6 +29,10 @@ from dp_solver.tiles import dependencies, tile  # noqa: E402
 from matching_solver.adapter import decode_input  # noqa: E402
 from matching_solver.artifacts import request_count  # noqa: E402
 import leader  # noqa: E402  (idle-reason rules stay owned by the leader)
+from feeder import build_feeder  # noqa: E402
+from logs import FeederLogParser, LeaderLogParser, LogWatcher  # noqa: E402
+from problems import build_problems  # noqa: E402
+from timeline import build_timeline  # noqa: E402
 
 # Hostnames from docs/CLUSTER_INVENTORY.md; .151 reports `uther` but is merlin.
 HOST_NAMES = {
@@ -123,6 +127,10 @@ class Snapshots:
         self.certificates: dict[tuple, int] = {}
         self.match_inputs: dict[str, tuple[dict, bytes]] = {}
         self.dependency_cache: dict[tuple, list[tuple[int, int]]] = {}
+        self.descriptions: dict[str, dict] = {}
+        state = deployments / campaign
+        self.leader_log = LogWatcher(state / "leader.log", LeaderLogParser())
+        self.feeder_log = LogWatcher(state / "feeder.log", FeederLogParser())
 
     # ----- caching -------------------------------------------------------
 
@@ -151,28 +159,40 @@ class Snapshots:
         except sqlite3.Error as error:
             connection = None
             warnings.append({"section": "campaign", "message": f"cannot open leader database: {error}"})
+        for watcher in (self.leader_log, self.feeder_log):
+            try:
+                watcher.poll(started)
+            except OSError as error:
+                warnings.append({"section": "logs", "message": f"{watcher.path.name}: {error}"})
+
+        def run(name, build, needs_database=True):
+            try:
+                if needs_database and connection is None:
+                    raise RuntimeError("leader database unavailable")
+                snapshot[name] = build()
+                self.previous[name] = snapshot[name]
+            except Exception as error:  # keep serving the last good section
+                warnings.append({"section": name, "message": f"{type(error).__name__}: {error}"})
+                snapshot[name] = self.previous.get(name)
+                snapshot["stale"].append(name)
+
         try:
             if connection is not None:
                 connection.execute("BEGIN")  # one consistent WAL read snapshot
-            sections = (
-                ("status", lambda: self.build_status(connection, state, started)),
-                ("fleet", lambda: self.build_fleet(connection, started, warnings)),
-                ("roots", lambda: self.build_roots(connection, state, started)),
-                ("results", lambda: self.build_results(started, warnings)),
-            )
-            for name, build in sections:
-                try:
-                    if connection is None and name != "results":
-                        raise RuntimeError("leader database unavailable")
-                    snapshot[name] = build()
-                    self.previous[name] = snapshot[name]
-                except Exception as error:  # keep serving the last good section
-                    warnings.append({"section": name, "message": f"{type(error).__name__}: {error}"})
-                    snapshot[name] = self.previous.get(name)
-                    snapshot["stale"].append(name)
+            run("status", lambda: self.build_status(connection, state, started))
+            run("fleet", lambda: self.build_fleet(connection, started, warnings))
+            run("roots", lambda: self.build_roots(connection, state, started))
+            run("timeline", lambda: build_timeline(
+                connection, [node["name"] for node in (snapshot["fleet"] or {}).get("nodes", [])],
+                self.describe_run, started))
+            run("feeder", lambda: build_feeder(state, self.feeder_log, snapshot["roots"], started),
+                needs_database=False)
+            run("problems", lambda: build_problems(snapshot, connection, started, self.describe_run,
+                                                   self.leader_log, self.feeder_log))
         finally:
             if connection is not None:
-                connection.close()
+                connection.close()  # ends the read transaction before slower file work
+        run("results", lambda: self.build_results(started, warnings), needs_database=False)
         snapshot["build_seconds"] = round(self.clock() - started, 3)
         return snapshot
 
@@ -211,6 +231,15 @@ class Snapshots:
             dp, _, digest = decode_input(specification)
             self.match_inputs[key] = (dp, digest)
         return self.match_inputs[key]
+
+    def describe_run(self, run: dict) -> dict:
+        """describe(), memoized by run id; a run's specification never changes."""
+        key = run["run_id"]
+        if key not in self.descriptions:
+            if len(self.descriptions) > 200_000:
+                self.descriptions.clear()
+            self.descriptions[key] = self.describe(run)
+        return self.descriptions[key]
 
     def describe(self, run: dict) -> dict:
         """Return a compact, human-oriented description of one run."""

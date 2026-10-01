@@ -134,3 +134,47 @@ def results_campaign(deployments: Path) -> dict:
     (directory / "pipeline.json").write_text(json.dumps({"fields": {
         "5^3": {"p": 5, "r": 3, "matching_admission": "field limit"}}}))
     return {"dp_digest": digest}
+
+
+def feeder_state(deployments: Path) -> None:
+    """Pipeline files for the live campaign: one given-up field, a dead feeder pid,
+    and leader/feeder logs with one earlier session."""
+    state = deployments / "live"
+    (state / "pipeline.json").write_text(json.dumps({
+        "version": 1, "policy": "legacy", "feeder_state": "running", "last_reconcile": NOW - 60,
+        "demand": {"ready_dp_tiles": 1, "ready_tile_target": 18, "active_dp_roots": 1},
+        "settings": {"max_dp_attempts": 3, "max_dp_roots": 8, "target_dp_roots": 2,
+                     "max_ready_fields": 4, "minimum_free_bytes": 1, "max_state_bytes": 16 * 1024**3,
+                     "max_visits": 30_000_000_000_000, "dp_threads": 16, "tile_side": 512},
+        "fields": {
+            "5^3": {"p": 5, "r": 3, "dp_attempts": [{"run_id": "root-5-3", "state": "waiting"}],
+                    "dp_current_run_id": "root-5-3", "dp_current_state": "waiting",
+                    "dp_state": "waiting", "matching_attempts": []},
+            "97^3": {"p": 97, "r": 3, "dp_attempts": [{"run_id": f"x{i}", "state": "failed"} for i in range(3)],
+                     "dp_current_run_id": "x2", "dp_current_state": "failed", "dp_state": "failed",
+                     "matching_attempts": []},
+        }}))
+    (state / "feeder_process.json").write_text(json.dumps({
+        "pid": 2**22 + 12345, "command": ["python3", "continuous_campaign.py", "--state", str(state),
+                                          "run", "--interval", "120"]}))
+    (state / "leader.log").write_text(
+        "leader listening on http://0.0.0.0:8061\n"
+        "Exception occurred during processing of request from ('192.168.4.101', 5000)\n"
+        "Traceback (most recent call last):\n"
+        "sqlite3.OperationalError: database is locked\n"
+        + "-" * 40 + "\n"
+        "leader listening on http://0.0.0.0:8061\n"
+        "Exception occurred during processing of request from ('192.168.4.151', 5001)\n"
+        "Traceback (most recent call last):\n"
+        "BrokenPipeError: [Errno 32] Broken pipe\n"
+        + "-" * 40 + "\n")
+    (state / "feeder.log").write_text(
+        '{"collected_dp": 0, "added_dp": 1, "matching": {}}\n'
+        "continuous campaign will retry: <urlopen error [Errno 101] Network is unreachable>\n"
+        '{"collected_dp": 0, "added_dp": 0, "matching": {}}\n')
+
+
+LOCKED_BLOCK = ("Exception occurred during processing of request from ('192.168.4.101', 6000)\n"
+                "Traceback (most recent call last):\n"
+                "  File \"leader.py\", line 508, in dispatch_post\n"
+                "sqlite3.OperationalError: database is locked\n" + "-" * 40 + "\n")
