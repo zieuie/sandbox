@@ -68,3 +68,8 @@ If the physical peak does not fit reliably, the next architecture is ownership
 partitioning of `left`, `right`, distance, and frontier state with batched
 cross-node exchanges. That removes replication but is a separate distributed
 algorithm and should not be mixed into the compact-layout deployment.
+
+The proposed separate solver is specified in
+[Partitioned matching](../docs/PARTITIONED_MATCHING.md), including ownership,
+exact search, communication bounds, memory accounting, and recovery. Its
+allocation estimates are design calculations, not measured production limits.

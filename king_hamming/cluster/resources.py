@@ -49,6 +49,7 @@ class ResourceRequest:
     coordinator_memory_bytes: int
     worker_memory_bytes: int
     min_cpu_count: int
+    require_known_capacity: bool = False
 
     @classmethod
     def from_adapter(cls, raw: Any) -> "ResourceRequest":
@@ -59,7 +60,10 @@ class ResourceRequest:
                 any(type(raw.get(key)) is not int or raw[key] < 0 for key in keys) or
                 raw["min_cpu_count"] < 1):
             raise ValueError("adapter requested invalid node resources")
-        return cls(*(raw[key] for key in keys))
+        strict = raw.get("require_known_capacity", False)
+        if type(strict) is not bool:
+            raise ValueError("adapter requested invalid capacity validation")
+        return cls(*(raw[key] for key in keys), require_known_capacity=strict)
 
     def memory_for(self, role: str) -> int:
         """Return the host-memory request for coordinator or worker role."""
@@ -101,6 +105,8 @@ class NodeCapacity:
         """
 
         memory = request.memory_for(role)
+        if request.require_known_capacity and (self.cpu_count == 0 or self.memory_bytes == 0):
+            return False
         return ((self.cpu_count == 0 or self.cpu_count >= request.min_cpu_count) and
                 (self.memory_bytes == 0 or self.usable_memory_bytes >= memory))
 

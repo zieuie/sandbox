@@ -22,9 +22,9 @@ DP_PROGRAMS = {"dp", "dp_distributed"}
 MATCH_PROGRAMS = {"match", "match_distributed"}
 
 
-def permutation_entries(dp: dict) -> int:
-    """Count cells in the conceptual rows-by-(q+1) permutation array."""
-    return (dp["theta"] * dp["f"] * dp["f"] + dp["q"]) * (dp["q"] + 1)
+def permutation_count(dp: dict) -> int:
+    """Count the permutations (rows), not the array's individual cells."""
+    return dp["theta"] * dp["f"] * dp["f"] + dp["q"]
 
 
 def certificate_status(path: Path, artifact_hash: str, dp: dict, dp_hash: bytes) -> int:
@@ -85,7 +85,7 @@ def records(deployments: Path) -> dict[tuple[int, int], dict]:
                 if program in DP_PROGRAMS:
                     arguments = specification["arguments"]
                     key = arguments["p"], arguments["r"]
-                    record = fields.setdefault(key, {"entries": None, "outcomes": set(), "active": False})
+                    record = fields.setdefault(key, {"rows": None, "outcomes": set(), "active": False})
                     if state == "complete":
                         path = database.parent / "results" / f"{key[0]}_{key[1]}_{run_id}.khdp"
                         if not path.is_file():
@@ -96,20 +96,20 @@ def records(deployments: Path) -> dict[tuple[int, int], dict]:
                         dp = decode_dp(raw)
                         if (dp["p"], dp["r"]) != key:
                             raise ValueError(f"DP artifact has wrong field: {path}")
-                        count = permutation_entries(dp)
-                        if record["entries"] is not None and record["entries"] != count:
+                        count = permutation_count(dp)
+                        if record["rows"] is not None and record["rows"] != count:
                             raise ValueError(f"conflicting DP results for {key}")
-                        record["entries"] = count
+                        record["rows"] = count
                     elif state in ACTIVE and dispatch_running:
                         record["active"] = True
                 elif program in MATCH_PROGRAMS:
                     dp, _, digest = decode_input(specification)
                     key = dp["p"], dp["r"]
-                    record = fields.setdefault(key, {"entries": None, "outcomes": set(), "active": False})
-                    count = permutation_entries(dp)
-                    if record["entries"] is not None and record["entries"] != count:
+                    record = fields.setdefault(key, {"rows": None, "outcomes": set(), "active": False})
+                    count = permutation_count(dp)
+                    if record["rows"] is not None and record["rows"] != count:
                         raise ValueError(f"conflicting DP results for {key}")
-                    record["entries"] = count
+                    record["rows"] = count
                     if state == "complete":
                         filename = f"{key[0]}_{key[1]}_{run_id}.khmatch"
                         path = database.parent / "matching-results" / filename
@@ -133,7 +133,7 @@ def markdown(fields: dict[tuple[int, int], dict]) -> str:
     lines = [
         "# Results across retained campaigns",
         "",
-        "Each number is the exact number of entries in the permutation array. "
+        "Each number is the exact number of permutations (rows) in the array. "
         "`^` means a completed full matching; `*` means a certified Hall obstruction "
         "for a tested polynomial (not necessarily every polynomial). "
         "`(running)` means DP or matching is in progress; `—` means no completed DP value.",
@@ -148,7 +148,7 @@ def markdown(fields: dict[tuple[int, int], dict]) -> str:
             if record is None:
                 cells.append("—")
                 continue
-            count = record["entries"]
+            count = record["rows"]
             if count is None:
                 cells.append("(running)" if record["active"] else "—")
                 continue

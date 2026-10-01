@@ -253,6 +253,11 @@ dependency waves no longer leave most of the fleet idle.
   alone; retain headroom and reject unsafe coordinator placement.
 - Design truly partitioned field, matching, distance, and predecessor ownership so
   `2^29` does not require every machine to replicate giant logical arrays.
+  The separate-solver proposal is now in
+  [`docs/PARTITIONED_MATCHING.md`](docs/PARTITIONED_MATCHING.md): owned cells and
+  vertex arrays, an exact augmenting-forest baseline, bounded peer traffic,
+  portable recovery, and explicit memory/throughput acceptance gates. It remains
+  a design; implementation and production admission are future work.
 - Define portable partition/checkpoint metadata so a job can resume with a
   different worker count or ownership split.
 - Treat out-of-core/random-access storage only as a measured fallback; do not assume
@@ -425,6 +430,12 @@ boundaries.
   homogeneous cores, RAM, storage, or network.
 
 ## Useful entry points
+
+- Capacity-first campaign policy: `campaigns/capacity_campaign.py` and
+  `docs/CAPACITY_CAMPAIGN.md`. Single-host dispatch and minimum-owner planning
+  are tested. Managed partitioned execution now has durable all-owner recovery,
+  lease fencing and resource admission. See that document for rollout evidence
+  and remaining large-field validation; do not infer deployment from source alone.
 
 - Operations: `docs/CONTINUOUS_CAMPAIGN.md`
 - Generic runtime: `cluster/leader.py`, `cluster/agent.py`, `cluster/adapters.py`

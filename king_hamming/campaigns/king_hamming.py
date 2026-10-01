@@ -80,9 +80,12 @@ def atomic_save(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
-def run_rows(state: Path, leader: str) -> tuple[dict[str, dict], list[dict]]:
+def run_rows(state: Path, leader: str, required_capability=None) -> tuple[dict[str, dict], list[dict]]:
     """Return all roots plus nodes, bypassing the public status row limit."""
     status = request(leader, "/v1/status")
+    required = ([required_capability] if isinstance(required_capability, str) else required_capability) or []
+    if not set(required) <= set(status.get("capabilities", [])):
+        raise RuntimeError("capacity campaign requires an upgraded leader with capacity admission and partitioned matching")
     database = state / "leader.sqlite"
     if not database.exists():
         return ({row["run_id"]: row for row in status["runs"]
@@ -185,7 +188,7 @@ def matching_worker_count(dp: dict, settings: dict) -> int:
     return settings["matching_workers"]
 
 
-def matchable_backlog(pipeline: dict) -> int:
+def matchable_backlog(pipeline: dict, nodes=(), policy=None) -> int:
     """Count retained DP artifacts that can currently enter matching.
 
     DP results outside the matching limits are useful retained work, not queue
@@ -198,7 +201,12 @@ def matchable_backlog(pipeline: dict) -> int:
         if not record.get("dp_artifact") or record.get("matching_complete"):
             continue
         dp, _ = load_dp(Path(record["dp_artifact"]))
-        admitted, reason = matching_admitted(dp, settings)
+        if policy is None:
+            admitted, reason = matching_admitted(dp, settings)
+        else:
+            plan = policy.plan(dp, settings, nodes)
+            record["matching_plan"] = plan
+            admitted, reason = plan["admitted"], plan["reason"]
         record["matching_admission"] = reason
         if admitted:
             ready += 1
@@ -220,29 +228,70 @@ def archive_matching(state: Path, record: dict, attempt: dict, run: dict,
 
 
 def enqueue_attempt(manifest: dict, pipeline: dict, record: dict,
-                    polynomial: list[int], rerun: bool = False) -> None:
+                    polynomial: list[int], rerun: bool = False, plan=None) -> None:
     settings = pipeline["settings"]
     dp, _ = load_dp(Path(record["dp_artifact"]))
-    workers = matching_worker_count(dp, settings)
-    job = matching_specification(
-        Path(record["dp_artifact"]), ",".join(map(str, polynomial)),
-        settings["matching_threads"], settings["max_matching_bytes"],
-        distributed=True, max_edges=settings["max_matching_edges"],
-        max_field_elements=settings["max_field_elements"],
-        workers=workers,
-    )
+    workers = matching_worker_count(dp, settings) if plan is None else plan["workers"]
+    if plan is not None and (not plan["admitted"] or plan["program"] not in {"match", "match_partitioned"}):
+        raise ValueError("capacity policy cannot submit an inadmissible plan")
+    if plan is not None and plan["program"] == "match_partitioned":
+        from matching_solver_multi.submit import specification as partitioned_specification
+        job = partitioned_specification(
+            Path(record["dp_artifact"]), ",".join(map(str, polynomial)), workers=workers,
+            threads=plan["threads"], batch=plan["batch"], margin=settings["memory_margin_percent"],
+            max_bytes=settings["max_matching_bytes"], max_edges=settings["max_matching_edges"],
+            max_field_elements=settings["max_field_elements"])
+    else:
+        job = matching_specification(
+            Path(record["dp_artifact"]), ",".join(map(str, polynomial)),
+            settings["matching_threads"] if plan is None else plan["threads"],
+            settings["max_matching_bytes"] if plan is None else plan["max_bytes"],
+            distributed=plan is None, max_edges=settings["max_matching_edges"],
+            max_field_elements=settings["max_field_elements"], workers=workers)
+    if plan is not None:
+        job["arguments"]["require_known_capacity"] = True
     payload = {"specification": job,
                "priority": settings["matching_priority"]}
     if rerun:
         payload["rerun"] = True
     result = request(manifest["leader"], "/v1/enqueue", payload)
-    record["matching_attempts"].append({"poly": polynomial, **result})
+    attempt = {"poly": polynomial, **result}
+    if plan is not None:
+        attempt["plan"] = plan
+    record["matching_attempts"].append(attempt)
+
+
+def recover_matching_attempts(pipeline: dict, runs: dict[str, dict]) -> None:
+    """Recover enqueue replies lost before a capacity feeder saved its state.
+
+    Capacity-dependent thread/memory settings change the queue specification hash.
+    Reattach existing exact DP/polynomial attempts before considering a new plan.
+    """
+    by_digest = {}
+    for record in pipeline["fields"].values():
+        if record.get("dp_artifact") and not record.get("matching_complete"):
+            _, digest = load_dp(Path(record["dp_artifact"]))
+            by_digest[digest.hex()] = record
+    for run_id, run in sorted(runs.items(), key=lambda item: float(item[1].get("created") or 0)):
+        specification = run.get("specification")
+        if isinstance(specification, str):
+            specification = json.loads(specification)
+        if not isinstance(specification, dict) or specification.get("program") not in {"match", "match_distributed", "match_partitioned"}:
+            continue
+        arguments = specification["arguments"]
+        record = by_digest.get(arguments.get("dp_sha256"))
+        if record is None or any(attempt["run_id"] == run_id for attempt in record["matching_attempts"]):
+            continue
+        record["matching_attempts"].append({"run_id": run_id, "poly": arguments["poly"],
+                                           "state": run["state"], "recovered": True})
 
 
 def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
-                     nodes: list[dict], pipeline: dict) -> dict[str, int]:
+                     nodes: list[dict], pipeline: dict, policy=None) -> dict[str, int]:
     """Archive outcomes, retry obstructions, and submit ready fields."""
     counts, settings = Counter(), pipeline["settings"]
+    if policy is not None:
+        recover_matching_attempts(pipeline, runs)
     live_nodes = sum(bool(node.get("compute_enabled", True)) and
                      node.get("state", "healthy") == "healthy" for node in nodes)
     records = sorted(pipeline["fields"].values(), key=lambda item: item.get("edges", 2**63))
@@ -250,11 +299,9 @@ def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
         if not record.get("dp_artifact") or record.get("matching_complete"):
             continue
         dp, _ = load_dp(Path(record["dp_artifact"]))
-        admitted, reason = matching_admitted(dp, settings)
-        record["matching_admission"] = reason
-        if not admitted:
-            counts["inadmissible"] += 1
-            continue
+        # Collect existing outcomes even when capacity or admission changed.
+        # A healthy result must not disappear behind a new resource limit.
+        polynomial, rerun = None, False
         attempts = record["matching_attempts"]
         if attempts:
             for attempt in attempts:
@@ -279,44 +326,53 @@ def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
                 if finished and time.time() - finished < settings["matching_retry_seconds"]:
                     counts["retry_wait"] += 1
                     continue
-                enqueue_attempt(manifest, pipeline, record, latest["poly"], rerun=True)
-                counts["retried"] += 1
+                polynomial, rerun = latest["poly"], True
+            elif run["state"] != "complete":
                 continue
-            if run["state"] != "complete":
-                continue
-            if not latest.get("archive"):
-                latest["archive"] = str(archive_matching(
-                    state, record, latest, run, settings, nodes))
-                counts["archived"] += 1
-            if run.get("progress_done", 0) >= run.get("progress_total", 0):
-                record["matching_complete"] = True
-                counts["completed"] += 1
-                continue
-            polynomial = next_primitive(record["p"], record["r"], record["q"], latest["poly"])
-            if polynomial is None:
-                record["candidate_exhausted"] = True
-                counts["exhausted"] += 1
-                continue
+            else:
+                if not latest.get("archive"):
+                    latest["archive"] = str(archive_matching(
+                        state, record, latest, run, settings, nodes))
+                    counts["archived"] += 1
+                if run.get("progress_done", 0) >= run.get("progress_total", 0):
+                    record["matching_complete"] = True
+                    counts["completed"] += 1
+                    continue
+                polynomial = next_primitive(record["p"], record["r"], record["q"], latest["poly"])
+                if polynomial is None:
+                    record["candidate_exhausted"] = True
+                    counts["exhausted"] += 1
+                    continue
+        plan = policy.plan(dp, settings, nodes) if policy else None
+        if plan is None:
+            admitted, reason = matching_admitted(dp, settings)
         else:
+            record["matching_plan"] = plan
+            admitted, reason = plan["admitted"], plan["reason"]
+        record["matching_admission"] = reason
+        if not admitted:
+            counts["inadmissible"] += 1
+            continue
+        if polynomial is None:
             polynomial = first_primitive(record["p"], record["r"], record["q"])
-        required_workers = matching_worker_count(dp, settings)
+        required_workers = matching_worker_count(dp, settings) if plan is None else plan["workers"]
         if live_nodes < required_workers:
             record["matching_admission"] = "waiting for nodes"
             counts["waiting_nodes"] += 1
             continue
-        enqueue_attempt(manifest, pipeline, record, polynomial)
-        counts["submitted"] += 1
+        enqueue_attempt(manifest, pipeline, record, polynomial, rerun=rerun, plan=plan)
+        counts["retried" if rerun else "submitted"] += 1
     return dict(counts)
 
 
 def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: dict,
-                 nodes: list[dict] | tuple = ()) -> int:
+                 nodes: list[dict] | tuple = (), policy=None) -> int:
     """Keep a bounded root backlog while respecting disk and matchable pressure."""
     settings = pipeline["settings"]
     if shutil.disk_usage(state).free < settings["minimum_free_bytes"]:
         pipeline["feeder_state"] = "local disk watermark"
         return 0
-    ready = matchable_backlog(pipeline)
+    ready = matchable_backlog(pipeline, nodes, policy)
     if ready >= settings["max_ready_fields"]:
         pipeline["feeder_state"] = "matching backpressure"
         return 0
@@ -395,12 +451,13 @@ def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: d
 def render_status(pipeline: dict, runs: dict[str, dict], nodes: list[dict]) -> str:
     lines = ["# Continuous DP and matching campaign", "",
              f"Updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", "",
-             f"Feeder: `{pipeline.get('feeder_state', 'unknown')}`; nodes: {len(nodes)}", "",
+             f"Feeder: `{pipeline.get('feeder_state', 'unknown')}`; nodes: {len(nodes)}; "
+             f"policy: `{pipeline.get('policy', 'legacy')}`", "",
              ("Demand: " + ", ".join(f"{key}={value}" for key, value in
                                       pipeline.get("demand", {}).items())) if pipeline.get("demand") else "",
              "" if pipeline.get("demand") else "",
-             "| Field | DP | Matching | Attempts | Admission |",
-             "| --- | --- | --- | ---: | --- |"]
+             "| Field | DP | Matching | Attempts | Planned engine / machines | Admission |",
+             "| --- | --- | --- | ---: | --- | --- |"]
     for field, record in sorted(pipeline["fields"].items(), key=lambda item: item[1].get("edges", 2**63)):
         attempts = record.get("matching_attempts", [])
         matching = "complete" if record.get("matching_complete") else "not queued"
@@ -408,7 +465,9 @@ def render_status(pipeline: dict, runs: dict[str, dict], nodes: list[dict]) -> s
             selected = preferred_attempt(attempts, runs)
             attempt, run = selected if selected is not None else (attempts[-1], None)
             matching = (run or attempt).get("state", "unknown")
-        lines.append(f"| {field} | {record.get('dp_state', 'unknown')} | {matching} | {len(attempts)} | {record.get('matching_admission', '—')} |")
+        plan = record.get("matching_plan", {})
+        engine = f"{plan['program']} / {plan['workers']}" if plan.get("program") else "—"
+        lines.append(f"| {field} | {record.get('dp_state', 'unknown')} | {matching} | {len(attempts)} | {engine} | {record.get('matching_admission', '—')} |")
     return "\n".join(lines) + "\n"
 
 
@@ -420,12 +479,14 @@ def reconcile(state: Path) -> dict:
         pipeline = json.loads(pipeline_path.read_text())
         for key, value in DEFAULTS.items():
             pipeline.setdefault("settings", {}).setdefault(key, value)
-        validate_settings(pipeline["settings"])
+        validate_settings(pipeline["settings"], pipeline.get("policy", "legacy"))
+        policy = matching_policy(pipeline)
         manifest = json.loads((state / "manifest.json").read_text())
-        runs, nodes = run_rows(state, manifest["leader"])
+        runs, nodes = run_rows(state, manifest["leader"],
+                              ["known-capacity-admission-v1", "partitioned-matching-v1"] if policy is not None else None)
         collected = collect_dp(state, manifest, runs, pipeline, nodes)
-        matching = advance_matching(state, manifest, runs, nodes, pipeline)
-        added = replenish_dp(state, manifest, runs, pipeline, nodes)
+        matching = advance_matching(state, manifest, runs, nodes, pipeline, policy)
+        added = replenish_dp(state, manifest, runs, pipeline, nodes, policy)
         pipeline["last_reconcile"] = time.time()
         atomic_save(pipeline_path, pipeline)
         temporary = state / "PIPELINE_STATUS.tmp"
@@ -436,7 +497,7 @@ def reconcile(state: Path) -> dict:
                 "feeder": pipeline["feeder_state"]}
 
 
-def validate_settings(settings: dict) -> None:
+def validate_settings(settings: dict, policy_name="legacy") -> None:
     positive = ("target_dp_roots", "max_dp_roots", "target_ready_dp_tiles",
                 "max_ready_fields", "max_dp_attempts",
                 "max_matching_attempts", "matching_retry_seconds",
@@ -456,11 +517,25 @@ def validate_settings(settings: dict) -> None:
             not 2 <= settings["matching_medium_workers"] <= 256 or \
             settings["matching_small_requests"] > settings["matching_medium_requests"]:
         raise ValueError("invalid matching group tiers")
-    if settings["matching_workers"] * settings["matching_threads"] > 256:
+    if policy_name == "legacy" and settings["matching_workers"] * settings["matching_threads"] > 256:
         raise ValueError("matching worker/thread product exceeds adapter limit")
 
 
-def initialize(state: Path, arguments: argparse.Namespace) -> dict:
+def matching_policy(pipeline: dict):
+    """Resolve a persisted policy; old deployments retain their existing behavior."""
+    name = pipeline.get("policy", "legacy")
+    if name == "legacy":
+        return None
+    if name != "capacity":
+        raise ValueError(f"unsupported continuous campaign policy: {name}")
+    from campaigns.capacity_policy import CapacityPolicy, DEFAULTS as extra, validate
+    for key, value in extra.items():
+        pipeline["settings"].setdefault(key, value)
+    validate(pipeline["settings"])
+    return CapacityPolicy()
+
+
+def initialize(state: Path, arguments: argparse.Namespace, policy_name="legacy") -> dict:
     """Create pipeline policy beside an existing fresh unified deployment."""
     if not (state / "manifest.json").exists():
         raise ValueError("start the unified cluster deployment before initializing its feeder")
@@ -468,21 +543,70 @@ def initialize(state: Path, arguments: argparse.Namespace) -> dict:
     if path.exists():
         raise ValueError("pipeline state already exists")
     settings = {key: getattr(arguments, key) for key in DEFAULTS}
-    validate_settings(settings)
-    pipeline = {"version": 1, "settings": settings, "fields": {},
+    if policy_name == "capacity":
+        from campaigns.capacity_policy import DEFAULTS as extra
+        settings.update({key: getattr(arguments, key) for key in extra})
+    validate_settings(settings, policy_name)
+    pipeline = {"version": 1, "policy": policy_name, "settings": settings, "fields": {},
                 "feeder_state": "initialized", "created": time.time()}
+    matching_policy(pipeline)
     atomic_save(path, pipeline)
     return pipeline
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def adopt_capacity(state: Path) -> dict:
+    """Switch a quiescent, upgraded deployment without losing retained work.
+
+    Hold both the feeder lock and the leader's write lock through publication,
+    so neither reconciliation nor a racing resume can cross the safety check.
+    Existing jobs retain their original solver and checkpoint format.
+    """
+    with (state / "pipeline.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        manifest = json.loads((state / "manifest.json").read_text())
+        run_rows(state, manifest["leader"],
+                 ["known-capacity-admission-v1", "partitioned-matching-v1"])
+        with sqlite3.connect(f"file:{state / 'leader.sqlite'}?mode=rw", uri=True) as database:
+            database.execute("BEGIN IMMEDIATE")
+            campaign_state = database.execute("SELECT value FROM settings WHERE key='campaign_state'").fetchone()
+            active = database.execute("SELECT COUNT(*) FROM runs WHERE state IN ('running','stopping')").fetchone()[0]
+            if campaign_state != ("stopped",) or active:
+                raise RuntimeError("stop and quiesce the campaign before adopting capacity policy")
+            path = state / "pipeline.json"
+            pipeline = json.loads(path.read_text())
+            if pipeline.get("policy") == "capacity":
+                return {"policy": "capacity", "changed": False}
+            if pipeline.get("policy", "legacy") != "legacy":
+                raise ValueError("unsupported prior campaign policy")
+            backup = state / "pipeline.before-capacity.json"
+            if backup.exists():
+                raise ValueError("capacity backup already exists; inspect prior migration before retrying")
+            prior = json.loads(path.read_text())
+            pipeline["policy"] = "capacity"
+            matching_policy(pipeline)
+            validate_settings(pipeline["settings"], "capacity")
+            atomic_save(backup, prior)
+            atomic_save(path, pipeline)
+            return {"policy": "capacity", "changed": True, "backup": str(backup),
+                    "limits_unchanged": True, "campaign_state": "stopped"}
+
+
+def main(policy_name="legacy") -> int:
+    description = (__doc__ if policy_name == "legacy" else
+                   "Continuous capacity policy: existing single-host matching, minimum-owner partitioned fallback.")
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--state", type=Path, required=True,
                         help="fresh launch_dp.py deployment directory")
     commands = parser.add_subparsers(dest="action")
     setup = commands.add_parser("init", help="create retained feeder policy")
     for key, default in DEFAULTS.items():
         setup.add_argument("--" + key.replace("_", "-"), type=int, default=default)
+    if policy_name == "capacity":
+        from campaigns.capacity_policy import DEFAULTS as extra
+        for key, default in extra.items():
+            setup.add_argument("--" + key.replace("_", "-"), type=int, default=default)
+        commands.add_parser("plan", help="read-only capacity preview using current saved fields and live nodes")
+        commands.add_parser("adopt", help="switch a stopped, upgraded deployment while retaining results and limits")
     commands.add_parser("once", help="perform one reconciliation pass")
     watch = commands.add_parser("run", help="reconcile indefinitely")
     watch.add_argument("--interval", type=int, default=120)
@@ -493,13 +617,30 @@ def main() -> int:
         return 0
     state = arguments.state.resolve()
     try:
-        if arguments.action == "init":
-            print(json.dumps(initialize(state, arguments), indent=2))
+        if arguments.action == "adopt":
+            print(json.dumps(adopt_capacity(state), indent=2))
+        elif arguments.action == "plan":
+            from campaigns.capacity_policy import CapacityPolicy, DEFAULTS as extra
+            pipeline = json.loads((state / "pipeline.json").read_text())
+            settings = {**DEFAULTS, **extra, **pipeline["settings"]}
+            matching_policy({"policy": "capacity", "settings": settings})
+            manifest = json.loads((state / "manifest.json").read_text())
+            _, nodes = run_rows(state, manifest["leader"])
+            plans = {field: CapacityPolicy().plan(load_dp(Path(record["dp_artifact"]))[0], settings, nodes)
+                     for field, record in pipeline["fields"].items()
+                     if record.get("dp_artifact") and not record.get("matching_complete")}
+            print(json.dumps(plans, indent=2))
+        elif arguments.action == "init":
+            print(json.dumps(initialize(state, arguments, policy_name), indent=2))
         elif arguments.action == "once":
+            if policy_name == "capacity" and json.loads((state / "pipeline.json").read_text()).get("policy") != "capacity":
+                raise ValueError("not a capacity campaign; preview with plan, do not change the live feeder")
             print(json.dumps(reconcile(state), indent=2))
         elif arguments.action == "status":
             print((state / "PIPELINE_STATUS.md").read_text(), end="")
         else:
+            if policy_name == "capacity" and json.loads((state / "pipeline.json").read_text()).get("policy") != "capacity":
+                raise ValueError("not a capacity campaign; preview with plan, do not change the live feeder")
             if arguments.interval < 10:
                 raise ValueError("poll interval must be at least 10 seconds")
             while True:

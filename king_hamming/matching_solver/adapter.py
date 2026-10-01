@@ -78,6 +78,8 @@ class MatchingAdapter(SolverAdapter):
             raise ValueError("matching polynomial must be primitive with generator X")
         threads = arguments.get("threads", 1)
         maximum = arguments.get("max_bytes", 2**31)
+        if type(arguments.get("require_known_capacity", False)) is not bool:
+            raise ValueError("invalid known-capacity requirement")
         if type(threads) is not int or not 1 <= threads <= 1024 or type(maximum) is not int or not 1 <= maximum <= 2**40:
             raise ValueError("invalid matching thread or memory limit")
         if specification["program"] == "match_distributed":
@@ -99,13 +101,19 @@ class MatchingAdapter(SolverAdapter):
         """Account for the coordinator and shard colocated on the lease owner."""
         arguments = specification["arguments"]
         if specification["program"] != "match_distributed":
-            return {"coordinator_memory_bytes": int(arguments.get("max_bytes", 2**31)),
-                    "worker_memory_bytes": 0, "min_cpu_count": 1}
+            resources = {"coordinator_memory_bytes": int(arguments.get("max_bytes", 2**31)),
+                         "worker_memory_bytes": 0, "min_cpu_count": 1}
+            if arguments.get("require_known_capacity"):
+                resources["require_known_capacity"] = True
+            return resources
         dp, _, _ = decode_input(specification)
         coordinator, shard = distributed_memory_required(
             dp, int(arguments.get("workers", 2)), int(arguments.get("threads", 1)))
-        return {"coordinator_memory_bytes": coordinator + shard,
-                "worker_memory_bytes": shard, "min_cpu_count": 1}
+        resources = {"coordinator_memory_bytes": coordinator + shard,
+                     "worker_memory_bytes": shard, "min_cpu_count": 1}
+        if arguments.get("require_known_capacity"):
+            resources["require_known_capacity"] = True
+        return resources
 
     def retry_elsewhere(self, specification):
         """Requeue a lost group under a newly fenced reservation rather than restarting stale pipes."""

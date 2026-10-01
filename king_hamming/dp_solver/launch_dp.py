@@ -109,6 +109,7 @@ def start(arguments: argparse.Namespace, path: Path) -> None:
         facts = dict(zip(arguments.hosts, pool.map(preflight, arguments.hosts)))
     subprocess.run(['make', '-C', str(ROOT.parent/'dp_solver'), 'all'], check=True)
     subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver'), 'all'], check=True)
+    subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver_multi'), 'all'], check=True)
     entries = list(scheduling.campaign(16*1024**3, arguments.max_visits, 4, 512))[:arguments.limit]
     if not entries:
         raise ValueError('no calculations fit the requested frontier')
@@ -415,6 +416,7 @@ def upgrade_workers(path: Path) -> None:
         save(report_path, report)
         subprocess.run(['make', '-C', str(ROOT.parent/'dp_solver'), 'all'], check=True)
         subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver'), 'all'], check=True)
+        subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver_multi'), 'all'], check=True)
         archive = bundle()
         runtime_version = hashlib.sha256(archive).hexdigest()
         report["runtime_version"] = runtime_version

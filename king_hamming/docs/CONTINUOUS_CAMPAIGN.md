@@ -9,7 +9,7 @@ leader physical core reserved. Its retained state is
 
 ```sh
 # Prime-by-exponent table across every retained campaign. Cells are the exact
-# permutation-array entry counts; ^ means matching, * means obstruction.
+# permutation counts (rows); ^ means matching, * means obstruction.
 python3 king_hamming/campaigns/result_table.py
 
 # Concise DP-to-matching table and feeder backpressure state.

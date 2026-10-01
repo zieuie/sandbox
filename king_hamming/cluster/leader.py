@@ -473,6 +473,7 @@ def make_handler(
                         "lease_seconds": lease_seconds,
                         "checkpoint_keep": checkpoint_keep,
                         "schema_version": schema_version,
+                        "capabilities": ["known-capacity-admission-v1", "partitioned-matching-v1"],
                         "scheduler": scheduler.snapshot(),
                         "runs": runs,
                         "nodes": nodes,

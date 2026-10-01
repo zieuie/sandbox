@@ -33,6 +33,19 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(cpu_count("0, 1,1,7"), 3)
         self.assertEqual(cpu_count(""), 0)
 
+    def test_strict_jobs_reject_unknown_capacity_at_dispatch(self) -> None:
+        request = ResourceRequest.from_adapter({
+            "coordinator_memory_bytes": 1024**3, "worker_memory_bytes": 0,
+            "min_cpu_count": 1, "require_known_capacity": True,
+        })
+        self.assertFalse(NodeCapacity(8, 0).fits(request, "coordinator"))
+        self.assertFalse(NodeCapacity(0, 8 * 1024**3).fits(request, "coordinator"))
+        self.assertTrue(NodeCapacity(8, 8 * 1024**3).fits(request, "coordinator"))
+        with self.assertRaises(ValueError):
+            ResourceRequest.from_adapter({"coordinator_memory_bytes": 1,
+                                          "worker_memory_bytes": 0, "min_cpu_count": 1,
+                                          "require_known_capacity": "yes"})
+
     def test_fit_retains_unknown_capacity_compatibility(self) -> None:
         request = ResourceRequest(4 * 1024**3, 3 * 1024**3, 2)
         self.assertTrue(NodeCapacity(0, 0).fits(request, "coordinator"))

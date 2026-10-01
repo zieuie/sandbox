@@ -10,3 +10,5 @@ def configure(register):
     register(DPAdapter())
     from matching_solver.adapter import MatchingAdapter
     register(MatchingAdapter())
+    from matching_solver_multi.adapter import PartitionedAdapter
+    register(PartitionedAdapter())
