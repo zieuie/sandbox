@@ -11,6 +11,11 @@ Naming note: the physical leader is now called **merlin**, but its transplanted
 SSD still reports the hostname `uther`. Both names refer to `192.168.4.151` in
 the design until the hostname is changed.
 
+Added 2026-10-01: `192.168.4.152` (**pellinore**, fleet name `dp-152`), an
+Intel i7-8750H with 12 logical CPUs and 14.8 GiB RAM. Its section was collected
+with `inventory_cluster.sh --run 192.168.4.152` and appended; the other
+machines' data is still from the generation date above.
+
 ## Initial design implications
 
 - All nine machines responded successfully over SSH.
@@ -44,6 +49,7 @@ the design until the hostname is changed.
 | 192.168.4.107 | ok | poets | x86_64 | 8 | 15.5 GiB | 1 | none | Linux 6.17.0-20-generic |
 | 192.168.4.108 | ok | showgirl | x86_64 | 8 | 15.5 GiB | 1 | none | Linux 6.17.0-20-generic |
 | 192.168.4.151 | ok | uther | x86_64 | 16 | 38.9 GiB | 1 | none | Linux 7.0.0-31-generic |
+| 192.168.4.152 | ok | pellinore | x86_64 | 12 | 14.8 GiB | 1 | none | Linux 7.0.0-38-generic |
 
 ## Machine details
 
@@ -1508,6 +1514,160 @@ default via 192.168.4.1 dev wlp48s0 proto dhcp src 192.168.4.151 metric 600
 page_size=4096
 open_files_soft=1024
 open_files_hard=1048576
+transparent_hugepages=always [madvise] never
+```
+
+### 192.168.4.152
+
+- Hostname: `pellinore`
+- CPU model: `Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz`
+- Online CPUs: `12`
+- Memory bytes: `15846043648`
+- NUMA nodes: `1`
+- Virtualization: `none`
+- Watchdog devices: `none`
+- systemd available: `yes`
+- Compiler: ``
+- Uptime: `up 1 hour, 2 minutes`
+
+#### Operating system
+
+```text
+PRETTY_NAME="Ubuntu 26.04 LTS"
+NAME="Ubuntu"
+VERSION_ID="26.04"
+VERSION="26.04 (Resolute Raccoon)"
+VERSION_CODENAME=resolute
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=resolute
+LOGO=ubuntu-logo
+```
+
+#### CPU topology
+
+```text
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           39 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  12
+On-line CPU(s) list:                     0-11
+Vendor ID:                               GenuineIntel
+Model name:                              Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
+CPU family:                              6
+Model:                                   158
+Thread(s) per core:                      2
+Core(s) per socket:                      6
+Socket(s):                               1
+Stepping:                                10
+CPU(s) scaling MHz:                      46%
+CPU max MHz:                             4100.0000
+CPU min MHz:                             800.0000
+BogoMIPS:                                4399.99
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf pni pclmulqdq dtes64 monitor ds_cpl vmx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb pti ssbd ibrs ibpb stibp tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust sgx bmi1 avx2 smep bmi2 erms invpcid mpx rdseed adx smap clflushopt intel_pt xsaveopt xsavec xgetbv1 xsaves dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp vnmi sgx_lc md_clear flush_l1d arch_capabilities
+Virtualization:                          VT-x
+L1d cache:                               192 KiB (6 instances)
+L1i cache:                               192 KiB (6 instances)
+L2 cache:                                1.5 MiB (6 instances)
+L3 cache:                                9 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-11
+Vulnerability Gather data sampling:      Vulnerable
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             KVM: Mitigation: Split huge pages
+Vulnerability L1tf:                      Mitigation; PTE Inversion; VMX conditional cache flushes, SMT vulnerable
+Vulnerability Mds:                       Mitigation; Clear CPU buffers; SMT vulnerable
+Vulnerability Meltdown:                  Mitigation; PTI
+Vulnerability Mmio stale data:           Mitigation; Clear CPU buffers; SMT vulnerable
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Mitigation; IBRS
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; IBRS; IBPB conditional; STIBP conditional; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                     Mitigation; Microcode
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Mitigation; IBPB before exit to userspace
+```
+
+#### Memory
+
+```text
+               total        used        free      shared  buff/cache   available
+Mem:            14Gi       1.1Gi        12Gi        55Mi       2.0Gi        13Gi
+Swap:          4.0Gi          0B       4.0Gi
+```
+
+#### NUMA
+
+```text
+available: 1 nodes (0)
+node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11
+node 0 size: 15111 MB
+node 0 free: 12344 MB
+node distances:
+node     0 
+   0:   10 
+```
+
+#### Block storage
+
+```text
+NAME        TYPE   SIZE ROTA FSTYPE   MOUNTPOINTS                         MODEL
+loop0       loop  66.8M    0 squashfs /snap/core24/1587                   
+loop1       loop  19.6M    0 squashfs /snap/desktop-security-center/150   
+loop2       loop     4K    0 squashfs /snap/bare/5                        
+loop3       loop 273.7M    0 squashfs /snap/firefox/8107                  
+loop4       loop 606.1M    0 squashfs /snap/gnome-46-2404/153             
+loop5       loop  91.7M    0 squashfs /snap/gtk-common-themes/1535        
+loop6       loop   395M    0 squashfs /snap/mesa-2404/1165                
+loop7       loop  15.7M    0 squashfs /snap/snap-store/1367               
+loop8       loop  18.8M    0 squashfs /snap/prompting-client/204          
+loop9       loop  16.5M    0 squashfs /snap/firmware-updater/226          
+loop10      loop   580K    0 squashfs /snap/snapd-desktop-integration/361 
+loop11      loop  49.3M    0 squashfs /snap/snapd/26865                   
+nvme0n1     disk 238.5G    0                                              SAMSUNG MZVLB256HAHQ-000L7
+├─nvme0n1p1 part     1G    0 vfat     /boot/efi                           
+└─nvme0n1p2 part 237.4G    0 ext4     /                                   
+```
+
+#### Mounted filesystems
+
+```text
+Filesystem     Type      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p2 ext4      233G   11G  210G   5% /
+efivarfs       efivarfs  384K   93K  287K  25% /sys/firmware/efi/efivars
+/dev/nvme0n1p1 vfat      1.1G  6.4M  1.1G   1% /boot/efi
+```
+
+#### Watchdog
+
+```text
+
+```
+
+#### Network
+
+```text
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+wlp59s0          UP             192.168.4.152/22 fd47:fae1:3712:1:4561:1983:1b38:29ba/64 fd47:fae1:3712:1:cf76:d4ed:b811:7719/64 fe80::dd00:a588:782:3245/64 
+default via 192.168.4.1 dev wlp59s0 proto dhcp src 192.168.4.152 metric 600 
+```
+
+#### Process and memory limits
+
+```text
+page_size=4096
+open_files_soft=1024
+open_files_hard=524288
 transparent_hugepages=always [madvise] never
 ```
 
