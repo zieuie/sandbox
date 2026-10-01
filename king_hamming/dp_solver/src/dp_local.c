@@ -670,7 +670,7 @@ static bool write_artifact(
     // Emit a versioned, run-length representation for this solver milestone.
     if (fprintf(file,
                 "{\n  \"format\": \"KHDP2-draft\",\n  \"p\": %u,\n  \"r\": %u,\n"
-                "  \"q\": %" PRIu32 ",\n  \"f\": %" PRIu32 ",\n"
+                "  \"q\": %" PRIu64 ",\n  \"f\": %" PRIu32 ",\n"
                 "  \"budget\": %" PRIu32 ",\n  \"theta\": %" PRIu64 ",\n  \"runs\": [",
                 parameters->p,
                 parameters->r,
@@ -742,7 +742,7 @@ static int run(const options_t *options) {
     const char *error;
 
     // Validate the mathematics and obtain checked state dimensions.
-    if (!kh_parameters(options->p, options->r, &parameters, &error) ||
+    if (!kh_parameters_dp64(options->p, options->r, &parameters, &error) ||
         !kh_estimate_resources(&parameters, options->tile_side, &estimate, &error)) {
         return fail(error);
     }

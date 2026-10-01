@@ -57,11 +57,12 @@ Submit the same admitted frontier:
 ./kh.py --leader http://192.168.4.151:8765 campaign --limit 20 --submit
 ```
 
-The generator enumerates prime p and nontrivial odd r with p^r <= UINT32_MAX,
-checks dense state and conservative visit limits, and sorts by work. Repeated
-submission is safe through duplicate reuse. Increase the limit or admission
-bounds to expand the frontier. Under the agreed 32-bit field limit, the supported
-prime-power table is finite. It currently creates DP-stage entries only.
+The generator enumerates prime p and nontrivial odd r with p^r <= UINT64_MAX
+and a uint32 DP budget, checks dense state and conservative visit limits, and
+sorts by work. Repeated submission is safe through duplicate reuse. Increase
+the limit or admission bounds to expand the frontier. Matching and field
+generation retain their separate 32-bit field limit. This command creates
+DP-stage entries only.
 
 ## Evidence
 

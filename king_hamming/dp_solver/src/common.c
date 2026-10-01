@@ -61,57 +61,62 @@ static bool is_prime(uint32_t value) {
  *
  * Parameters:
  *   p: Candidate prime in 2..UINT16_MAX.
- *   r: Candidate odd extension degree in 3..UINT8_MAX.
+ *   r: Candidate odd extension degree in 3..31.
  *   output: Output structure receiving q, F, and B on success.
  *   error: Output pointer receiving a static diagnostic string on failure.
  *
  * Returns:
- *   True on success; false for composite inputs, unsupported degrees, or q exceeding UINT32_MAX.
+ *   True on success; false for composite inputs or dimensions exceeding DP widths.
  */
-bool kh_parameters(uint32_t p, uint32_t r, kh_parameters_t *output, const char **error) {
-
-    // Validate storage widths before narrowing the input values.
-    if (p > UINT16_MAX) {
-        *error = "p exceeds uint16_t";
+bool kh_parameters_dp64(uint32_t p, uint32_t r, kh_parameters_t *output, const char **error) {
+    if (p > UINT16_MAX || (uint64_t)p * p * p > UINT32_MAX) {
+        *error = "p or p^3 exceeds DP choice width";
         return false;
     }
-
-    // Require the prime used by the construction.
     if (!is_prime(p)) {
         *error = "p must be prime";
         return false;
     }
-
-    // Require the paper's nontrivial odd extension degree.
-    if (r < 3 || !(r & 1) || r > UINT8_MAX) {
-        *error = "r must be an odd integer in 3..255";
+    if (r < 3 || !(r & 1) || r > 31) {
+        *error = "r must be an odd integer in 3..31";
         return false;
     }
-    uint32_t q = 1;
+    uint64_t q = 1;
     uint32_t f = 1;
-
-    // Compute q with the stated uint32_t field-label limit.
     for (uint32_t exponent = 0; exponent < r; ++exponent) {
-
-        // Stop before multiplying beyond the field-label representation.
-        if (q > UINT32_MAX / p) {
-            *error = "p^r exceeds UINT32_MAX";
+        if (q > UINT64_MAX / p) {
+            *error = "p^r exceeds UINT64_MAX";
             return false;
         }
         q *= p;
-
-        // The first floor(r/2) factors form F.
         if (exponent < r / 2) {
+            if (f > UINT32_MAX / p) {
+                *error = "F exceeds UINT32_MAX";
+                return false;
+            }
             f *= p;
         }
     }
-
-    // Derive the standard equal budget B=pF.
+    if (f > UINT32_MAX / p) {
+        *error = "DP budget exceeds UINT32_MAX";
+        return false;
+    }
     output->p = (uint16_t)p;
     output->r = (uint8_t)r;
     output->q = q;
     output->f = f;
     output->budget = p * f;
+    return true;
+}
+
+bool kh_parameters(uint32_t p, uint32_t r, kh_parameters_t *output, const char **error) {
+    if (!kh_parameters_dp64(p, r, output, error)) {
+        return false;
+    }
+    if (output->q > UINT32_MAX) {
+        *error = "p^r exceeds UINT32_MAX";
+        return false;
+    }
     return true;
 }
 

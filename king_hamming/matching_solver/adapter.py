@@ -73,6 +73,8 @@ class MatchingAdapter(SolverAdapter):
         super().validate(specification, internal)
         dp, _, _ = decode_input(specification)
         arguments = specification["arguments"]
+        if dp["q"] > 2**32 - 1:
+            raise ValueError("matching requires a field with at most uint32 labels")
         polynomial = arguments.get("poly")
         if not isinstance(polynomial, list) or any(type(value) is not int for value in polynomial) or not primitive(dp["p"], dp["r"], polynomial):
             raise ValueError("matching polynomial must be primitive with generator X")

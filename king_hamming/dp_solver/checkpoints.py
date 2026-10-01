@@ -31,11 +31,10 @@ def dp_dimensions(specification: dict[str, Any]) -> dict[str, int]:
         raise ValueError("DP checkpoint modulus is not prime")
 
     q = p**r
-
-    if q > 0xFFFFFFFF:
-        raise ValueError("DP checkpoint field exceeds uint32_t")
-
-    return {"p": p, "r": r, "q": q, "budget": p**((r + 1) // 2), "tile_side": tile}
+    budget = p**((r + 1) // 2)
+    if q > 2**64 - 1 or budget > 2**32 - 1 or (budget + 1)**2 * 12 > 2**64 - 1:
+        raise ValueError("DP checkpoint dimensions exceed native integer width")
+    return {"p": p, "r": r, "q": q, "budget": budget, "tile_side": tile}
 
 def covered_cells(dimensions: dict[str, int], cursor: int) -> int:
     """Return committed cells for dimensions and cursor, rejecting out-of-range cursors."""

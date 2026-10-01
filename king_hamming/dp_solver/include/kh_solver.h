@@ -9,7 +9,7 @@
 typedef struct {
     uint16_t p;
     uint8_t r;
-    uint32_t q;
+    uint64_t q;
     uint32_t f;
     uint32_t budget;
 } kh_parameters_t;
@@ -52,6 +52,13 @@ typedef struct {
  *   True on success; false for composite inputs, unsupported degrees, or q exceeding UINT32_MAX.
  */
 bool kh_parameters(uint32_t p, uint32_t r, kh_parameters_t *output, const char **error);
+
+/*
+ * Validate DP-only prime powers with uint64_t field size while keeping
+ * tile coordinates and choice identifiers in their checked uint32_t ranges.
+ * Field construction and matching continue to use kh_parameters().
+ */
+bool kh_parameters_dp64(uint32_t p, uint32_t r, kh_parameters_t *output, const char **error);
 
 /*
  * Compute checked dense-DP resource counts.

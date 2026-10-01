@@ -12,6 +12,7 @@ from typing import Any, Iterator
 
 UINT32_MAX = 2**32 - 1
 DEFAULT_STATE_BYTES = 16 * 1024**3
+UINT64_MAX = 2**64 - 1
 DEFAULT_VISITS = 5_000_000_000
 
 
@@ -38,10 +39,11 @@ def dp_estimate(specification: dict[str, Any]) -> dict[str, int]:
 
     q = p**r
 
-    if q > UINT32_MAX:
-        raise ValueError("field size exceeds unsigned 32-bit limit")
-
     budget = p**((r + 1) // 2)
+    if q > UINT64_MAX or budget > UINT32_MAX:
+        raise ValueError("DP field or budget exceeds native integer width")
+    if (budget + 1)**2 * 12 > UINT64_MAX:
+        raise ValueError("DP state exceeds unsigned 64-bit byte limit")
     return {"q": q, "budget": budget, "state_bytes": (budget + 1)**2 * 12,
             "transition_bytes": p**3 * 12, "raw_visits": budget**2 * p**3}
 
@@ -66,14 +68,17 @@ def campaign(
             continue
 
         for r in range(3, 32, 2):
-            if p**r > UINT32_MAX:
+            if p**r > UINT64_MAX:
                 break
 
             specification = {"program": "dp", "arguments": {
                 "p": p, "r": r, "threads": threads, "tile_side": tile_side,
                 "max_state_bytes": max_state_bytes, "max_visits": max_visits,
             }}
-            estimate = dp_estimate(specification)
+            try:
+                estimate = dp_estimate(specification)
+            except ValueError:
+                break
 
             if estimate["state_bytes"] <= max_state_bytes and estimate["raw_visits"] <= max_visits:
                 candidates.append((estimate["raw_visits"], estimate["q"], p, r, specification))

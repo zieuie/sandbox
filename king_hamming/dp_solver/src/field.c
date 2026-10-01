@@ -92,6 +92,9 @@ static uint32_t power_x(const kh_parameters_t *parameters, const uint16_t *polyn
  * Returns: True for a primitive-X monic polynomial, false otherwise.
  */
 bool kh_primitive(const kh_parameters_t *parameters, const uint16_t *polynomial) {
+    if (parameters->q > UINT32_MAX) {
+        return false;
+    }
 
     // The leading coefficient and constant term enforce the stated polynomial convention.
     if (polynomial[parameters->r] != 1 || polynomial[0] == 0) {
@@ -138,6 +141,10 @@ bool kh_primitive(const kh_parameters_t *parameters, const uint16_t *polynomial)
  * Returns: True for a found primitive-X polynomial; false if all remaining candidates fail.
  */
 bool kh_generate_polynomial(const kh_parameters_t *parameters, uint32_t start, uint16_t *polynomial, uint32_t *chosen) {
+
+    if (parameters->q > UINT32_MAX) {
+        return false;
+    }
 
     // Primitive polynomials have a nonzero constant coefficient.
     for (uint32_t candidate = start; candidate < parameters->q; ++candidate) {
@@ -254,6 +261,11 @@ static void fill_chunk(void *raw, uint32_t u, uint32_t v) {
  */
 bool kh_build_field(const kh_parameters_t *parameters, const uint16_t *polynomial, uint32_t threads, uint64_t max_bytes, kh_field_t *output, const char **error) {
     memset(output, 0, sizeof *output);
+    memset(output, 0, sizeof *output);
+    if (parameters->q > UINT32_MAX) {
+        *error = "field construction requires uint32 labels";
+        return false;
+    }
     uint64_t cell_bytes = (uint64_t)parameters->q * sizeof(uint32_t);
     uint64_t position_bytes = (uint64_t)parameters->budget * threads * sizeof(uint32_t);
     uint64_t overhead = (uint64_t)threads * UINT64_C(8388608) + UINT64_C(67108864);

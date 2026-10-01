@@ -105,7 +105,12 @@ artifacts. Run-scoped `pause-run`, `resume-run`, `cancel`, and `reprioritize`
 commands are also available through `kh.py`.
 
 The DP feeder now expands a configured prime-by-odd-exponent region
-(`frontier_max_prime`, `frontier_max_exponent`) by diagonals. Its old dense
+(`frontier_max_prime`, `frontier_max_exponent`) by diagonals. DP supports
+`p^r` above the 32-bit field limit, up to its checked 64-bit size and 32-bit
+budget bounds. Such DP outputs remain available for future matching work, but
+the present field builder and matchers cannot consume them. The current
+frontier and per-tile memory, visit, tile-count, and disk admission checks
+still decide whether a particular larger field is actually queued. Its old dense
 `max_state_bytes` estimate is not an admission limit for distributed roots:
 it describes the unpartitioned table, not the memory of one tile. Each new
 candidate must fit a tile layout under `max_tile_bytes`, stay below

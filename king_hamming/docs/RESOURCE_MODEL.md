@@ -25,16 +25,17 @@ reuses the durable DP artifact.
 
 ## Integer bounds
 
-Field elements and powers of `q` use `uint32_t`, with checked arithmetic before
-conversion. Counts, products, DP values, offsets, and work estimates use
-`uint64_t`; quantities near `q^2` almost exhaust 64 bits when `q` approaches
-`UINT32_MAX`.
+DP accepts `q = p^r <= UINT64_MAX` while keeping the DP budget
+`B = p^((r+1)/2)`, transition identifiers, and tile coordinates within
+`uint32_t`. Its state-byte and work estimates are checked against
+`UINT64_MAX`. The KHD1 codec uses unsigned varints and can carry a 64-bit
+`q` without changing the artifact layout. The field generator and matching
+solver still require `q <= UINT32_MAX`; a larger completed DP result is
+retained but not submitted to matching.
 
-The bound `q = p^r <= UINT32_MAX`, together with odd `r >= 3`, implies `r <= 31`,
-so `r` fits in `uint8_t`. It does **not** imply that `p` fits in `uint8_t`:
-when `r = 3`, primes as large as roughly the cube root of `UINT32_MAX` (about
-1625) are representable. Store `p` in `uint16_t` unless the campaign explicitly
-adopts `p <= 251` as a mathematical search limit.
+Only odd `r` in 3..31 is supported, so `r` fits in `uint8_t`. The
+`uint32_t` transition identifier stores one of `p^3` choices. This admits
+primes through 1621 for `r = 3`, so `p` is stored in `uint16_t`.
 
 These bounds describe representability, not practical feasibility. In
 particular, enumerating all `p^3` raw DP transitions is already unreasonable at

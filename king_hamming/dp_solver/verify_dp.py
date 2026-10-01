@@ -152,8 +152,8 @@ def verify(document: dict[str, Any], max_visits: int) -> None:
     f = p ** (r // 2)
     budget = p * f
 
-    if q > 0xFFFFFFFF:
-        raise ValueError("q exceeds uint32_t")
+    if q > 2**64 - 1 or budget > 2**32 - 1:
+        raise ValueError("DP dimensions exceed native integer width")
 
     if (document["q"], document["f"], document["budget"]) != (q, f, budget):
         raise ValueError("derived dimensions do not match")

@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "kh_field: %s\n", error);
         return 1;
     }
-    printf("{\"format\":\"KH-FIELD-1\",\"p\":%u,\"r\":%u,\"q\":%u,\"suffixes\":%u,\"buckets\":%u,\"generator\":\"X\",\"candidate\":%u,\"polynomial\":[",
+    printf("{\"format\":\"KH-FIELD-1\",\"p\":%u,\"r\":%u,\"q\":%" PRIu64 ",\"suffixes\":%u,\"buckets\":%u,\"generator\":\"X\",\"candidate\":%u,\"polynomial\":[",
            parameters.p, parameters.r, parameters.q, parameters.f, parameters.budget, candidate);
 
     // Report every polynomial coefficient, low degree first including the monic leading term.

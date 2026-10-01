@@ -36,6 +36,10 @@ def main() -> int:
         subprocess.run([str(ROOT/"verify_dp.py"),str(binary)],check=True,capture_output=True)
         assert len(raw)==56
         assert len(raw)<len(document.read_bytes())
+        large={"format":"KHDP2-draft","p":3,"r":21,"q":3**21,
+               "f":3**10,"budget":3**11,"theta":1,
+               "runs":[{"a":1,"b":1,"t":1,"repeat":1}]}
+        assert decode_dp(encode_dp(large))==large
         for changed in (raw[:-1],raw[:10]+bytes([raw[10]^1])+raw[11:]):
             try:
                 decode_dp(changed)

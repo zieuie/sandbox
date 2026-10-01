@@ -13,10 +13,11 @@ def dimensions(p: int, r: int) -> tuple[int, int, int]:
     if type(p) is not int or type(r) is not int or p<2 or p>1621 or r<3 or r>31 or r%2==0 or any(p%d==0 for d in range(2,int(p**0.5)+1)):
         raise ValueError("invalid DP prime or extension degree")
     q=p**r
-    if q>2**32-1:
-        raise ValueError("DP field exceeds uint32 labels")
     f=p**(r//2)
-    return q,f,p*f
+    budget=p*f
+    if q>2**64-1 or budget>2**32-1 or (budget+1)**2*12>2**64-1:
+        raise ValueError("DP field or budget exceeds native integer width")
+    return q,f,budget
 
 
 # Check feasibility and gain using run counts, without expanding a giant split.

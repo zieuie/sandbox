@@ -28,7 +28,7 @@ class EstimateTests(unittest.TestCase):
     def test_matches_c_estimator(self) -> None:
         """Small and large supported fields use identical state and visit estimates."""
 
-        for p, r in ((2, 3), (3, 5), (5, 3), (13, 5), (2, 31), (1621, 3)):
+        for p, r in ((2, 3), (3, 5), (5, 3), (13, 5), (2, 31), (3, 21), (1621, 3)):
             with self.subTest(p=p, r=r):
                 expected = json.loads(subprocess.check_output([str(ROOT.parent / "dp_solver" / "kh_estimate"), str(p), str(r), "--json"]))
                 actual = scheduling.dp_estimate({"program": "dp", "arguments": {"p": p, "r": r}})
@@ -53,7 +53,7 @@ class EstimateTests(unittest.TestCase):
     def test_invalid_inputs_and_extreme_limits(self) -> None:
         """Reject unsupported characteristics/degrees and unrepresentable command arguments."""
 
-        for p, r in ((4, 3), (3, 4), (3, 31), (True, 3)):
+        for p, r in ((4, 3), (3, 4), (3, 32), (True, 3)):
             with self.assertRaises(ValueError):
                 scheduling.dp_estimate({"program": "dp", "arguments": {"p": p, "r": r}})
         with self.assertRaises(ValueError):
@@ -61,6 +61,22 @@ class EstimateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapters.estimate_seconds({"program": "demo"}, float("nan"))
         self.assertEqual(list(scheduling.campaign(max_visits=1)), [])
+
+    def test_regional_frontier_admits_q_above_uint32_when_tiles_fit(self) -> None:
+        """Large dense state may still have a bounded distributed tile layout."""
+
+        entries = scheduling.regional_campaign(
+            max_prime=3, max_exponent=21, max_visits=10**12,
+            threads=8, max_tile_bytes=2 * 1024**3,
+        )
+        specification = next(
+            item for item in entries
+            if (item["arguments"]["p"], item["arguments"]["r"]) == (3, 21)
+        )
+        self.assertEqual(specification["arguments"]["tile_side"], 2048)
+        self.assertGreater(
+            scheduling.dp_estimate(specification)["q"], scheduling.UINT32_MAX,
+        )
 
 
 # Exercise actual dispatch transactions rather than mirroring the SQL sort expression.

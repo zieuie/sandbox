@@ -223,7 +223,7 @@ int main(int argc, char **argv) {
     tile_context_t tile = {0};
     const char *error = NULL;
 
-    if (!kh_parameters((uint32_t)arguments[0], (uint32_t)arguments[1], &tile.parameters, &error)) {
+    if (!kh_parameters_dp64((uint32_t)arguments[0], (uint32_t)arguments[1], &tile.parameters, &error)) {
         fprintf(stderr, "kh_dp_tile: %s\n", error);
         return 1;
     }

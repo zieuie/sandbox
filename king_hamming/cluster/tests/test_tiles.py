@@ -66,6 +66,25 @@ class TileTests(unittest.TestCase):
             self.assertEqual(values.tobytes(), (reference / "values.bin").read_bytes())
             self.assertEqual(choices.tobytes(), (reference / "choices.bin").read_bytes())
 
+    def test_field_above_uint32_uses_same_bounded_tile_kernel(self) -> None:
+        """A q>2^32 field has the same first tile as a small field with p=3."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outputs = []
+            for r in (3, 21):
+                target = tile(3, r, 4, 0, 0)
+                halo = root / f"halo-{r}.bin"
+                build_halo(3, r, 4, target, {}, halo)
+                output = root / f"tile-{r}"
+                subprocess.run(
+                    [str(ROOT.parent / "dp_solver" / "kh_dp_tile"),
+                     "3", str(r), "1", "4", "1", "4", str(halo), str(output), "1"],
+                    check=True, capture_output=True)
+                outputs.append(((output / "values.bin").read_bytes(),
+                                (output / "choices.bin").read_bytes()))
+            self.assertEqual(outputs[0], outputs[1])
+
     def test_sparse_halo_cover_and_admission(self) -> None:
         """Far tiles need a bounded neighboring cover and invalid predecessor sizes fail early."""
 

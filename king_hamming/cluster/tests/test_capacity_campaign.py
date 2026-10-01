@@ -245,6 +245,24 @@ class CapacityCampaignTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 policy.validate({**self.settings, key: value})
 
+    def test_matching_rejects_uint64_dp_field(self):
+        """The DP format widens independently of the still-uint32 matchers."""
+        import base64
+        import hashlib
+        from dp_solver.artifacts import encode_dp
+        from matching_solver.adapter import MatchingAdapter
+
+        document = dict(p=3, r=21, q=3**21, f=3**10, budget=3**11,
+                        theta=1, runs=[dict(a=1, b=1, t=1, repeat=1)])
+        raw = encode_dp(document)
+        specification = {"program": "match", "arguments": {
+            "dp_b64": base64.b64encode(raw).decode("ascii"),
+            "dp_sha256": hashlib.sha256(raw).hexdigest(),
+            "poly": [1],
+        }}
+        with self.assertRaisesRegex(ValueError, "uint32 labels"):
+            MatchingAdapter().validate(specification)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,7 +18,7 @@ static void help(void) {
          "Usage: ./kh_estimate PRIME ODD_DEGREE [--tile-side CELLS] [--json]\n"
          "Optional: --profile-transitions [--max-profile-transitions N]\n"
          "Example: ./kh_estimate 7 5 --tile-side 4096 --json\n"
-         "Supports q=p^r <= UINT32_MAX; estimates may exceed practical resources.\n"
+         "Supports q=p^r <= UINT64_MAX with a uint32 DP budget; estimates may exceed practical resources.\n"
          "No arguments or --help prints this help.");
 }
 
@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
     const char *error;
 
     // Derive dimensions and all checked byte counts.
-    if (!kh_parameters((uint32_t)parsed_p, (uint32_t)parsed_r, &parameters, &error) ||
+    if (!kh_parameters_dp64((uint32_t)parsed_p, (uint32_t)parsed_r, &parameters, &error) ||
         !kh_estimate_resources(&parameters, tile_side, &estimate, &error)) {
         return fail(error);
     }
@@ -135,7 +135,7 @@ int main(int argc, char **argv) {
 
     // Emit stable keys for the scheduler and benchmark collector.
     if (json) {
-        printf("{\"p\":%u,\"r\":%u,\"q\":%" PRIu32
+        printf("{\"p\":%u,\"r\":%u,\"q\":%" PRIu64
                ",\"f\":%" PRIu32 ",\"budget\":%" PRIu32
                ",\"side\":%" PRIu64 ",\"cells\":%" PRIu64
                ",\"transitions\":%" PRIu64 ",\"transition_bytes\":%" PRIu64
@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
     } else {
 
         // Keep the default report easy to inspect by hand.
-        printf("field: %u^%u = %" PRIu32 "\n", parameters.p, parameters.r, parameters.q);
+        printf("field: %u^%u = %" PRIu64 "\n", parameters.p, parameters.r, parameters.q);
         printf("F: %" PRIu32 "\n", parameters.f);
         printf("budget B: %" PRIu32 "\n", parameters.budget);
         printf("DP side/cells: %" PRIu64 " / %" PRIu64 "\n", estimate.side, estimate.cells);
