@@ -29,6 +29,7 @@ function rootActions(root) {
   if (!terminal) {
     buttons.push(root.state === 'paused' ? button('run.resume', run, 'Resume field')
       : button('run.pause', run, 'Pause field'));
+    buttons.push(button('run.priority', run, 'Priority…'));
     buttons.push(button('root.restart', run, 'Restart field…'));
     buttons.push(button('run.cancel', run, 'Cancel field…', 'danger'));
   } else {

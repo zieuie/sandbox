@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import signal
 import subprocess
 import sys
 import threading
@@ -95,6 +96,27 @@ class Jobs:
         for record in records[:tails]:
             record["tail"] = self.tail(record["id"])
         return records
+
+    def cancel(self, job_id: str, grace: float = 15.0) -> dict:
+        """Ask a running job's process group to stop; force it after a grace period."""
+        record = self.record(job_id)
+        if record is None or record["status"] != "running":
+            raise RuntimeError("that job is not running")
+        pid, start = record.get("child_pid"), record.get("child_start")
+        if not pid or process_start(pid) != start:
+            raise RuntimeError("the job's process has not started or has already exited")
+        (self.directory / f"{job_id}.cancel").touch()
+        os.killpg(pid, signal.SIGTERM)
+
+        def escalate():
+            time.sleep(grace)
+            if process_start(pid) == start:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        threading.Thread(target=escalate, daemon=True).start()
+        return {"id": job_id, "signal": "SIGTERM", "force_after_seconds": grace}
 
     def running(self) -> dict | None:
         return next((record for record in self.list(tails=0) if record["status"] == "running"), None)

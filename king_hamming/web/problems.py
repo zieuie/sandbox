@@ -68,6 +68,18 @@ def current_conditions(snapshot: dict, connection: sqlite3.Connection, now: floa
                               "finished tiles are reused.", None, "#tiles",
                               action={"command": "root.restart", "params": {"run_id": root["run_id"]},
                                       "label": "Restart field"}))
+        # Every tile is done, but the reconstruction lease (which needs a whole
+        # machine) has not been granted: it queues behind other fields' tiles.
+        waited = now - (root.get("last_progress_at") or now)
+        if root["state"] == "queued" and root.get("phase") == "reconstructing" and waited > 600:
+            found.append(item("warning", f"reconstruct:{root['p']},{root['r']}",
+                              f"{label([root['p'], root['r']])} is waiting to reconstruct its result",
+                              f"All tiles finished {int(waited // 60)} minutes ago, but the final step has not "
+                              "started. It needs a whole machine and is queued behind other fields' tiles; "
+                              f"raising its priority above {root.get('priority', 0)} lets the next free machine "
+                              "take it.", root.get("last_progress_at"), "#tiles",
+                              action={"command": "run.priority", "params": {"run_id": root["run_id"]},
+                                      "label": "Raise priority…"}))
         if root.get("orphaned_children"):
             found.append(item("warning", f"orphaned:{root['p']},{root['r']}",
                               f"{label([root['p'], root['r']])}: {root['orphaned_children']} tiles still "

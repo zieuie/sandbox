@@ -56,111 +56,71 @@ Options:
 
 ## Behind the Cloudflare tunnel
 
-1. Keep the dashboard on loopback and point `cloudflared` at
-   `http://127.0.0.1:8070`.
-2. Start the dashboard with `--trust-proxy`. It then takes the visitor's
-   address from `CF-Connecting-IP` (for throttling and the audit log), and marks
-   the session cookie `Secure` on HTTPS requests. Those headers are only
-   trusted from a connection on this machine.
-3. Optionally, add Cloudflare Access in front as a second sign-in.
+**Recommended: run `cloudflared` on merlin.** The dashboard then never
+listens on the network at all:
 
 ```sh
-python3 king_hamming/web/server.py serve --trust-proxy
+python3 king_hamming/web/server.py serve --trust-proxy --secure-cookies
 ```
 
-## How fresh is the data?
+Point the tunnel's public hostname at `http://127.0.0.1:8070`. That is
+*Service → HTTP → localhost:8070* in the Zero Trust dashboard, or in a local
+`config.yml`:
 
-- **Snapshots:** the server builds one snapshot and reuses it for `--ttl`
-  seconds. A cold build takes a few seconds while it reads and hashes every
-  retained certificate. Those results are memoized per file, so later builds
-  take under a second.
-- **Polling:** the page polls every 30 s while its tab is visible.
-- **Refresh:** **Refresh** forces a rebuild, at most once every 3 s.
-- **Age:** the header shows how old the data is.
-- **Errors:** if part of a build fails, the previous data for that part stays
-  on screen with a warning banner.
+```yaml
+ingress:
+  - hostname: kh.example.com            # your hostname
+    service: http://127.0.0.1:8070
+  - service: http_status:404            # nothing else is reachable
+```
 
-## Views
+**If the tunnel runs on another machine,** the dashboard has to listen on the
+LAN, and you name that machine as the only trusted proxy:
 
-- **Results** (`#results`):
-  - Shows primes × exponents. Each cell holds the exact row count, coloured by
-    outcome: matched `^`, obstructed `*`, too big to match, DP running, or DP
-    failed.
-  - Clicking a cell shows every DP and matching attempt across all retained
-    deployments.
-  - The URL keeps the open cell, for example `#results/2,29`.
-- **Fleet** (`#fleet`): each machine card shows:
-  - allocated, free and unschedulable CPUs
-  - reserved memory
-  - current work with progress and solver health
-  - the idle reason, using the leader's own rules
-  - 24 h measured CPU use and the fraction of time leased
+```sh
+python3 king_hamming/web/server.py serve --listen 192.168.4.151:8070 \
+    --trusted-proxy 192.168.4.X --secure-cookies
+```
 
-  Tiles whose DP root has already failed are flagged.
-- **DP tiles** (`#tiles`):
-  - One grid per active DP root, with tiles marked durable, under-replicated,
-    running, queued, ready, blocked, or failed.
-  - Also shows the dependency frontier and typical tile time.
-  - Roots finished in the last 24 h are folded underneath.
-  - **Click a root** (its name, grid or **Open ↗**) for its focus view at
-    `#tiles/RUN_ID`:
-    - a large grid with row and column numbers and machine names on running
-      tiles
-    - the percentage complete, tiles finished in the last hour, and the time
-      left at that pace
-    - how far the anti-diagonal wave has swept, and where tiles are running
-  - **Click a tile** (in either view) to select it. Its details, with Pause/Resume
-    and Priority for operators, appear beside the grid, and the address becomes
-    `#tiles/RUN_ID/ROW,COL`, so a tile can be linked directly. The browser's
-    back button returns to the overview.
+Other LAN devices can then reach it over plain HTTP too (the login still
+applies). Use the public HTTPS address from those devices as well.
 
-- **Matching** (`#matching`, or `#matching/RUN_ID` to open one run):
-  - **Now:** each live matching run, showing its polynomial, its machine group,
-    how many requests are matched, the phases committed, and solver health.
-  - **Convergence chart:** requests still unmatched after each phase, on a log
-    scale, from the per-phase checkpoints the leader keeps. While a run is
-    live, a dashed segment shows progress since the last checkpoint.
-  - **Waiting for matching:** completed DP results not yet matched, with the
-    exact limit that holds each one back.
-  - **History:** every past run, with outcome (matched, or a Hall obstruction
-    and how many requests short), phases, duration, machines and peak memory.
-    Click a row for its convergence chart and per-shard CPU and memory.
-- **Timeline** (`#timeline`, or `#timeline/6h` for 3h/6h/12h/24h):
-  - One row per machine, with one bar per lease, coloured by field.
-  - Back-to-back tiles of one field are merged into one bar.
-  - Overlapping leases on a shared host stack into lanes.
-  - Bars that ended badly are outlined.
-  - Measured CPU use is shaded behind each row, with the fraction of the
-    window leased.
-- **Feeder** (`#feeder`):
-  - The process (checked against `/proc`), the last pass, and the
-    backpressure gauges.
-  - Every field still in flight, with DP tile progress, and the next fields the
-    feeder would add.
-  - Recent passes (identical ones collapsed) and the full limits.
-- **Problems** (`#problems`): the tab shows a count of current critical and
-  warning conditions.
-  - **Needs attention now:**
-    - offline machines
-    - stalled solvers
-    - fields the feeder gave up on
-    - tiles still running under a failed root
-    - feeder down, stale or failing
-    - disk watermark
-    - under-replicated results
-    - repeated leader errors in the last hour
-  - **Recent events (7 days)** are grouped by kind:
-    - DP root, tile and matching failures
-    - engine retries and expired leases
-    - leader log exceptions and feeder errors
-  - Info-level events are hidden by default. "New" marks events since your
-    last visit in this browser.
+What the flags do:
 
-The leader and feeder logs have no timestamps. The dashboard reads the
-existing log as an untimed baseline (for the leader, only the current
-session). Every later line is timed by when the dashboard first saw it, so log
-times are only as fine as the page's refreshes, and they restart when the
-server restarts.
+- **`--trust-proxy` / `--trusted-proxy ADDRESS`:** take the visitor's address
+  from `CF-Connecting-IP`, which Cloudflare sets itself, for throttling and the
+  audit log. The header is honoured only on connections from those addresses.
+- **`--secure-cookies`:** the session cookie becomes
+  `__Host-kh_session; Secure`, usable only over HTTPS on this exact hostname,
+  and every response carries HSTS. Local `http://127.0.0.1` still works,
+  because browsers treat localhost as secure. Plain-HTTP LAN addresses don't.
+
+Before opening it up:
+
+1. **Put Cloudflare Access in front.** A Zero Trust application for the
+   hostname, allowing only your email addresses. Strangers then never reach
+   even the login page, and the dashboard's own login becomes a second factor.
+2. **Map only this hostname to the dashboard,** with a catch-all 404. Never
+   route the leader (8061), SSH (22), rpcbind (111) or agent storage ports,
+   and keep no router port-forwards to merlin.
+3. **Use a long, unique password** for every operator account.
+   `server.py list-users` shows accounts and their sessions, and
+   `revoke-sessions NAME` signs one out everywhere.
+4. **Don't override the tunnel's "HTTP Host Header" setting.** The dashboard
+   rejects POSTs whose `Origin` doesn't match the host it receives, so an
+   override shows up as "cross-site request refused" at login.
+
+Built-in hardening:
+
+- passwords hashed with scrypt; at most 4 checked at a time
+- doubling delays on failed sign-ins
+- CSRF tokens, Origin checks and JSON-only bodies on every POST
+- strict CSP with no inline script; framing refused
+- static files from an allow-list only
+- post-login redirects limited to plain local paths
+- at most 64 connections, each cut after 30 s idle
+- no software versions advertised
+- the audit log is visible to operators only
 
 ## Commands (operators only)
 
@@ -217,6 +177,18 @@ dashboard. Each runs through `jobrunner.py`, with its output in
 `~/.local/share/king_hamming/web/jobs/`, and keeps going if the dashboard
 restarts. Only one job runs at a time. The Activity tab shows live output,
 the stage reached by the last rollout, and your git state.
+
+**Stopping a running job:**
+
+- **Stop job…** (password; type `stop job` for upgrades) sends the job's own
+  process group a stop signal, and force-stops it after 15 seconds. That group
+  includes whatever the job spawned (`make`, `ssh`, …).
+- Services the job already started, such as the feeder, leader or agents,
+  detach into their own sessions and keep running.
+- The job then shows as **cancelled**.
+- Stopping an upgrade partway can leave workers on mixed runtimes.
+  `last_rollout.json`, shown on the Activity tab, records the stage reached and
+  how to recover.
 
 ## Test
 

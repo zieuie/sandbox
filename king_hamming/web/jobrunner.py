@@ -44,14 +44,21 @@ def main() -> int:
         log.write(f"$ {' '.join(record['argv'])}\n".encode())
         log.flush()
         try:
-            completed = subprocess.run(record["argv"], cwd=record["cwd"], stdin=subprocess.DEVNULL,
-                                       stdout=log, stderr=subprocess.STDOUT)
-            code = completed.returncode
+            # Its own process group, so cancelling stops it and what it spawned
+            # (make, ssh, ...) without touching this runner. Services the job
+            # starts detach into their own sessions and are unaffected.
+            child = subprocess.Popen(record["argv"], cwd=record["cwd"], stdin=subprocess.DEVNULL,
+                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            child_start = Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+            update(path, child_pid=child.pid, child_start=child_start)
+            code = child.wait()
         except OSError as error:
             log.write(f"could not start: {error}\n".encode())
             code = 127
-        log.write(f"\n[exit status {code}]\n".encode())
-    update(path, status="ok" if code == 0 else "failed", exit_code=code, finished=time.time())
+        cancelled = path.with_suffix(".cancel").exists()
+        log.write((f"\n[cancelled; exit status {code}]\n" if cancelled else f"\n[exit status {code}]\n").encode())
+    status = "cancelled" if cancelled else "ok" if code == 0 else "failed"
+    update(path, status=status, exit_code=code, finished=time.time())
     return 0
 
 

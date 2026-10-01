@@ -313,7 +313,7 @@ def restart_root(context: Context, params: dict) -> Plan:
     """Cancel one DP attempt (if still live) and submit a fresh one that reuses its durable tiles.
 
     This is how a single cancelled or stuck tile gets recomputed today: the
-    leader cannot requeue one tile (see CAMPAIGN_NOTES.md, item 1).
+    leader cannot requeue one tile (see CAMPAIGN_NOTES.md, item 2).
     """
     root = run_row(context, params.get("run_id"))
     description, name = label(context, root)
@@ -793,6 +793,30 @@ def upgrade(context: Context, params: dict, which: str) -> Plan:
     return plan
 
 
+def cancel_job(context: Context, params: dict) -> Plan:
+    job_id = params.get("job_id")
+    record = context.jobs.record(job_id) if isinstance(job_id, str) and job_id.replace("-", "").isalnum() else None
+    if record is None:
+        raise CommandError("no such job", 404)
+    upgrade = record["name"].startswith("upgrade-")
+    plan = Plan(title=f"Stop job: {record['title']}",
+                summary="Sends the job's processes a stop signal, and force-stops them after 15 seconds if "
+                        "they are still running. Services the job already started (feeder, leader, agents) "
+                        "keep running.",
+                facts={"job": job_id, "status": record["status"], "child": record.get("child_pid")},
+                action=lambda: context.jobs.cancel(job_id),
+                confirm_text="stop job" if upgrade else None, reauth=True)
+    if record["status"] != "running":
+        plan.blockers.append(f"This job is already {record['status']}.")
+    elif not record.get("child_pid"):
+        plan.blockers.append("The job's command has not started yet; try again in a moment.")
+    if upgrade:
+        plan.warnings.append("Stopping an upgrade partway can leave some workers on the new runtime and some on "
+                             "the old. last_rollout.json records the stage reached and how to recover; dispatch "
+                             "stays stopped until you resume it.")
+    return plan
+
+
 COMMANDS: dict[str, Callable[[Context, dict], Plan]] = {
     "dispatch.stop": lambda c, p: dispatch(c, p, "stopped"),
     "dispatch.resume": lambda c, p: dispatch(c, p, "running"),
@@ -810,6 +834,7 @@ COMMANDS: dict[str, Callable[[Context, dict], Plan]] = {
     "process.restart_feeder": restart_feeder,
     "process.upgrade_workers": lambda c, p: upgrade(c, p, "workers"),
     "process.upgrade_leader": lambda c, p: upgrade(c, p, "leader"),
+    "process.cancel_job": cancel_job,
 }
 
 

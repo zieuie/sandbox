@@ -50,16 +50,22 @@ def known_fields(state: Path) -> set[tuple[int, int]]:
 
 
 def upcoming_fields(state: Path, settings: dict, limit: int = 8) -> list[dict]:
-    """The next unsubmitted fields the feeder would add under these settings, in its order."""
+    """Regional candidates in order; live worker-disk admission may defer them."""
     known = known_fields(state)
     upcoming = []
-    for candidate in scheduling.campaign(settings.get("max_state_bytes", 16 * 1024**3),
-                                         settings.get("max_visits", 30_000_000_000_000),
-                                         settings.get("dp_threads", 16), settings.get("tile_side", 512)):
+    for candidate in scheduling.regional_campaign(
+            settings.get("frontier_max_prime", 19),
+            settings.get("frontier_max_exponent", 11),
+            settings.get("frontier_max_visits", 200_000_000_000_000),
+            settings.get("dp_threads", 16),
+            settings.get("max_tile_bytes", 2 * 1024**3)):
         arguments = candidate["arguments"]
         key = (arguments["p"], arguments["r"])
         if key not in known:
-            upcoming.append({"field": list(key), "q": key[0] ** key[1]})
+            estimate = scheduling.dp_estimate(candidate)
+            upcoming.append({"field": list(key), "q": estimate["q"],
+                             "tile_side": arguments["tile_side"],
+                             "projected_replica_bytes": 3 * estimate["state_bytes"]})
             if len(upcoming) >= limit:
                 break
     return upcoming

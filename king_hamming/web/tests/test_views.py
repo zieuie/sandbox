@@ -154,6 +154,16 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(log[0]["detail"], "while serving merlin")
         self.assertEqual(len(by_group["feeder_error:<urlopen error [Errno 101] Network is unreachable>"]), 1)
 
+    def test_starved_reconstruction_is_flagged(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("UPDATE runs SET state='queued',progress_phase='reconstructing',"
+                               "last_progress_at=? WHERE run_id='root-5-3'", (NOW - 1800,))
+        active = {entry["group"]: entry for entry in self.build()["problems"]["active"]}
+        starved = active["reconstruct:5,3"]
+        self.assertEqual(starved["severity"], "warning")
+        self.assertEqual(starved["action"]["command"], "run.priority")
+        self.assertIn("30 minutes", starved["detail"])
+
     def test_recent_leader_errors_become_active(self) -> None:
         self.build()
         with (self.deployments / "live" / "leader.log").open("a") as stream:

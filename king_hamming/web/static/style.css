@@ -93,8 +93,6 @@ h4 { font-size: 13px; margin: 18px 0 6px; color: var(--muted); text-transform: u
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
-.brand h1 { font-size: 17px; letter-spacing: .01em; }
 .tabs { display: flex; gap: 4px; }
 .tabs a {
   padding: 6px 12px; border-radius: 8px; color: var(--muted);
@@ -506,6 +504,8 @@ table.changes td:first-child { color: var(--muted); }
 .job-running .job-status { color: var(--accent); }
 .job-ok .job-status { color: var(--ok); }
 .job-failed .job-status, .job-lost .job-status { color: var(--bad); }
+.job-cancelled .job-status { color: var(--warn); }
+.job summary .cmd { margin-left: auto; }
 .job-title { font-weight: 600; }
 .job-log {
   margin: 0; padding: 10px 12px; max-height: 360px; overflow: auto; font-size: 12px; line-height: 1.45;
@@ -572,4 +572,37 @@ rect.tile.selected { stroke: var(--ink); stroke-width: 1.4; }
 @media (max-width: 900px) {
   .focus-body { grid-template-columns: 1fr; }
   .focus-side { position: static; }
+}
+.no-history { fill: var(--soft); opacity: .7; }
+.no-history-label { fill: var(--muted); font-size: 12px; text-anchor: middle; }
+
+/* ----- header: status row, then a single row of tabs ----- */
+.top { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 6px; padding: 8px 16px 0; }
+.top > * { min-width: 0; }
+.top-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.top-row h1 { font-size: 17px; white-space: nowrap; }
+.top .status { flex: 1; min-width: 0; }
+.top .refresh-box { margin-left: auto; }
+nav.tabs {
+  display: flex; flex-wrap: nowrap; gap: 2px; overflow-x: auto; scrollbar-width: none;
+  margin: 0 -16px; padding: 0 12px;
+}
+nav.tabs::-webkit-scrollbar { display: none; }
+nav.tabs a {
+  flex: none; padding: 8px 12px 9px; border-radius: 0; white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+nav.tabs a:hover { background: none; color: var(--ink); border-bottom-color: var(--line); }
+nav.tabs a.active { background: none; box-shadow: none; color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+@media (max-width: 640px) {
+  .top { padding: 8px 12px 0; }
+  .top .status { order: 3; flex-basis: 100%; }
+  .top .refresh-box { width: auto; }
+  nav.tabs { margin: 0 -12px; padding: 0 8px; }
+}
+@media (max-width: 640px) {
+  .top { position: static; }
+  .top .refresh-box { order: 2; flex-basis: 100%; flex-wrap: wrap; justify-content: flex-start; margin-left: 0; }
+  .top .refresh-box .updated { flex-basis: 100%; }
+  .top .status { order: 3; }
 }

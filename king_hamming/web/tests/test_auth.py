@@ -235,5 +235,101 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.audit()[-1]["address"], "203.0.113.9")
 
 
+class HardeningTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        root = Path(self.directory.name)
+        fixture.live_campaign(root / "deployments")
+        self.root = root
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def serve(self, **options):
+        httpd, base, auth = fixture.serve(self.root / "deployments", self.root / f"state{len(options)}", **options)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return httpd, base
+
+    def test_safe_next_rejects_disguised_external_targets(self) -> None:
+        import server
+        for good in ("/", "/#fleet", "/#tiles/abc/1,2", "/?x=1#results/2,29"):
+            self.assertEqual(server.safe_next(good), good)
+        for bad in ("//evil.example", "/\\evil.example", "/\t/evil.example", "/\n/evil.example",
+                    "https://evil.example", "/ /evil", "", None, "/" + "a" * 600, "javascript:alert(1)"):
+            self.assertEqual(server.safe_next(bad), "/", repr(bad))
+
+    def test_forwarded_addresses(self) -> None:
+        _, base = self.serve(trust_proxy=True)
+        client = fixture.Client(base)
+        state = self.root / "state1"
+        def last_address():
+            return json.loads((state / "audit.jsonl").read_text().splitlines()[-1])["address"]
+        client.request("/api/login", "POST", {"user": "x", "password": "y"},
+                       headers={"X-Forwarded-For": "6.6.6.6, 203.0.113.7"})
+        self.assertEqual(last_address(), "203.0.113.7")  # the hop our proxy added, not the claim
+        client.request("/api/login", "POST", {"user": "x", "password": "y"},
+                       headers={"X-Forwarded-For": "not-an-address"})
+        self.assertEqual(last_address(), "127.0.0.1")
+
+    def test_trusted_proxy_on_another_machine(self) -> None:
+        # The test client connects from 127.0.0.1, which is not the named proxy.
+        _, base = self.serve(trusted_proxies=("192.168.4.200",))
+        client = fixture.Client(base)
+        client.request("/api/login", "POST", {"user": "x", "password": "y"},
+                       headers={"CF-Connecting-IP": "203.0.113.9"})
+        line = (self.root / "state1" / "audit.jsonl").read_text().splitlines()[-1]
+        self.assertEqual(json.loads(line)["address"], "127.0.0.1")
+
+    def test_https_cookie_and_headers(self) -> None:
+        _, base = self.serve(trust_proxy=True)
+        client = fixture.Client(base)
+        status, headers, _ = client.json("/api/login", "POST", {"user": "tester", "password": fixture.PASSWORD},
+                                         headers={"X-Forwarded-Proto": "https"})
+        self.assertEqual(status, 200)
+        cookie = headers["Set-Cookie"]
+        self.assertTrue(cookie.startswith("__Host-kh_session="))
+        for flag in ("Secure", "HttpOnly", "SameSite=Lax", "Path=/"):
+            self.assertIn(flag, cookie)
+        self.assertNotIn("Domain", cookie)
+        self.assertEqual(headers["Strict-Transport-Security"], "max-age=31536000")
+        client.cookie = cookie.split(";")[0]
+        status, headers, _ = client.request("/api/session")
+        self.assertEqual(status, 200)  # the __Host- cookie is accepted
+        self.assertEqual(headers["Cross-Origin-Opener-Policy"], "same-origin")
+        self.assertNotIn("Python", headers["Server"])
+
+    def test_malformed_requests_and_audit_access(self) -> None:
+        _, base = self.serve()
+        guest = fixture.Client(base)
+        guest.login("guest", fixture.PASSWORD + "!")
+        self.assertEqual(guest.request("/api/audit")[0], 403)
+        operator = fixture.Client(base)
+        operator.login("tester", fixture.PASSWORD)
+        self.assertEqual(operator.request("/api/audit")[0], 200)
+        status = operator.request("/api/reauth", "POST", {"password": "x"},
+                                  headers={"Content-Length": "abc"})[0]
+        self.assertEqual(status, 400)
+
+    def test_connection_cap(self) -> None:
+        import socket
+        import threading
+        from http.server import ThreadingHTTPServer  # noqa: F401
+        import server
+        httpd = server.DashboardServer(("127.0.0.1", 0), server.BaseHTTPRequestHandler, max_connections=1)
+        self.addCleanup(httpd.server_close)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.shutdown)
+        idle = socket.create_connection(("127.0.0.1", httpd.server_port))  # holds the only slot
+        self.addCleanup(idle.close)
+        import time
+        time.sleep(0.2)
+        second = socket.create_connection(("127.0.0.1", httpd.server_port))
+        second.settimeout(5)
+        second.sendall(b"GET / HTTP/1.0\r\n\r\n")
+        self.assertEqual(second.recv(100), b"")  # refused: closed without a response
+        second.close()
+
+
 if __name__ == "__main__":
     unittest.main()

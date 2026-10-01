@@ -10,16 +10,16 @@
 </head>
 <body>
   <header class="top">
-    <div class="brand">
+    <div class="top-row">
       <h1>King Hamming</h1>
-      <nav class="tabs" aria-label="Views"></nav>
+      <div class="status" aria-live="polite"></div>
+      <div class="refresh-box">
+        <span class="updated"></span>
+        <button type="button" class="refresh" title="Rebuild the snapshot now">↻ Refresh</button>
+        <div class="account"></div>
+      </div>
     </div>
-    <div class="status" aria-live="polite"></div>
-    <div class="refresh-box">
-      <span class="updated"></span>
-      <button type="button" class="refresh" title="Rebuild the snapshot now">↻ Refresh</button>
-      <div class="account"></div>
-    </div>
+    <nav class="tabs" aria-label="Views"></nav>
   </header>
   <div class="banner" hidden></div>
   <main></main>

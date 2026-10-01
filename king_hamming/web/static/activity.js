@@ -14,6 +14,7 @@ function jobCard(job) {
         <span class="job-status">${job.status}</span>
         <span class="job-title">${job.title}</span>
         <span class="hint">by ${job.user} · ${ago(job.started)} · ${fmtDuration(duration)}${job.exit_code !== null && job.exit_code !== undefined ? ` · exit ${job.exit_code}` : ''}</span>
+        ${running ? button('process.cancel_job', { job_id: job.id }, 'Stop job…', 'small danger') : ''}
       </summary>
       ${job.tail !== undefined ? html`<pre class="job-log">${job.tail || '(no output yet)'}</pre>` : html`<p class="hint">Output is shown for the five most recent jobs.</p>`}
     </details>

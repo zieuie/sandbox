@@ -10,7 +10,8 @@ Create the first account before serving:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field as dataclass_field
 import getpass
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
@@ -19,7 +20,9 @@ import ipaddress
 import json
 from pathlib import Path
 import re
+import socket
 import sys
+import threading
 import time
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -45,9 +48,17 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
 }
 COOKIE = "kh_session"
+SECURE_COOKIE = "__Host-kh_session"  # browsers bind this name to HTTPS, this exact host, Path=/
 MAX_BODY = 64 * 1024
+MAX_CONNECTIONS = 64
+REQUEST_TIMEOUT = 30          # seconds a connection may sit idle (defeats slow-drip connections)
+PASSWORD_CHECKS = threading.BoundedSemaphore(4)  # each scrypt check costs ~80 ms and 32 MiB
+SAFE_PATH = re.compile(r"/(?!/)[A-Za-z0-9._~!$&'()*+,;=:@%/#?-]*")
 
 
 @dataclass
@@ -58,6 +69,7 @@ class Config:
     commands: CommandService | None = None
     trust_proxy: bool = False      # honour CF-Connecting-IP / X-Forwarded-* from a loopback proxy
     secure_cookies: bool = False   # always mark the cookie Secure (otherwise only on proxied HTTPS)
+    trusted_proxies: tuple = dataclass_field(default_factory=tuple)  # further proxy addresses to trust
 
 
 class Reject(Exception):
@@ -67,32 +79,84 @@ class Reject(Exception):
 
 
 def safe_next(value: str | None) -> str:
-    """Only allow local, same-site redirect targets after login."""
-    if value and value.startswith("/") and not value.startswith("//") and "\\" not in value:
+    """Only allow plain local paths as post-login redirects.
+
+    Browsers strip tabs and newlines while parsing URLs, so "/\t/evil.example"
+    would become "//evil.example"; only printable, unambiguous path characters
+    are accepted, and never a leading "//" or a backslash.
+    """
+    if isinstance(value, str) and len(value) <= 512 and SAFE_PATH.fullmatch(value):
         return value
     return "/"
+
+
+@contextmanager
+def password_check():
+    """Bound concurrent password hashing so a flood cannot exhaust memory."""
+    if not PASSWORD_CHECKS.acquire(timeout=5):
+        raise Reject(HTTPStatus.SERVICE_UNAVAILABLE, "the server is busy; try again", retry_after=2)
+    try:
+        yield
+    finally:
+        PASSWORD_CHECKS.release()
+
+
+class DashboardServer(ThreadingHTTPServer):
+    """A threading server that refuses connections beyond a fixed number."""
+
+    daemon_threads = True
+
+    def __init__(self, *arguments, max_connections: int = MAX_CONNECTIONS, **options) -> None:
+        super().__init__(*arguments, **options)
+        self.slots = threading.BoundedSemaphore(max_connections)
+
+    def process_request(self, request, client_address) -> None:
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
     snapshots, auth, audit = config.snapshots, config.auth, config.audit
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "king-hamming-dashboard/2"
+        server_version = "king-hamming-dashboard"
+        sys_version = ""  # do not advertise the Python version
+        timeout = REQUEST_TIMEOUT
 
         # ----- request facts ---------------------------------------------
 
         def proxied(self) -> bool:
+            """True only for a connection from a proxy we were told to trust."""
             try:
-                return config.trust_proxy and ipaddress.ip_address(self.client_address[0]).is_loopback
+                peer = ipaddress.ip_address(self.client_address[0])
             except ValueError:
                 return False
+            return ((config.trust_proxy and peer.is_loopback) or
+                    any(peer == ipaddress.ip_address(address) for address in config.trusted_proxies))
 
         def address(self) -> str:
             if self.proxied():
+                # Cloudflare sets CF-Connecting-IP itself, overwriting anything a visitor sends.
+                # In X-Forwarded-For only the last hop was added by our proxy; earlier ones are
+                # whatever the visitor claimed.
                 forwarded = (self.headers.get("CF-Connecting-IP") or
-                             (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip())
-                if forwarded:
-                    return forwarded
+                             (self.headers.get("X-Forwarded-For") or "").split(",")[-1]).strip()
+                try:
+                    return str(ipaddress.ip_address(forwarded))
+                except ValueError:
+                    pass
             return self.client_address[0]
 
         def https(self) -> bool:
@@ -109,7 +173,10 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
                 cookie = SimpleCookie(self.headers.get("Cookie", ""))
             except CookieError:
                 return None
-            return cookie[COOKIE].value if COOKIE in cookie else None
+            for name in (SECURE_COOKIE, COOKIE):
+                if name in cookie and cookie[name].value:
+                    return cookie[name].value
+            return None
 
         def current_session(self) -> dict | None:
             return auth.session(self.token())
@@ -129,7 +196,8 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
             if encoding:
                 self.send_header("Content-Encoding", encoding)
                 self.send_header("Vary", "Accept-Encoding")
-            for name, value in {**SECURITY_HEADERS, **(headers or {})}.items():
+            extra = {"Strict-Transport-Security": "max-age=31536000"} if self.https() else {}
+            for name, value in {**SECURITY_HEADERS, **extra, **(headers or {})}.items():
                 self.send_header(name, value)
             self.end_headers()
             if self.command != "HEAD":
@@ -150,8 +218,10 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def cookie(self, token: str, max_age: int) -> dict[str, str]:
-            value = f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
-            return {"Set-Cookie": value + ("; Secure" if self.https() else "")}
+            if self.https():
+                return {"Set-Cookie": f"{SECURE_COOKIE}={token}; Path=/; HttpOnly; Secure; "
+                                      f"SameSite=Lax; Max-Age={max_age}"}
+            return {"Set-Cookie": f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"}
 
         def session_info(self, session: dict) -> dict:
             return {"user": session["user"], "role": session["role"], "csrf": session["csrf"],
@@ -162,7 +232,10 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
         def body(self) -> dict:
             if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
                 raise Reject(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "expected application/json")
-            length = int(self.headers.get("Content-Length", "0") or 0)
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                raise Reject(HTTPStatus.BAD_REQUEST, "invalid Content-Length") from None
             if not 0 <= length <= MAX_BODY:
                 raise Reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body too large")
             try:
@@ -226,7 +299,10 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
             elif route == "/api/snapshot":
                 self.send_snapshot(force=False)
             elif route == "/api/audit":
-                self.send_json(HTTPStatus.OK, {"entries": audit.recent(200)})
+                if session["role"] != "operator":
+                    self.send_json(HTTPStatus.FORBIDDEN, {"error": "the audit log is for operators"})
+                else:
+                    self.send_json(HTTPStatus.OK, {"entries": audit.recent(200)})
             elif route == "/api/jobs" and config.commands:
                 context = config.commands.context
                 rollout = context.state / "last_rollout.json"
@@ -272,7 +348,8 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
                 audit.record("login", name, self.address(), "throttled")
                 raise Reject(HTTPStatus.TOO_MANY_REQUESTS, "too many attempts; try again later",
                              retry_after=round(wait, 1))
-            result = auth.login(name, password, self.address(), self.headers.get("User-Agent", ""))
+            with password_check():
+                result = auth.login(name, password, self.address(), self.headers.get("User-Agent", ""))
             if result is None:
                 auth.throttle.failed(*keys)
                 audit.record("login", name, self.address(), "failed")
@@ -302,7 +379,10 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
             if wait > 0:
                 raise Reject(HTTPStatus.TOO_MANY_REQUESTS, "too many attempts; try again later",
                              retry_after=round(wait, 1))
-            if not auth.reauthenticate(session, str(self.body().get("password", ""))):
+            password = str(self.body().get("password", ""))
+            with password_check():
+                confirmed = auth.reauthenticate(session, password)
+            if not confirmed:
                 auth.throttle.failed(key)
                 audit.record("reauth", session["user"], self.address(), "failed")
                 raise Reject(HTTPStatus.UNAUTHORIZED, "incorrect password")
@@ -313,7 +393,9 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
         def post_password(self) -> None:
             session = self.authorized()
             request = self.body()
-            if auth.verify(session["user"], str(request.get("current", ""))) is None:
+            with password_check():
+                current_ok = auth.verify(session["user"], str(request.get("current", ""))) is not None
+            if not current_ok:
                 auth.throttle.failed(f"user:{session['user']}")
                 audit.record("password", session["user"], self.address(), "failed")
                 raise Reject(HTTPStatus.UNAUTHORIZED, "the current password is incorrect")
@@ -418,6 +500,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="seconds a snapshot is reused before rebuilding (default 15)")
     serve.add_argument("--trust-proxy", action="store_true",
                        help="trust CF-Connecting-IP and X-Forwarded-* from a proxy on this machine")
+    serve.add_argument("--trusted-proxy", action="append", default=[], metavar="ADDRESS",
+                       help="also trust those headers from this address (a proxy on another machine; "
+                            "repeatable)")
     serve.add_argument("--secure-cookies", action="store_true",
                        help="always mark the session cookie Secure (HTTPS only)")
 
@@ -512,8 +597,9 @@ def main() -> int:
     context = Context(arguments.deployments, arguments.campaign, snapshots,
                       Jobs(arguments.state_dir / "jobs"))
     config = Config(snapshots, auth, audit, CommandService(context, audit),
-                    arguments.trust_proxy, arguments.secure_cookies)
-    server = ThreadingHTTPServer((host, port), make_handler(config))
+                    arguments.trust_proxy, arguments.secure_cookies,
+                    tuple(str(ipaddress.ip_address(address)) for address in arguments.trusted_proxy))
+    server = DashboardServer((host, port), make_handler(config))
     server.daemon_threads = True
     print(f"dashboard on http://{host}:{server.server_port}/ reading "
           f"{arguments.deployments / arguments.campaign}; accounts in {arguments.state_dir}",

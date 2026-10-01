@@ -216,6 +216,34 @@ class CommandTests(unittest.TestCase):
         forced = self.preview("field.submit", {"p": 11, "r": 9, "tile_side": 512})[2]
         self.assertIn("No tile side up to 512", forced["blockers"][0])
 
+    def test_cancel_running_job(self) -> None:
+        from jobs import Jobs
+        slow_directory = Path(self.directory.name) / "slow"
+        slow_directory.mkdir()
+        slow = fixture.fake_launcher(slow_directory, delay=60)
+        store = Jobs(self.state / "jobs")  # the same job store the server uses
+        record = store.start("upgrade-workers", "Upgrade workers", ["python3", str(slow)], "tester",
+                             cwd=Path(self.directory.name))
+        for _ in range(100):
+            if (store.record(record["id"]) or {}).get("child_pid"):
+                break
+            time.sleep(0.05)
+        preview = self.preview("process.cancel_job", {"job_id": record["id"]})[2]
+        self.assertEqual((preview["blockers"], preview["confirm_text"]), ([], "stop job"))
+        self.assertIn("partway", preview["warnings"][0])
+        status, _, reply = self.run_command("process.cancel_job", {"job_id": record["id"]}, confirm="stop job")
+        self.assertEqual(status, 200, reply)
+        for _ in range(100):
+            final = store.record(record["id"])
+            if final["status"] != "running":
+                break
+            time.sleep(0.1)
+        self.assertEqual(final["status"], "cancelled")
+        self.assertIn("[cancelled", store.tail(record["id"]))
+        self.assertEqual(self.preview("process.cancel_job", {"job_id": record["id"]})[2]["blockers"],
+                         ["This job is already cancelled."])
+        self.assertEqual(self.preview("process.cancel_job", {"job_id": "../etc"})[0], 404)
+
     def test_upgrade_blocked_while_runs_are_active(self) -> None:
         preview = self.preview("process.upgrade_workers")[2]
         self.assertIn("1 run(s) are active", preview["blockers"][0])

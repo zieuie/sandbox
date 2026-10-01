@@ -17,8 +17,11 @@ def kind_of(description: dict) -> str:
 
 
 def build_timeline(connection: sqlite3.Connection, node_names: list[str],
-                   describe: Callable[[dict], dict], now: float) -> dict:
-    start = now - TIMELINE_SECONDS
+                   describe: Callable[[dict], dict], now: float,
+                   window: float = TIMELINE_SECONDS, merge_gap: float = MERGE_GAP) -> dict:
+    """Lease segments over `window`. Back-to-back completed leases of one field on
+    one machine merge when the gap between them is at most `merge_gap` seconds."""
+    start = now - window
     leases = [dict(row) for row in connection.execute(
         "SELECT h.lease_token,h.run_id,h.node_name,h.started,h.finished,h.outcome,"
         "r.specification,r.calculation_id FROM lease_history h JOIN runs r USING(run_id) "
@@ -49,7 +52,7 @@ def build_timeline(connection: sqlite3.Connection, node_names: list[str],
         key = (item["n"], item["f"], item["k"])
         previous = open_by_key.get(key)
         if (previous is not None and item["o"] == "ok" and previous["o"] == "ok" and
-                previous["t1"] is not None and item["t0"] - previous["t1"] <= MERGE_GAP):
+                previous["t1"] is not None and item["t0"] - previous["t1"] <= merge_gap):
             previous["t1"] = item["t1"]
             previous["c"] += 1
             previous["b"] = item["b"]

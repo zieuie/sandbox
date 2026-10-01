@@ -24,7 +24,9 @@ form.addEventListener('submit', async (event) => {
       form.password.focus();
       return;
     }
-    location.replace(body.next || '/');
+    // The server already checked it; refuse anything but a plain local path anyway.
+    const target = body.next || '/';
+    location.replace(/^\/(?!\/)[\x21-\x7e]*$/.test(target) && !target.includes('\\') ? target : '/');
   } catch (failure) {
     error.textContent = `Could not reach the dashboard: ${failure.message}`;
     error.hidden = false;

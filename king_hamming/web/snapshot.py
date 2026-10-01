@@ -47,6 +47,8 @@ DP_PROGRAMS = {"dp", "dp_distributed"}
 MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned"}
 WINDOW_SECONDS = 24 * 3600
 BUCKET_SECONDS = 15 * 60
+LONG_WINDOW_SECONDS = 7 * 24 * 3600
+LONG_MERGE_GAP = 600.0  # under a pixel at 7-day scale
 MAX_SAMPLE_GAP = 600.0
 
 
@@ -129,6 +131,7 @@ class Snapshots:
         self.match_inputs: dict[str, tuple[dict, bytes]] = {}
         self.dependency_cache: dict[tuple, list[tuple[int, int]]] = {}
         self.descriptions: dict[str, dict] = {}
+        self.long_utilization: tuple[float, dict] | None = None  # (computed at, 7-day hourly series)
         state = deployments / campaign
         self.leader_log = LogWatcher(state / "leader.log", LeaderLogParser())
         self.feeder_log = LogWatcher(state / "feeder.log", FeederLogParser())
@@ -188,9 +191,7 @@ class Snapshots:
             run("status", lambda: self.build_status(connection, state, started))
             run("fleet", lambda: self.build_fleet(connection, started, warnings))
             run("roots", lambda: self.build_roots(connection, state, started))
-            run("timeline", lambda: build_timeline(
-                connection, [node["name"] for node in (snapshot["fleet"] or {}).get("nodes", [])],
-                self.describe_run, started))
+            run("timeline", lambda: self.build_timeline(connection, snapshot, started))
             run("matching", lambda: build_matching(
                 connection, {node["name"]: node["hostname"] for node in (snapshot["fleet"] or {}).get("nodes", [])},
                 self.describe_run, solver_health, started))
@@ -240,6 +241,25 @@ class Snapshots:
             dp, _, digest = decode_input(specification)
             self.match_inputs[key] = (dp, digest)
         return self.match_inputs[key]
+
+    def build_timeline(self, connection: sqlite3.Connection, snapshot: dict, now: float) -> dict:
+        """24 h of leases in detail, plus a 7-day overview with small gaps merged and
+        hourly CPU use (recomputed at most every 5 minutes; it changes slowly)."""
+        names = [node["name"] for node in (snapshot["fleet"] or {}).get("nodes", [])]
+        timeline = build_timeline(connection, names, self.describe_run, now)
+        overview = build_timeline(connection, names, self.describe_run, now,
+                                  window=LONG_WINDOW_SECONDS, merge_gap=LONG_MERGE_GAP)
+        if self.long_utilization is None or now - self.long_utilization[0] > 300:
+            nodes = [dict(row) for row in connection.execute("SELECT node_name,cpu_set FROM nodes")]
+            series, _ = self.utilization(connection, nodes, now, LONG_WINDOW_SECONDS, 3600)
+            self.long_utilization = (now, series)
+        oldest = connection.execute("SELECT MIN(started) FROM lease_history").fetchone()[0]
+        timeline["overview"] = {"start": overview["start"], "nodes": overview["nodes"],
+                                "segments": overview["segments"],
+                                "utilization": self.long_utilization[1], "bucket_seconds": 3600,
+                                "computed_at": self.long_utilization[0]}
+        timeline["history_start"] = oldest
+        return timeline
 
     def describe_run(self, run: dict) -> dict:
         """describe(), memoized by run id; a run's specification never changes."""
@@ -364,11 +384,12 @@ class Snapshots:
             "root_state": root_state, "orphaned": root_state in TERMINAL,
         }
 
-    def utilization(self, connection: sqlite3.Connection, nodes: list[dict],
-                    now: float) -> tuple[dict[str, list[float]], dict[str, float]]:
+    def utilization(self, connection: sqlite3.Connection, nodes: list[dict], now: float,
+                    window: int = WINDOW_SECONDS, bucket: int = BUCKET_SECONDS,
+                    ) -> tuple[dict[str, list[float]], dict[str, float]]:
         """Return per-node CPU utilisation buckets and the fraction of time leased."""
-        start = now - WINDOW_SECONDS
-        buckets = WINDOW_SECONDS // BUCKET_SECONDS
+        start = now - window
+        buckets = window // bucket
         cpu_seconds = {node["node_name"]: [0.0] * buckets for node in nodes}
         shard_leases: dict[str, set[str]] = {}
         previous = None
@@ -385,8 +406,8 @@ class Snapshots:
                     rate = (c1 - c0) / 1e6 / (t1 - t0)
                     low = max(t0, start)
                     while low < t1:
-                        index = int((low - start) // BUCKET_SECONDS)
-                        high = min(t1, start + (index + 1) * BUCKET_SECONDS)
+                        index = int((low - start) // bucket)
+                        high = min(t1, start + (index + 1) * bucket)
                         if 0 <= index < buckets:
                             cpu_seconds[row[3]][index] += rate * (high - low)
                         low = high
@@ -395,7 +416,7 @@ class Snapshots:
         series = {}
         for node in nodes:
             width = max(1, len(cpu_list(node["cpu_set"])))
-            series[node["node_name"]] = [round(min(1.0, value / BUCKET_SECONDS / width), 4)
+            series[node["node_name"]] = [round(min(1.0, value / bucket / width), 4)
                                          for value in cpu_seconds[node["node_name"]]]
 
         intervals: dict[str, list[tuple[float, float]]] = {node["node_name"]: [] for node in nodes}
@@ -412,7 +433,7 @@ class Snapshots:
                 span = spans.get(token)
                 if name in intervals and span and span[1] > span[0]:
                     intervals[name].append(span)
-        busy = {name: round(union_seconds(values) / WINDOW_SECONDS, 4)
+        busy = {name: round(union_seconds(values) / window, 4)
                 for name, values in intervals.items()}
         return series, busy
 
@@ -434,7 +455,8 @@ class Snapshots:
         names = {row["node_name"]: HOST_NAMES.get(host_of(row["address"]), row["node_name"])
                  for row in connection.execute("SELECT node_name,address FROM nodes")}
         candidates = [dict(row) for row in connection.execute(
-            "SELECT run_id,specification,state,created,started,finished,error FROM runs "
+            "SELECT run_id,specification,state,created,started,finished,error,priority,progress_phase,"
+            "last_progress_at FROM runs "
             "WHERE parent_run_id IS NULL AND (state IN ('queued','waiting','running','stopping','paused') "
             "OR finished>?) ORDER BY created", (now - WINDOW_SECONDS,))]
         roots = []
@@ -523,6 +545,8 @@ class Snapshots:
             result.append({
                 "run_id": root["run_id"], "p": p, "r": r, "tile_side": side,
                 "state": root["state"], "active": active, "error": root["error"],
+                "priority": root["priority"], "phase": root["progress_phase"],
+                "last_progress_at": root["last_progress_at"],
                 "orphaned_children": live_children if root["state"] in TERMINAL else 0,
                 "created": root["created"], "started": root["started"], "finished": root["finished"],
                 "attempt": history.index(root["run_id"]) + 1 if root["run_id"] in history else None,
