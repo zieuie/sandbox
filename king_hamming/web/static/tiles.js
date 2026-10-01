@@ -83,7 +83,57 @@ function chips(root) {
     .map((key) => html`<span class="chip"><span class="swatch t-${key}"></span>${fmtInt(root.counts[key])} ${key}</span>`);
 }
 
-function rootCard(root, index) {
+// Time left from the typical tile, following the wave: tiles on one
+// anti-diagonal (row + column) can run together, and each diagonal waits for
+// the one before. So the time left is about
+//   typical tile × Σ over unfinished diagonals of ⌈unfinished tiles there ÷ machines⌉.
+// This stays sensible when the wave is narrow (start, end) or wide (middle).
+// It assumes the field gets every healthy machine and excludes reconstruction.
+function typicalEstimate(root, machines, roots = []) {
+  const typical = typicalTile(root, roots);
+  if (!typical || ['complete', 'failed', 'cancelled'].includes(root.state)) return null;
+  const median = typical.seconds;
+  const perDiagonal = new Map();
+  root.cells.forEach((c) => {
+    if (!DONE.has(c.s)) perDiagonal.set(c.r + c.c, (perDiagonal.get(c.r + c.c) || 0) + 1);
+  });
+  if (!perDiagonal.size) return null;
+  const width = Math.max(1, machines);
+  let steps = 0;
+  perDiagonal.forEach((count) => { steps += Math.ceil(count / width); });
+  const remaining = [...perDiagonal.values()].reduce((a, b) => a + b, 0);
+  return { seconds: steps * median, remaining, diagonals: perDiagonal.size, machines: width, typical };
+}
+
+// This attempt's typical tile, or (when every finished tile so far was reused
+// from an earlier attempt) the most recent earlier attempt's of the same field.
+function typicalTile(root, roots) {
+  if (root.median_tile_seconds) return { seconds: root.median_tile_seconds, from: null };
+  const earlier = roots
+    .filter((other) => other !== root && other.p === root.p && other.r === root.r && other.median_tile_seconds)
+    .sort((a, b) => b.created - a.created)[0];
+  return earlier ? { seconds: earlier.median_tile_seconds, from: earlier.attempt } : null;
+}
+
+function estimateText(estimate) {
+  return `about ${fmtDuration(estimate.seconds)} left`;
+}
+
+function estimateTitle(root, estimate) {
+  return `${fmtInt(estimate.remaining)} tiles left on ${fmtInt(estimate.diagonals)} diagonals × `
+    + `${fmtDuration(estimate.typical.seconds)} typical tile`
+    + `${estimate.typical.from ? ` (from attempt ${estimate.typical.from})` : ''}, with ${estimate.machines} machines; `
+    + 'longer if other fields share them; excludes reconstruction';
+}
+
+// Healthy compute machines; if none are up right now, assume they all return.
+function healthyMachines(snapshot) {
+  const nodes = ((snapshot.fleet && snapshot.fleet.nodes) || []).filter((n) => n.compute_enabled !== false);
+  return nodes.filter((n) => n.state !== 'unavailable').length || nodes.length;
+}
+
+function rootCard(root, index, machines, roots) {
+  const estimate = typicalEstimate(root, machines, roots);
   const total = root.cells.length;
   const done = root.counts.durable + root.counts.complete;
   const attempt = root.attempt ? `attempt ${root.attempt} of ${root.attempts}` : '';
@@ -95,7 +145,8 @@ function rootCard(root, index) {
         started ${fmtTime(root.created)}</div>
     </header>
     <div class="root-progress"><b>${pct(total ? done / total : 0)}</b> of ${fmtInt(total)} tiles complete
-      ${root.median_tile_seconds ? html` · typical tile ${fmtDuration(root.median_tile_seconds)}` : ''}</div>
+      ${estimate ? html` · typical tile ${fmtDuration(estimate.typical.seconds)}${estimate.typical.from ? ` (attempt ${estimate.typical.from})` : ''}` : ''}
+      ${estimate ? html` · <span title="${estimateTitle(root, estimate)}">${estimateText(estimate)}</span>` : ''}</div>
     <div class="chips">${chips(root)}</div>
     ${root.boundary && root.boundary !== 'clear' ? html`<p class="hint">Frontier: tile ${root.boundary}</p>` : ''}
     ${root.orphaned_children ? html`<p class="alert">This root is ${root.state}, but ${root.orphaned_children}
@@ -136,6 +187,7 @@ function focusView(outer, snapshot, roots, root, selected) {
   const total = root.cells.length;
   const done = root.counts.durable + root.counts.complete;
   const stats = pace(root, snapshot.generated_at);
+  const typical = typicalEstimate(root, healthyMachines(snapshot), roots);
   const cell = selected && root.cells.find((c) => c.r === selected.r && c.c === selected.c);
   const detail = cell ? html`
       <div class="card tile-detail">
@@ -170,14 +222,19 @@ function focusView(outer, snapshot, roots, root, selected) {
             <dl class="facts">
               <dt>Last hour</dt><dd>${fmtInt(stats.lastHour)} tiles</dd>
               <dt>At that pace</dt><dd>${stats.eta !== null ? html`about ${fmtDuration(stats.eta)} left` : '—'}</dd>
-              <dt>Typical tile</dt><dd>${root.median_tile_seconds ? fmtDuration(root.median_tile_seconds) : '—'}</dd>
+              <dt>Typical tile</dt><dd>${typical ? html`${fmtDuration(typical.typical.seconds)}${typical.typical.from
+                ? html` <span class="hint">(attempt ${typical.typical.from})</span>` : ''}` : '—'}</dd>
+              <dt>From typical tile</dt><dd>${typical ? html`<span title="${estimateTitle(root, typical)}">${estimateText(typical)}</span>
+                <div class="hint">${fmtInt(typical.remaining)} tiles on ${fmtInt(typical.diagonals)} diagonals,
+                  ${typical.machines} machines</div>` : '—'}</dd>
               <dt>Swept through</dt><dd>${stats.swept >= 0 ? `diagonal ${stats.swept} of ${stats.diagonals - 1}` : 'not started'}</dd>
               <dt>Running on</dt><dd>${stats.front ? `diagonals ${stats.front[0]}–${stats.front[1]}` : '—'}</dd>
               ${root.boundary && root.boundary !== 'clear' ? html`<dt>Frontier</dt><dd>tile ${root.boundary}</dd>` : ''}
             </dl>
             <p class="hint">Tiles depend on earlier rows and columns, so work moves as a wave along
               anti-diagonals (row + column). The pace is usually slower at the start and end of the
-              wave, when fewer tiles are ready at once.</p>
+              wave, when fewer tiles are ready at once. Both estimates leave out the final
+              reconstruction step.</p>
           </div>
           <div class="chips">${chips(root)}</div>
           ${detail}
@@ -240,12 +297,12 @@ export function render(container, snapshot, detail) {
           Click a root to open it full size with its pace and per-tile details.</p>
       </div>
       <div class="legend">${legend}</div>
-      ${active.length ? html`<div class="root-grid">${active.map((r) => rootCard(r, roots.indexOf(r)))}</div>`
+      ${active.length ? html`<div class="root-grid">${active.map((r) => rootCard(r, roots.indexOf(r), healthyMachines(snapshot), roots))}</div>`
         : html`<p class="empty-note">No DP root is active.</p>`}
       ${finished.length ? html`
         <details class="finished" ${showFinished ? 'open' : ''}>
           <summary>Finished in the last 24 hours (${finished.length})</summary>
-          <div class="root-grid">${finished.map((r) => rootCard(r, roots.indexOf(r)))}</div>
+          <div class="root-grid">${finished.map((r) => rootCard(r, roots.indexOf(r), healthyMachines(snapshot), roots))}</div>
         </details>` : ''}
     </section>`);
 

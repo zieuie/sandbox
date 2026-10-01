@@ -20,6 +20,7 @@
   --st-too-big: #d9a13a;
   --st-dp-running: #8fb4f2;
   --st-dp-failed: #d0453b;
+  --st-dp-cancelled: #7b8494;
   --st-unknown: #9aa3b2;
 
   /* tiles */
@@ -144,6 +145,7 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .st-too_big { --c: var(--st-too-big); }
 .st-dp_running { --c: var(--st-dp-running); }
 .st-dp_failed { --c: var(--st-dp-failed); }
+.st-dp_cancelled { --c: var(--st-dp-cancelled); }
 .st-unknown { --c: var(--st-unknown); }
 .swatch[class*="st-"], .badge[class*="st-"] { background: var(--c); }
 .badge { font-size: 12px; font-weight: 500; color: #fff; padding: 2px 8px; border-radius: 999px; vertical-align: middle; }
@@ -179,6 +181,7 @@ td.cell.selected button { outline: 2px solid var(--ink); }
 }
 .drawer-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
 .drawer-head h3 { font-size: 22px; }
+.drawer-actions { align-items: center; margin-bottom: 12px; }
 button.close {
   font: inherit; font-size: 22px; line-height: 1; border: 0; background: none;
   color: var(--muted); cursor: pointer; padding: 4px 8px; border-radius: 6px;

@@ -102,6 +102,15 @@ class SnapshotTests(unittest.TestCase):
                   for item in fields[(5, 3)]["dp_attempts"]}
         self.assertEqual(states, {"live": ("waiting", True), "older": ("complete", False)})
 
+    def test_cancelled_dp_has_its_own_status(self) -> None:
+        with sqlite3.connect(self.deployments / "older" / "leader.sqlite") as connection:
+            fixture.run(connection, "dp117", {"program": "dp_distributed",
+                                              "arguments": {"p": 11, "r": 7, "tile_side": 8}},
+                        "cancelled", finished=NOW - 50_000)
+        fields = {(item["p"], item["r"]): item for item in self.build()["results"]["fields"]}
+        self.assertEqual(fields[(11, 7)]["status"], "dp_cancelled")
+        self.assertEqual(fields[(7, 5)]["status"], "dp_failed")  # a failure still wins
+
     def test_status_header(self) -> None:
         status = self.build()["status"]
         self.assertEqual((status["nodes_healthy"], status["nodes_total"]), (2, 3))

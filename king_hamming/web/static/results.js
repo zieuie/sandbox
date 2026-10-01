@@ -12,6 +12,7 @@ export const STATUS = {
   too_big: { label: 'DP done, too big to match', glyph: '' },
   dp_running: { label: 'DP running', glyph: '' },
   dp_failed: { label: 'DP failed', glyph: '!' },
+  dp_cancelled: { label: 'DP cancelled', glyph: '–' },
   unknown: { label: 'Unknown', glyph: '?' },
 };
 
@@ -75,7 +76,7 @@ export function render(container, snapshot, detail) {
     container.querySelectorAll('.cell.selected').forEach((c) => c.classList.remove('selected'));
     const button = container.querySelector(`button[data-key="${key}"]`);
     if (button) button.parentElement.classList.add('selected');
-    renderDrawer(drawer, byKey.get(key));
+    renderDrawer(drawer, byKey.get(key), snapshot.campaign);
   };
   container.querySelector('tbody').addEventListener('click', (event) => {
     const button = event.target.closest('button[data-key]');
@@ -85,7 +86,19 @@ export function render(container, snapshot, detail) {
   else selected = null;
 }
 
-function renderDrawer(drawer, f) {
+// A failed or cancelled DP can be retried when the live campaign's feeder knows
+// the field; the command's preview explains anything that blocks it.
+function retryButton(f, campaign) {
+  if (!isOperator() || !['dp_failed', 'dp_cancelled'].includes(f.status)) return '';
+  if (!f.dp_attempts.some((a) => a.deployment === campaign)) {
+    return html`<p class="hint">Only attempts from old deployments exist; use Submit a field… to start it in
+      ${campaign}.</p>`;
+  }
+  return html`<div class="cmd-row drawer-actions">${button('feeder.retry', { p: f.p, r: f.r }, 'Retry DP…')}
+    <span class="hint">A new attempt reuses every finished tile with two live copies.</span></div>`;
+}
+
+function renderDrawer(drawer, f, campaign) {
   const s = STATUS[f.status] || STATUS.unknown;
   const m = f.metrics;
   const metrics = m ? html`
@@ -116,6 +129,7 @@ function renderDrawer(drawer, f) {
       <h3>${field(f.p, f.r)} <span class="badge st-${f.status}">${s.label}</span></h3>
       <button type="button" class="close" aria-label="Close">×</button>
     </div>
+    ${retryButton(f, campaign)}
     ${metrics}
     ${f.notes.length ? html`<ul class="notes">${f.notes.map((n) => html`<li>${n}</li>`)}</ul>` : ''}
     <h4>DP attempts</h4>

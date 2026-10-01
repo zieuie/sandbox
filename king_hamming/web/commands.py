@@ -521,12 +521,17 @@ def feeder_extend(context: Context, params: dict) -> Plan:
                 known.add((specification["arguments"]["p"], specification["arguments"]["r"]))
     # The same selection launch_dp.py extend makes.
     chosen = []
-    for specification in scheduling.campaign(16 * 1024**3, max_visits, 4, 512):
-        key = (specification["arguments"]["p"], specification["arguments"]["r"])
-        if key not in known:
-            chosen.append(key)
-            if len(chosen) >= limit:
-                break
+    try:
+        for specification in scheduling.campaign(16 * 1024**3, max_visits, 4, 512):
+            key = (specification["arguments"]["p"], specification["arguments"]["r"])
+            if key not in known:
+                chosen.append(key)
+                if len(chosen) >= limit:
+                    break
+    except ValueError as error:
+        # launch_dp.py extend uses the same function and would fail the same way.
+        raise CommandError(f"The DP scheduler (dp_solver/scheduling.py campaign()) failed: {error}. "
+                           "launch_dp.py extend would fail the same way.", 500) from None
 
     def extend():
         with PipelineLock(context.state):  # launch_dp.py rewrites manifest.json

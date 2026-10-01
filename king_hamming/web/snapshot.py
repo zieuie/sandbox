@@ -724,4 +724,6 @@ class Snapshots:
             return "dp_running"
         if any(attempt["state"] == "failed" for attempt in entry["dp_attempts"]):
             return "dp_failed"
+        if any(attempt["state"] == "cancelled" for attempt in entry["dp_attempts"]):
+            return "dp_cancelled"
         return "unknown"
