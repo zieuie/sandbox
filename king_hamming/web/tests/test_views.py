@@ -164,6 +164,43 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(recent[0]["count"], 2)
         self.assertIn("database is locked", recent[0]["title"])
 
+    def test_matching_runs_and_phases(self) -> None:
+        import base64
+        import hashlib
+        import json as json_module
+        dp_raw = (fixture.ROOT / "matching_solver" / "examples" / "13_5.khdp").read_bytes()
+        specification = {"program": "match_distributed", "arguments": {
+            "dp_b64": base64.b64encode(dp_raw).decode(), "dp_sha256": hashlib.sha256(dp_raw).hexdigest(),
+            "poly": [2, 4, 0, 0, 0, 1], "workers": 2}}
+        with sqlite3.connect(self.database) as connection:
+            fixture.run(connection, "m1", specification, "running", node_name="dp-101", started=NOW - 600,
+                        progress_done=900, progress_total=1000, last_solver_heartbeat=NOW,
+                        last_progress_at=NOW)
+            fixture.run(connection, "m0", {**specification, "arguments": {**specification["arguments"],
+                                                                          "poly": [3, 1, 0, 0, 0, 1]}},
+                        "complete", node_name="dp-151", started=NOW - 9000, finished=NOW - 8000,
+                        progress_done=990, progress_total=1000)
+            for run_id, cursor, done in (("m1", 1, 700), ("m1", 2, 850), ("m1", 2, 860), ("m0", 1, 990)):
+                connection.execute(
+                    "INSERT INTO checkpoints(manifest_hash,run_id,cursor,done,manifest,created) VALUES(?,?,?,?,?,?)",
+                    (f"{run_id}-{cursor}-{done}", run_id, cursor, done, "{}", NOW - 100 + done / 1000))
+            connection.execute("INSERT INTO node_reservations(node_name,run_id,lease_token,created) "
+                               "VALUES('dp-151','m1','lease-m1',?)", (NOW,))
+            connection.execute(
+                "INSERT INTO resource_usage(run_id,lease_token,node_name,component,shard_index,"
+                "cpu_microseconds,peak_rss_bytes,recorded) VALUES('m0','l0','dp-151','coordinator',-1,5000000,1024,?)",
+                (NOW,))
+        runs = {run["run_id"]: run for run in self.build()["matching"]["runs"]}
+        live, done = runs["m1"], runs["m0"]
+        self.assertEqual(list(runs)[0], "m1")  # active first
+        self.assertEqual(live["field"], [13, 5])
+        self.assertEqual(live["phases"], [[1, 700, live["phases"][0][2]], [2, 860, live["phases"][1][2]]])
+        self.assertEqual(live["machines"], ["fearless", "merlin"])
+        self.assertIsNone(live["outcome"])
+        self.assertEqual((done["outcome"], done["machines"]), ("obstructed", ["merlin"]))
+        self.assertEqual(done["resources"][0]["cpu_seconds"], 5.0)
+        json_module.dumps(runs)
+
     def test_feeder_failing_when_last_pass_errored(self) -> None:
         with (self.deployments / "live" / "feeder.log").open("a") as stream:
             stream.write("continuous campaign will retry: boom\n")

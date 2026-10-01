@@ -2,6 +2,21 @@
 import {
   html, setHTML, field, fmtBytes, fmtCompact, fmtDuration, fmtInt, fmtPoly, fmtTime, ago, bar, pct,
 } from './util.js';
+import { button, isOperator, open, ask } from './command.js';
+
+function editSettings(settings, only) {
+  const keys = SETTINGS.filter(([key]) => key in settings && (!only || only.includes(key)));
+  ask({
+    title: only ? 'Change a feeder limit' : 'Change feeder limits',
+    text: 'Whole numbers; 3e14 and 300,000,000,000,000 both work. You review the change before it applies.',
+    fields: keys.map(([key, label]) => ({ name: key, label, value: String(settings[key]), hint: fmtSetting(key, settings[key]) })),
+    submit: (values) => {
+      const changes = {};
+      Object.entries(values).forEach(([key, value]) => { if (value !== String(settings[key])) changes[key] = value; });
+      if (Object.keys(changes).length) open('feeder.settings', { changes });
+    },
+  });
+}
 
 const SETTINGS = [
   ['target_dp_roots', 'Target active DP roots'],
@@ -97,7 +112,8 @@ function fieldRow(f) {
     <td>${f.requests ? fmtCompact(f.requests) : '—'}</td>
     <td>${matching}</td>
     <td>${f.admission || '—'}${f.engine ? html`<div class="hint">${f.engine}</div>` : ''}
-      ${f.notes.map((n) => html`<div class="error-text">${n}</div>`)}</td>
+      ${f.notes.map((n) => html`<div class="error-text">${n}</div>`)}
+      ${f.dp_given_up ? button('feeder.retry', { p: f.field[0], r: f.field[1] }, 'Retry…', 'small') : ''}</td>
   </tr>`;
 }
 
@@ -144,14 +160,33 @@ export function render(container, snapshot) {
             <tbody>${feeder.in_flight.map(fieldRow)}</tbody></table></div>
         </div>
         <div class="side">
-          <div class="card"><h3>Next fields</h3>${upcoming}</div>
+          <div class="card"><h3>Next fields</h3>${upcoming}
+            ${isOperator() ? html`<div class="cmd-row">
+              <button type="button" class="cmd small" data-edit="max_visits">Raise visit limit…</button>
+              <button type="button" class="cmd small" data-extend>Add fields now…</button></div>` : ''}</div>
           <div class="card"><h3>Recent passes</h3><ul class="passes">${history(feeder.history)}</ul></div>
         </div>
       </div>
       <details class="card settings">
-        <summary><h3>Limits and settings</h3></summary>
+        <summary><h3>Limits and settings</h3>
+          ${isOperator() ? html`<button type="button" class="cmd small" data-edit="all">Edit…</button>` : ''}</summary>
         <dl class="facts">${SETTINGS.filter(([key]) => key in settings).map(([key, label]) =>
           html`<dt>${label}</dt><dd>${fmtSetting(key, settings[key])}</dd>`)}</dl>
       </details>
     </section>`);
+
+  container.querySelectorAll('[data-edit]').forEach((element) => element.addEventListener('click', (event) => {
+    event.preventDefault();
+    editSettings(settings, element.dataset.edit === 'all' ? null : [element.dataset.edit]);
+  }));
+  const extend = container.querySelector('[data-extend]');
+  if (extend) {
+    extend.addEventListener('click', () => ask({
+      title: 'Add fields beyond the feeder’s limit',
+      text: 'Submits new DP roots right away (launch_dp.py extend). You review the list first.',
+      fields: [{ name: 'max_visits', label: 'Visit limit', value: String(settings.max_visits * 10) },
+        { name: 'limit', label: 'At most this many fields', value: '3' }],
+      submit: (values) => open('feeder.extend', values),
+    }));
+  }
 }

@@ -2,11 +2,29 @@
 import {
   html, setHTML, field, fmtDuration, fmtInt, fmtTime, pct, shortId, tooltips,
 } from './util.js';
+import { button, isOperator, open } from './command.js';
+
+function rootActions(root) {
+  const run = { run_id: root.run_id };
+  const terminal = ['complete', 'failed', 'cancelled'].includes(root.state);
+  const buttons = [];
+  if (!terminal) {
+    buttons.push(root.state === 'paused' ? button('run.resume', run, 'Resume field')
+      : button('run.pause', run, 'Pause field'));
+    buttons.push(button('root.restart', run, 'Restart field…'));
+    buttons.push(button('run.cancel', run, 'Cancel field…', 'danger'));
+  } else {
+    if (root.orphaned_children) buttons.push(button('root.cancel_leftovers', run, 'Cancel leftover tiles'));
+    if (root.state !== 'complete' && root.attempt === root.attempts) buttons.push(button('root.restart', run, 'Restart field…'));
+  }
+  return buttons.length ? html`<div class="cmd-row">${buttons}</div>` : '';
+}
 
 export const TILE_STATES = {
   durable: 'Durable (2+ live copies)',
   complete: 'Complete, under-replicated',
   running: 'Running',
+  paused: 'Paused',
   queued: 'Queued',
   ready: 'Ready, not yet queued',
   blocked: 'Blocked on dependencies',
@@ -54,6 +72,7 @@ function rootCard(root, index) {
       of its tiles are still running or queued.</p>` : ''}
     ${root.error ? html`<p class="error-text">${root.error}</p>` : ''}
     ${grid(root, index)}
+    ${rootActions(root)}
   </article>`;
 }
 
@@ -85,6 +104,15 @@ export function render(container, snapshot) {
         </details>` : ''}
     </section>`);
 
+  container.addEventListener('click', (event) => {
+    const target = event.target.closest('rect.tile');
+    if (!target || !isOperator()) return;
+    const c = roots[Number(target.dataset.root)].cells[Number(target.dataset.cell)];
+    if (c && c.run && ['running', 'queued', 'paused'].includes(c.s)) {
+      open(c.s === 'paused' ? 'run.resume' : 'run.pause', { run_id: c.run });
+    }
+  });
+
   const details = container.querySelector('details.finished');
   if (details) details.addEventListener('toggle', () => { showFinished = details.open; });
 
@@ -98,6 +126,7 @@ export function render(container, snapshot) {
     if (c.t0) lines.push(html`started ${fmtTime(c.t0)}${c.t1 ? html` · took ${fmtDuration(c.t1 - c.t0)}` : ''}`);
     if (c.run) lines.push(html`run ${shortId(c.run)} · attempt ${c.att || 1} · ${c.rep} live cop${c.rep === 1 ? 'y' : 'ies'}`);
     if (c.err) lines.push(html`<span class="error-text">${c.err}</span>`);
+    if (isOperator() && ['running', 'queued', 'paused'].includes(c.s)) lines.push(html`<i>click to ${c.s === 'paused' ? 'resume' : 'pause'}</i>`);
     return html`${lines.map((line, i) => html`${i ? html`<br>` : ''}${line}`)}`;
   });
 }

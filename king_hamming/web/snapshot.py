@@ -31,6 +31,7 @@ from matching_solver.artifacts import request_count  # noqa: E402
 import leader  # noqa: E402  (idle-reason rules stay owned by the leader)
 from feeder import build_feeder  # noqa: E402
 from logs import FeederLogParser, LeaderLogParser, LogWatcher  # noqa: E402
+from matching import build_matching  # noqa: E402
 from problems import build_problems  # noqa: E402
 from timeline import build_timeline  # noqa: E402
 
@@ -40,7 +41,7 @@ HOST_NAMES = {
     "192.168.4.104": "folklore", "192.168.4.105": "evermore", "192.168.4.106": "midnights",
     "192.168.4.107": "poets", "192.168.4.108": "showgirl", "192.168.4.151": "merlin",
 }
-ACTIVE = {"queued", "waiting", "running", "stopping"}
+ACTIVE = {"queued", "waiting", "running", "stopping", "paused"}
 TERMINAL = {"complete", "failed", "cancelled"}
 DP_PROGRAMS = {"dp", "dp_distributed"}
 MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned"}
@@ -145,6 +146,11 @@ class Snapshots:
                 self.built_at = self.clock()
             return self.snapshot, *self.encoded
 
+    def invalidate(self) -> None:
+        """Make the next request rebuild (after a command changed something)."""
+        with self.lock:
+            self.built_at = 0.0
+
     def age(self) -> float | None:
         return None if self.snapshot is None else self.clock() - self.built_at
 
@@ -185,6 +191,9 @@ class Snapshots:
             run("timeline", lambda: build_timeline(
                 connection, [node["name"] for node in (snapshot["fleet"] or {}).get("nodes", [])],
                 self.describe_run, started))
+            run("matching", lambda: build_matching(
+                connection, {node["name"]: node["hostname"] for node in (snapshot["fleet"] or {}).get("nodes", [])},
+                self.describe_run, solver_health, started))
             run("feeder", lambda: build_feeder(state, self.feeder_log, snapshot["roots"], started),
                 needs_database=False)
             run("problems", lambda: build_problems(snapshot, connection, started, self.describe_run,
@@ -426,7 +435,7 @@ class Snapshots:
                  for row in connection.execute("SELECT node_name,address FROM nodes")}
         candidates = [dict(row) for row in connection.execute(
             "SELECT run_id,specification,state,created,started,finished,error FROM runs "
-            "WHERE parent_run_id IS NULL AND (state IN ('queued','waiting','running','stopping') "
+            "WHERE parent_run_id IS NULL AND (state IN ('queued','waiting','running','stopping','paused') "
             "OR finished>?) ORDER BY created", (now - WINDOW_SECONDS,))]
         roots = []
         for root in candidates:
@@ -465,12 +474,12 @@ class Snapshots:
             p, r = int(arguments["p"]), int(arguments["r"])
             side = int(arguments.get("tile_side", 4096))
             rows = cells_by_root[root["run_id"]]
-            live_children = sum(item["state"] in {"running", "stopping", "queued", "waiting"}
+            live_children = sum(item["state"] in {"running", "stopping", "queued", "waiting", "paused"}
                                 for item in rows)
             active = root["state"] not in TERMINAL or live_children > 0
             durable = {(item["row"], item["column"]) for item in rows
                        if item["state"] == "complete" and item["replicas"] >= 2}
-            counts = {key: 0 for key in ("durable", "complete", "running", "queued", "ready",
+            counts = {key: 0 for key in ("durable", "complete", "running", "paused", "queued", "ready",
                                          "blocked", "failed", "cancelled", "unscheduled")}
             boundary, cells, durations = None, [], []
             for item in rows:
@@ -485,6 +494,8 @@ class Snapshots:
                     status = "running"
                 elif child in {"queued", "waiting"}:
                     status = "queued"
+                elif child == "paused":
+                    status = "paused"
                 elif child in {"failed", "cancelled"}:
                     status = child
                 elif root["state"] in TERMINAL:

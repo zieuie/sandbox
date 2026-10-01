@@ -1,8 +1,14 @@
 // App shell: fetch the snapshot, poll while visible, render the selected tab.
-import { html, setHTML, fmtDuration, ago, now, hideTooltip } from './util.js';
+import {
+  html, setHTML, fmtDuration, ago, now, hideTooltip, api, setCsrf,
+} from './util.js';
+import * as account from './account.js';
+import * as command from './command.js';
+import * as activity from './activity.js';
 import * as results from './results.js';
 import * as fleet from './fleet.js';
 import * as tiles from './tiles.js';
+import * as matching from './matching.js';
 import * as timeline from './timeline.js';
 import * as feeder from './feeder.js';
 import * as problems from './problems.js';
@@ -11,9 +17,11 @@ const VIEWS = {
   results: { title: 'Results', module: results },
   fleet: { title: 'Fleet', module: fleet },
   tiles: { title: 'DP tiles', module: tiles },
+  matching: { title: 'Matching', module: matching },
   timeline: { title: 'Timeline', module: timeline },
   feeder: { title: 'Feeder', module: feeder },
   problems: { title: 'Problems', module: problems },
+  activity: { title: 'Activity', module: activity },
 };
 const POLL_SECONDS = 30;
 
@@ -46,11 +54,7 @@ async function load(force = false) {
   refreshButton.disabled = true;
   refreshButton.classList.add('spinning');
   try {
-    const response = await fetch(force ? '/api/refresh' : '/api/snapshot',
-      { method: force ? 'POST' : 'GET', cache: 'no-store' });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-    snapshot = body;
+    snapshot = await api(force ? '/api/refresh' : '/api/snapshot', { method: force ? 'POST' : 'GET' });
     fetchError = null;
   } catch (error) {
     fetchError = error.message;
@@ -125,10 +129,18 @@ function render() {
 }
 
 window.addEventListener('hashchange', render);
+window.addEventListener('kh:changed', () => load());
+command.install();
 refreshButton.addEventListener('click', () => load(true));
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && snapshot && now() - snapshot.generated_at > POLL_SECONDS) load();
 });
 setInterval(renderUpdated, 1000);
 render();
-load();
+api('/api/session').then((session) => {
+  setCsrf(session.csrf);
+  account.mount(document.querySelector('.account'), session);
+  load();
+}).catch((error) => {
+  if (error.message !== 'signed out') { fetchError = error.message; render(); }
+});

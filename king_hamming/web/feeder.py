@@ -31,6 +31,40 @@ def feeder_process(state: Path) -> dict:
             "command": " ".join(command)}
 
 
+def known_fields(state: Path) -> set[tuple[int, int]]:
+    """Fields the feeder or launcher has already submitted."""
+    known = set()
+    try:
+        pipeline = json.loads((state / "pipeline.json").read_text())
+        known |= {(record["p"], record["r"]) for record in pipeline.get("fields", {}).values()}
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        manifest = json.loads((state / "manifest.json").read_text())
+        known |= {(entry["specification"]["arguments"]["p"], entry["specification"]["arguments"]["r"])
+                  for entry in manifest.get("entries", [])
+                  if "p" in entry["specification"].get("arguments", {})}
+    except (OSError, ValueError, KeyError):
+        pass
+    return known
+
+
+def upcoming_fields(state: Path, settings: dict, limit: int = 8) -> list[dict]:
+    """The next unsubmitted fields the feeder would add under these settings, in its order."""
+    known = known_fields(state)
+    upcoming = []
+    for candidate in scheduling.campaign(settings.get("max_state_bytes", 16 * 1024**3),
+                                         settings.get("max_visits", 30_000_000_000_000),
+                                         settings.get("dp_threads", 16), settings.get("tile_side", 512)):
+        arguments = candidate["arguments"]
+        key = (arguments["p"], arguments["r"])
+        if key not in known:
+            upcoming.append({"field": list(key), "q": key[0] ** key[1]})
+            if len(upcoming) >= limit:
+                break
+    return upcoming
+
+
 def build_feeder(state: Path, watcher: LogWatcher, roots: list[dict] | None, now: float) -> dict | None:
     path = state / "pipeline.json"
     if not path.exists():
@@ -83,24 +117,7 @@ def build_feeder(state: Path, watcher: LogWatcher, roots: list[dict] | None, now
     demand = pipeline.get("demand", {})
     free = shutil.disk_usage(state).free
 
-    known = {(record["p"], record["r"]) for record in fields.values()}
-    try:
-        manifest = json.loads((state / "manifest.json").read_text())
-        known |= {(entry["specification"]["arguments"]["p"], entry["specification"]["arguments"]["r"])
-                  for entry in manifest.get("entries", [])
-                  if "p" in entry["specification"].get("arguments", {})}
-    except (OSError, ValueError, KeyError):
-        pass
-    upcoming = []
-    for candidate in scheduling.campaign(settings.get("max_state_bytes", 16 * 1024**3),
-                                         settings.get("max_visits", 30_000_000_000_000),
-                                         settings.get("dp_threads", 16), settings.get("tile_side", 512)):
-        arguments = candidate["arguments"]
-        key = (arguments["p"], arguments["r"])
-        if key not in known:
-            upcoming.append({"field": list(key), "q": key[0] ** key[1]})
-            if len(upcoming) >= 8:
-                break
+    upcoming = upcoming_fields(state, settings)
 
     history = [{"time": event["time"], "after": event.get("after"), "kind": event["kind"],
                 "result": event.get("result"), "message": event.get("message")}

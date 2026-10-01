@@ -2,6 +2,16 @@
 import {
   html, setHTML, field, fmtBytes, fmtDuration, fmtInt, pct, sparkline, bar, tooltips, now,
 } from './util.js';
+import { button } from './command.js';
+
+function actions(item) {
+  if (item.role !== 'lease') return '';
+  const run = { run_id: item.run_id };
+  const buttons = [button('run.pause', run, 'Pause', 'small')];
+  if (item.kind !== 'dp_tile') buttons.push(button('run.cancel', run, 'Cancel', 'small'));
+  buttons.push(button('run.priority', run, 'Priority…', 'small'));
+  return html`<div class="cmd-row">${buttons}</div>`;
+}
 
 const HEALTH_CLASS = {
   responding: 'ok', starting: 'ok', stopping: 'warn', 'no-progress-warning': 'warn',
@@ -41,6 +51,7 @@ function workEntry(item, index, generatedAt) {
       ${item.memory ? html` · ${fmtBytes(item.memory)}` : ''}
       ${elapsed !== null ? html` · ${fmtDuration(elapsed)}` : ''}</div>
     ${item.role !== 'partner' && item.total ? bar(fraction, `w${index % 6}`) : ''}
+    ${actions(item)}
   </li>`;
 }
 
@@ -89,8 +100,12 @@ export function render(container, snapshot) {
 
   setHTML(container, html`
     <section class="panel">
-      <div class="panel-head">
+      <div class="panel-head row">
         <h2>Fleet</h2>
+        ${fleet.dispatch === 'running' ? button('dispatch.stop', {}, 'Stop dispatch…')
+          : button('dispatch.resume', {}, 'Resume dispatch')}
+      </div>
+      <div>
         <p class="hint">${healthy}/${nodes.length} machines healthy · ${busy}/${allocatable} CPUs allocated now ·
           average CPU use over 24 h ${pct(average)}. Allocation is reserved capacity; the graph is measured use.</p>
       </div>

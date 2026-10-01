@@ -178,3 +178,145 @@ LOCKED_BLOCK = ("Exception occurred during processing of request from ('192.168.
                 "Traceback (most recent call last):\n"
                 "  File \"leader.py\", line 508, in dispatch_post\n"
                 "sqlite3.OperationalError: database is locked\n" + "-" * 40 + "\n")
+
+
+class Client:
+    """Minimal HTTP client that keeps the session cookie and CSRF token."""
+
+    def __init__(self, base: str) -> None:
+        self.base = base
+        self.cookie = None
+        self.csrf = None
+
+    def request(self, path, method="GET", body=None, headers=None, csrf=True):
+        import http.client
+        from urllib.parse import urlparse
+        url = urlparse(self.base)
+        connection = http.client.HTTPConnection(url.hostname, url.port, timeout=30)
+        sent = {"Origin": self.base} if method == "POST" else {}
+        if body is not None:
+            sent["Content-Type"] = "application/json"
+        if self.cookie:
+            sent["Cookie"] = self.cookie
+        if csrf and self.csrf and method == "POST":
+            sent["X-CSRF-Token"] = self.csrf
+        sent.update(headers or {})
+        payload = None if body is None else json.dumps(body).encode()
+        connection.request(method, path, body=payload, headers=sent)
+        response = connection.getresponse()
+        data = response.read()
+        result = (response.status, dict(response.getheaders()), data)
+        connection.close()
+        return result
+
+    def json(self, path, method="GET", body=None, **options):
+        status, headers, data = self.request(path, method, body, **options)
+        try:
+            return status, headers, json.loads(data) if data else None
+        except ValueError:
+            return status, headers, None
+
+    def login(self, user, password):
+        status, headers, value = self.json("/api/login", "POST", {"user": user, "password": password})
+        if status == 200:
+            self.cookie = headers["Set-Cookie"].split(";")[0]
+            self.csrf = value["csrf"]
+        return status, headers, value
+
+
+PASSWORD = "correct horse battery"
+
+
+def serve(deployments: Path, state: Path, launcher: Path | None = None, **options):
+    """Start a dashboard server in a thread; return (httpd, base URL, auth)."""
+    import threading
+    from http.server import ThreadingHTTPServer
+    from audit import Audit
+    from auth import Auth
+    from commands import CommandService, Context
+    from jobs import Jobs
+    import server
+    import snapshot
+    auth = Auth(state)
+    auth.add_user("tester", PASSWORD, "operator")
+    auth.add_user("guest", PASSWORD + "!", "viewer")
+    snapshots = snapshot.Snapshots(deployments, "live")
+    audit = Audit(state)
+    context = Context(deployments, "live", snapshots, Jobs(state / "jobs"))
+    if launcher is not None:
+        context.launcher = launcher
+    config = server.Config(snapshots, auth, audit, CommandService(context, audit), **options)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(config))
+    httpd.quiet = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_port}", auth
+
+
+class FakeLeader:
+    """Record leader API calls and answer like the real leader would."""
+
+    def __init__(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        calls = self.calls = []
+        self.refuse = set()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(handler):
+                body = json.loads(handler.rfile.read(int(handler.headers["Content-Length"])))
+                calls.append((handler.path, body))
+                if handler.path in self.refuse:
+                    reply, status = {"error": "terminal runs cannot be controlled"}, 400
+                elif handler.path == "/v1/enqueue":
+                    reply, status = {"run_id": f"new-{len(calls)}", "state": "waiting", "reused": False}, 200
+                elif handler.path == "/v1/control":
+                    reply, status = {"campaign_state": body["state"]}, 200
+                else:
+                    reply, status = {"run_id": body.get("run_id"), "state": "cancelled"}, 200
+                data = json.dumps(reply).encode()
+                handler.send_response(status)
+                handler.send_header("Content-Type", "application/json")
+                handler.send_header("Content-Length", str(len(data)))
+                handler.end_headers()
+                handler.wfile.write(data)
+
+            def log_message(handler, *arguments):
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_port}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def command_campaign(deployments: Path, leader_url: str) -> None:
+    """Add a manifest, three failed 97^3 attempts and a pipeline lock to the live fixture."""
+    state = deployments / "live"
+    connection = sqlite3.connect(state / "leader.sqlite")
+    entries = [{"specification": {"program": "dp_distributed",
+                                  "arguments": {"p": 5, "r": 3, "tile_side": SIDE}},
+                "run_id": "root-5-3", "state": "waiting"}]
+    for index in range(3):
+        specification = {"program": "dp_distributed", "arguments": {"p": 97, "r": 3, "tile_side": 512}}
+        run(connection, f"x{index}", specification, "failed", error=f"tile {index},1: timed out",
+            finished=NOW - 1000 + index, created=NOW - 5000 + index)
+        entries.append({"specification": specification, "run_id": f"x{index}", "state": "failed"})
+    connection.commit()
+    connection.close()
+    (state / "manifest.json").write_text(json.dumps({"leader": leader_url, "entries": entries}))
+    (state / "pipeline.lock").touch()
+
+
+def fake_launcher(directory: Path, delay: float = 0.0) -> Path:
+    """A stand-in for launch_dp.py that echoes its arguments (and extend's JSON)."""
+    path = directory / "fake_launch.py"
+    path.write_text(
+        "import json, sys, time\n"
+        f"time.sleep({delay})\n"
+        "print('fake launcher:', ' '.join(sys.argv[1:]))\n"
+        "if 'extend' in sys.argv: print(json.dumps({'added_calculations': 0}))\n"
+        "sys.exit(3 if 'upgrade-leader' in sys.argv else 0)\n")
+    return path

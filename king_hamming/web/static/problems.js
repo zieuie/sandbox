@@ -1,5 +1,6 @@
 // Problems feed: what needs attention now, then recent events grouped by kind.
 import { html, setHTML, fmtTime, ago, fmtDuration } from './util.js';
+import { button } from './command.js';
 
 const SEVERITIES = ['critical', 'warning', 'info'];
 const STORAGE_FILTER = 'kh.problems.filter';
@@ -31,6 +32,7 @@ function activeCard(entry) {
         ${entry.detail ? html`<div class="problem-detail">${entry.detail}</div>` : ''}</div>
     </div>
     <div class="problem-side">${entry.time ? html`since ${when(entry)}` : ''}
+      ${entry.action ? button(entry.action.command, entry.action.params, entry.action.label, 'small') : ''}
       ${entry.link ? html`<a href="${entry.link}">View →</a>` : ''}</div>
   </li>`;
 }

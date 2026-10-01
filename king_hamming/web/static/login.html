@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · King Hamming</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/login.js"></script>
+</head>
+<body class="login-page">
+  <main class="login-box">
+    <img src="/static/icon.svg" alt="" width="44" height="44">
+    <h1>King Hamming</h1>
+    <p class="hint">Sign in to the campaign dashboard.</p>
+    <form class="login-form" autocomplete="on">
+      <label>User name <input name="user" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <p class="login-error" role="alert" hidden></p>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

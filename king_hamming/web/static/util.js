@@ -55,8 +55,9 @@ export function fmtDuration(seconds) {
   if (seconds < 60) return `${Math.round(seconds)}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   if (seconds < 86400) {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.round((seconds % 3600) / 60);
+    const minutes = Math.round(seconds / 60);
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
     return m ? `${h}h ${m}m` : `${h}h`;
   }
   return `${(seconds / 86400).toFixed(1)}d`;
@@ -140,4 +141,38 @@ export function bar(fraction, className = '') {
     <rect class="bar-track" x="0" y="0" width="100" height="6" rx="3"></rect>
     <rect class="bar-fill" x="0" y="0" width="${width.toFixed(2)}" height="6" rx="3"></rect>
   </svg>`;
+}
+
+// ----- API calls with the session's CSRF token ---------------------------
+
+let csrfToken = null;
+export function setCsrf(token) { csrfToken = token; }
+
+export function toLogin() {
+  location.assign(`/login?next=${encodeURIComponent(location.pathname + location.hash)}`);
+}
+
+// fetch JSON; POSTs carry the CSRF token. A 401 sends the browser to the login page.
+export async function api(path, { method = 'GET', body } = {}) {
+  const headers = {};
+  if (method !== 'GET') {
+    headers['Content-Type'] = 'application/json';
+    if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+  }
+  const response = await fetch(path, {
+    method, headers, cache: 'no-store', body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let value = null;
+  try { value = await response.json(); } catch (error) { value = null; }
+  if (response.status === 401 && path !== '/api/reauth' && path !== '/api/password') {
+    toLogin();
+    throw new Error('signed out');
+  }
+  if (!response.ok) {
+    const error = new Error((value && value.error) || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.body = value;
+    throw error;
+  }
+  return value;
 }

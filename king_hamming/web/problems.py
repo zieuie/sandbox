@@ -55,22 +55,36 @@ def current_conditions(snapshot: dict, connection: sqlite3.Connection, now: floa
                                   f"phase {work['phase']}", work["started"], "#fleet"))
     if status and status.get("dispatch") != "running":
         found.append(item("warning", "dispatch", f"Dispatch is {status.get('dispatch')}",
-                          "No new leases are handed out until it is resumed.", None, "#fleet"))
+                          "No new leases are handed out until it is resumed.", None, "#fleet",
+                          action={"command": "dispatch.resume", "params": {}, "label": "Resume dispatch"}))
 
     for root in snapshot.get("roots") or []:
+        stuck = [cell for cell in root["cells"] if cell["s"] == "cancelled"]
+        if root["state"] not in {"complete", "failed", "cancelled"} and stuck:
+            found.append(item("warning", f"stuck:{root['p']},{root['r']}",
+                              f"{label([root['p'], root['r']])} cannot finish: tile "
+                              f"{stuck[0]['r']},{stuck[0]['c']} was cancelled",
+                              "The leader never recreates a cancelled tile. Restart the field to recompute it; "
+                              "finished tiles are reused.", None, "#tiles",
+                              action={"command": "root.restart", "params": {"run_id": root["run_id"]},
+                                      "label": "Restart field"}))
         if root.get("orphaned_children"):
             found.append(item("warning", f"orphaned:{root['p']},{root['r']}",
                               f"{label([root['p'], root['r']])}: {root['orphaned_children']} tiles still "
                               f"running after the root {root['state']}",
                               "These leases occupy machines for a calculation that has stopped.",
-                              root["finished"], "#tiles"))
+                              root["finished"], "#tiles",
+                              action={"command": "root.cancel_leftovers", "params": {"run_id": root["run_id"]},
+                                      "label": "Cancel leftover tiles"}))
 
     if feeder:
         process = feeder["process"]
         if process.get("recorded") and not process.get("alive"):
             found.append(item("critical", "feeder_down", "The feeder process is not running",
                               f"pid {process['pid']} from feeder_process.json is gone. "
-                              "No DP is collected, matched or added.", None, "#feeder"))
+                              "No DP is collected, matched or added.", None, "#feeder",
+                              action={"command": "process.ensure_feeder", "params": {},
+                                      "label": "Start the feeder"}))
         elif feeder["stale"]:
             found.append(item("critical", "feeder_stale", "The feeder has not reconciled recently",
                               "Its last successful pass is more than 10 minutes old.",
@@ -93,7 +107,10 @@ def current_conditions(snapshot: dict, connection: sqlite3.Connection, now: floa
                 found.append(item("critical", f"gave_up:{record['field'][0]},{record['field'][1]}",
                                   f"{label(record['field'])}: DP failed all {record['dp_attempts']} attempts",
                                   "The feeder will not retry this field on its own.", None,
-                                  f"#results/{record['field'][0]},{record['field'][1]}"))
+                                  f"#results/{record['field'][0]},{record['field'][1]}",
+                                  action={"command": "feeder.retry",
+                                          "params": {"p": record["field"][0], "r": record["field"][1]},
+                                          "label": "Retry"}))
             for note in record["notes"]:
                 found.append(item("warning", f"matching_gave_up:{record['field'][0]},{record['field'][1]}",
                                   f"{label(record['field'])}: {note}", None, None,
