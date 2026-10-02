@@ -11,7 +11,7 @@ import json
 import sqlite3
 from typing import Callable
 
-MATCH_PROGRAMS = ("match", "match_distributed", "match_partitioned")
+MATCH_PROGRAMS = ("match", "match_distributed", "match_partitioned", "match_gpu")
 
 
 def build_matching(connection: sqlite3.Connection, names: dict[str, str],
@@ -61,8 +61,19 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
         for machine in reserved.get(run["run_id"], []) + [item["machine"] for item in usage[run["run_id"]]]:
             if machine and machine not in machines:
                 machines.append(machine)
+        gpu = None
+        if description.get("program") == "match_gpu":
+            gpu = {"index": run.get("gpu_index"), "device": None, "phases": None, "seconds": None}
+            try:
+                summary = json.loads(run["progress_message"] or "{}")
+            except ValueError:
+                summary = {}
+            if isinstance(summary, dict):
+                gpu.update(device=summary.get("device"), phases=summary.get("phases"),
+                           seconds=summary.get("seconds"), scans=summary.get("scans"))
         result.append({
             "run_id": run["run_id"], "field": description.get("field"), "program": description.get("program"),
+            "engine": "gpu" if gpu else "cpu", "gpu": gpu,
             "poly": arguments.get("poly"), "workers": arguments.get("workers", 1),
             "threads": arguments.get("threads"), "state": run["state"], "health": health(run, now),
             "created": run["created"], "started": run["started"], "finished": run["finished"],

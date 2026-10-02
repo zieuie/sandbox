@@ -609,3 +609,10 @@ nav.tabs a.active { background: none; box-shadow: none; color: var(--ink); font-
   .top .refresh-box .updated { flex-basis: 100%; }
   .top .status { order: 3; }
 }
+
+/* GPU leases and opportunistic GPU tiles */
+.gpu-tag { display: inline-block; padding: 0 0.35em; border-radius: 0.3em; font-size: 0.8em;
+  background: color-mix(in srgb, #76b900 22%, transparent); color: inherit; }
+.gpuline { margin-top: 0.25rem; }
+.gpu-summary p { margin: 0.4rem 0; }
+.gpu-summary table { max-width: 22rem; }

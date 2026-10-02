@@ -43,7 +43,7 @@ function tileLines(root, c) {
   const lines = [html`<b>${field(root.p, root.r)} tile ${c.r},${c.c}</b> · ${TILE_STATES[c.s] || c.s}`];
   if (c.node) lines.push(html`machine ${c.node}`);
   if (c.s === 'running' && c.total) lines.push(html`${c.phase} · ${pct(c.done / c.total)}`);
-  if (c.t0) lines.push(html`started ${fmtTime(c.t0)}${c.t1 ? html` · took ${fmtDuration(c.t1 - c.t0)}` : ''}`);
+  if (c.t0) lines.push(html`started ${fmtTime(c.t0)}${c.t1 ? html` · took ${fmtDuration(c.t1 - c.t0)}` : ''}${c.gpu ? html` · <span class="gpu-tag">GPU</span>` : ''}`);
   if (c.run) lines.push(html`run ${shortId(c.run)} · attempt ${c.att || 1} · ${c.rep} live cop${c.rep === 1 ? 'y' : 'ies'}`);
   if (c.err) lines.push(html`<span class="error-text">${c.err}</span>`);
   return lines;
@@ -146,7 +146,8 @@ function rootCard(root, index, machines, roots) {
     </header>
     <div class="root-progress"><b>${pct(total ? done / total : 0)}</b> of ${fmtInt(total)} tiles complete
       ${estimate ? html` · typical tile ${fmtDuration(estimate.typical.seconds)}${estimate.typical.from ? ` (attempt ${estimate.typical.from})` : ''}` : ''}
-      ${estimate ? html` · <span title="${estimateTitle(root, estimate)}">${estimateText(estimate)}</span>` : ''}</div>
+      ${estimate ? html` · <span title="${estimateTitle(root, estimate)}">${estimateText(estimate)}</span>` : ''}
+      ${root.gpu_tiles ? html` · <span class="gpu-tag" title="Tiles computed or computing on a GPU with kh_gpu_dp_tile (byte-identical to the CPU kernel)">${fmtInt(root.gpu_tiles)} tile${root.gpu_tiles === 1 ? '' : 's'} on GPU</span>` : ''}</div>
     <div class="chips">${chips(root)}</div>
     ${root.boundary && root.boundary !== 'clear' ? html`<p class="hint">Frontier: tile ${root.boundary}</p>` : ''}
     ${root.orphaned_children ? html`<p class="alert">This root is ${root.state}, but ${root.orphaned_children}

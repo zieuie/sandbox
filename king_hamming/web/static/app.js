@@ -57,7 +57,7 @@ async function load(force = false) {
     snapshot = await api(force ? '/api/refresh' : '/api/snapshot', { method: force ? 'POST' : 'GET' });
     fetchError = null;
   } catch (error) {
-    if (error.message !== 'signing in again') fetchError = error.message;
+    if (error.message !== 'signing in again' && !error.message.startsWith('dashboard updated')) fetchError = error.message;
   } finally {
     loading = false;
     refreshButton.disabled = false;

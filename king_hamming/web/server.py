@@ -13,6 +13,7 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field
 import getpass
+import hashlib
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +34,20 @@ from commands import CommandError, CommandService, Context  # noqa: E402
 from jobs import Jobs, git_state  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
+_CODE_VERSION: tuple[tuple, str] = ((), "")
+
+
+def code_version() -> str:
+    """Short hash of the static front end; open pages reload when it changes after a redeploy."""
+    global _CODE_VERSION
+    files = sorted(path for path in STATIC.iterdir() if path.is_file())
+    key = tuple((path.name, path.stat().st_mtime_ns, path.stat().st_size) for path in files)
+    if key != _CODE_VERSION[0]:
+        digest = hashlib.sha256()
+        for path in files:
+            digest.update(path.name.encode() + b"\0" + path.read_bytes())
+        _CODE_VERSION = (key, digest.hexdigest()[:16])
+    return _CODE_VERSION[1]
 STATIC_NAME = re.compile(r"^[a-z0-9_-]+\.(html|js|css|svg)$")
 PUBLIC_STATIC = {"login.html", "login.js", "style.css", "icon.svg"}
 CONTENT_TYPES = {
@@ -193,6 +208,7 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", cache)
+            self.send_header("X-Dashboard-Version", code_version())
             if encoding:
                 self.send_header("Content-Encoding", encoding)
                 self.send_header("Vary", "Accept-Encoding")

@@ -2,7 +2,7 @@
 // phase-by-phase convergence (requests still unmatched after each phase).
 import {
   html, setHTML, field, fmtInt, fmtCompact, fmtBytes, fmtDuration, fmtPoly, fmtTime, ago, pct, bar,
-  tooltips, now,
+  tooltips, now, gpuName,
 } from './util.js';
 import { button } from './command.js';
 
@@ -86,11 +86,34 @@ function phaseTable(run) {
       <td>${i ? fmtTime(run.phases[i - 1][2]) : fmtTime(run.started)}</td></tr>`)}</tbody></table></details>`;
 }
 
+const GPU_STAGES = [['field', 'field build (CPU)'], ['upload', 'upload'], ['greedy', 'greedy'],
+  ['augment', 'augmenting'], ['output', 'payload write']];
+
+// GPU runs finish in seconds and keep no phase checkpoints; show the stage timings instead.
+function gpuSummary(run) {
+  const gpu = run.gpu || {};
+  const seconds = gpu.seconds || {};
+  const stages = GPU_STAGES.filter(([key]) => typeof seconds[key] === 'number');
+  return html`<div class="gpu-summary">
+    <p>${gpu.device ? html`<span class="gpu-tag">${gpuName(gpu.device)}</span>` : html`<span class="gpu-tag">GPU</span>`}
+      ${gpu.phases !== null && gpu.phases !== undefined ? html` · ${gpu.phases} augmenting phase${gpu.phases === 1 ? '' : 's'} after greedy` : ''}
+      ${gpu.scans ? html` · ${fmtCompact(gpu.scans)} edge scans` : ''}</p>
+    ${stages.length ? html`<table class="mini"><thead><tr><th>Stage</th><th>Seconds</th></tr></thead>
+      <tbody>${stages.map(([key, name]) => html`<tr><td>${name}</td><td>${seconds[key].toFixed(2)}</td></tr>`)}</tbody></table>`
+      : html`<p class="hint">${run.state === 'complete' ? 'Stage timings were not recorded.' : 'Single GPU run: no per-phase checkpoints; it finishes in seconds to minutes.'}</p>`}
+  </div>`;
+}
+
+function engineText(run) {
+  if (run.engine === 'gpu') return html`<span class="gpu-tag">GPU${run.gpu && run.gpu.index !== null && run.gpu.index !== undefined ? ` ${run.gpu.index}` : ''}</span>`;
+  return `CPU · ${run.machines.length || run.workers} machine${(run.machines.length || run.workers) === 1 ? '' : 's'}`;
+}
+
 function resources(run) {
   if (!run.resources.length) return '';
   return html`<table class="mini"><thead><tr><th>Machine</th><th>Role</th><th>CPU time</th><th>Peak memory</th></tr></thead>
     <tbody>${run.resources.map((r) => html`<tr><td>${r.machine}</td>
-      <td>${r.component === 'coordinator' ? 'coordinator' : `shard ${r.shard}`}</td>
+      <td>${r.component === 'coordinator' ? 'coordinator' : r.component === 'solver' ? 'solver' : `shard ${r.shard}`}</td>
       <td>${fmtDuration(r.cpu_seconds)}</td><td>${fmtBytes(r.peak_rss)}</td></tr>`)}</tbody></table>`;
 }
 
@@ -102,7 +125,8 @@ function liveCard(run, index, generatedAt) {
       <h3>${label(run.field)} <span class="state state-${run.state}">${run.state}</span>
         <span class="health health-${run.health === 'responding' ? 'ok' : 'warn'}">${run.health}</span></h3>
       <div class="root-sub">polynomial <span class="mono">${fmtPoly(run.poly)}</span> ·
-        ${run.workers} machine${run.workers === 1 ? '' : 's'}: ${run.machines.join(', ') || 'waiting for partners'}</div>
+        ${run.engine === 'gpu' ? html`${engineText(run)} on ${run.machines.join(', ') || 'a GPU machine (waiting)'}`
+          : html`${run.workers} machine${run.workers === 1 ? '' : 's'}: ${run.machines.join(', ') || 'waiting for partners'}`}</div>
     </header>
     <div class="match-progress">
       <div><b>${matchedPct(run.done, run.total)}</b> matched · ${fmtInt(run.total - run.done)} of ${fmtInt(run.total)} requests left</div>
@@ -111,23 +135,45 @@ function liveCard(run, index, generatedAt) {
         ${run.started ? `running ${fmtDuration(generatedAt - run.started)}` : `queued ${ago(run.created)}`}
         ${run.last_progress_at ? ` · progress ${ago(run.last_progress_at)}` : ''}</div>
     </div>
-    <h4>Unmatched requests after each phase (log scale)</h4>
+    ${run.engine === 'gpu' ? gpuSummary(run) : html`<h4>Unmatched requests after each phase (log scale)</h4>
     ${convergence(run, index)}
-    ${phaseTable(run)}
+    ${phaseTable(run)}`}
     ${resources(run)}
     <div class="cmd-row">${button('run.pause', { run_id: run.run_id }, 'Pause', 'small')}
       ${button('run.cancel', { run_id: run.run_id }, 'Cancel…', 'small')}</div>
   </article>`;
 }
 
+// Largest single-lease GPU memory advertised by a live node; null if no node reports GPUs.
+function largestGpu(snapshot) {
+  const all = (snapshot.fleet && snapshot.fleet.nodes) || [];
+  if (!all.some((n) => Array.isArray(n.gpus))) return null;
+  const nodes = all.filter((n) => n.state !== 'unavailable');
+  let best = null;
+  nodes.forEach((n) => (n.gpus || []).forEach((g) => {
+    const usable = Math.max(0, g.total_bytes - 256 * 1024 * 1024);
+    if (!best || usable > best.usable) best = { usable, name: gpuName(g.name), host: n.hostname };
+  }));
+  return best || { usable: 0 };
+}
+
 function waiting(snapshot) {
   const feeder = snapshot.feeder;
   if (!feeder) return '';
   const settings = feeder.settings;
+  const gpu = largestGpu(snapshot);
+  const gpuNote = (f) => {
+    if (!f.gpu_bytes) return '';
+    if (gpu === null) return ` · needs ${fmtBytes(f.gpu_bytes)} on a GPU (GPUs not reported yet)`;
+    if (!gpu.usable) return ` · needs ${fmtBytes(f.gpu_bytes)} on a GPU; no GPU machine is online`;
+    if (f.gpu_bytes <= gpu.usable) return ` · fits ${gpu.host}'s ${gpu.name} (${fmtBytes(f.gpu_bytes)})`;
+    return ` · needs ${fmtBytes(f.gpu_bytes)} of GPU memory; largest GPU holds ${fmtBytes(gpu.usable)}`;
+  };
   const rows = feeder.in_flight.filter((f) => f.dp_state === 'complete');
   if (!rows.length) return html`<p class="hint">Every completed DP has been matched or is matching now.</p>`;
   const why = (f) => {
-    if (f.admission === 'field limit') return `q = ${fmtInt(f.q)} exceeds the field limit of ${fmtInt(settings.max_field_elements)}`;
+    if (f.admission === 'admitted: single GPU') return `admitted · ${f.engine || 'single GPU'} (match_gpu)`;
+    if (f.admission === 'field limit') return `q = ${fmtInt(f.q)} exceeds the CPU field limit of ${fmtInt(settings.max_field_elements)}${gpuNote(f)}`;
     if (f.admission === 'edge limit') return `${fmtCompact(f.edges)} edges exceed the limit of ${fmtCompact(settings.max_matching_edges)}`;
     if (f.admission === 'memory limit') return `needs more than ${fmtBytes(settings.max_matching_bytes)} per machine`;
     if (f.admission === 'waiting for nodes') return 'admitted; waiting for enough healthy machines';
@@ -137,7 +183,8 @@ function waiting(snapshot) {
     <thead><tr><th>Field</th><th>Requests</th><th>Edges</th><th>Status</th></tr></thead>
     <tbody>${rows.map((f) => html`<tr><td><a href="#results/${f.field[0]},${f.field[1]}">${field(f.field[0], f.field[1])}</a></td>
       <td>${fmtCompact(f.requests)}</td><td>${fmtCompact(f.edges)}</td><td>${why(f)}</td></tr>`)}</tbody></table></div>
-    <p class="hint">Limits are feeder settings (Feeder tab). Matching memory grows with the field size,
+    <p class="hint">Fields that fit an advertised GPU are matched there (<span class="mono">match_gpu</span>);
+      the CPU limits are feeder settings (Feeder tab). Matching memory grows with the field size,
       so raising them can exceed what one machine holds.</p>`;
 }
 
@@ -150,13 +197,13 @@ function historyRow(run, index) {
       : html`<span class="state state-${run.state}">${run.state}</span>`;
   return html`<tr class="history-row ${open ? 'open' : ''}" data-run-id="${run.run_id}">
       <td><button type="button" class="link-button" aria-expanded="${open}">${open ? '▾' : '▸'} ${label(run.field)}</button></td>
-      <td>${outcome}</td><td>${fmtCompact(run.total)}</td><td>${run.phases.length || '—'}</td>
-      <td>${duration ? fmtDuration(duration) : '—'}</td><td>${run.machines.length}</td>
+      <td>${outcome}</td><td>${fmtCompact(run.total)}</td><td>${run.engine === 'gpu' && run.gpu && run.gpu.phases !== null && run.gpu.phases !== undefined ? run.gpu.phases : run.phases.length || '—'}</td>
+      <td>${duration ? fmtDuration(duration) : '—'}</td><td>${engineText(run)}</td>
       <td>${peak ? fmtBytes(peak) : '—'}</td><td>${fmtTime(run.finished)}</td></tr>
     ${open ? html`<tr class="history-detail"><td colspan="8">
       <div class="root-sub">polynomial <span class="mono">${fmtPoly(run.poly)}</span> · machines ${run.machines.join(', ')}</div>
       ${run.error ? html`<p class="error-text">${run.error}</p>` : ''}
-      ${convergence(run, index)}${phaseTable(run)}${resources(run)}</td></tr>` : ''}`;
+      ${run.engine === 'gpu' ? gpuSummary(run) : html`${convergence(run, index)}${phaseTable(run)}`}${resources(run)}</td></tr>` : ''}`;
 }
 
 export function render(container, snapshot, detail) {
@@ -177,8 +224,8 @@ export function render(container, snapshot, detail) {
       <div class="panel-head">
         <h2>Bipartite matching</h2>
         <p class="hint">Each matching run pairs every request with a field element for one primitive polynomial,
-          in phases; every phase boundary is a durable checkpoint. A run ends with a full matching or a
-          certified Hall obstruction.</p>
+          in phases. CPU runs checkpoint every phase boundary; single-GPU runs finish in seconds and simply
+          rerun if interrupted. A run ends with a full matching or a certified Hall obstruction.</p>
       </div>
       <h3 class="section-title">Now</h3>
       ${live.length ? html`<div class="match-grid">${live.map((r) => liveCard(r, runs.indexOf(r), snapshot.generated_at || now()))}</div>`
@@ -188,7 +235,7 @@ export function render(container, snapshot, detail) {
       <h3 class="section-title">History <span class="hint">(${past.length} runs: ${matched} matched${obstructed ? `, ${obstructed} obstructed` : ''})</span></h3>
       <div class="table-scroll card"><table class="mini history">
         <thead><tr><th>Field</th><th>Outcome</th><th>Requests</th><th>Phases</th><th>Took</th>
-          <th>Machines</th><th>Peak memory</th><th>Finished</th></tr></thead>
+          <th>Engine</th><th>Peak memory</th><th>Finished</th></tr></thead>
         <tbody>${past.map((r) => historyRow(r, runs.indexOf(r)))}</tbody></table></div>
     </section>`);
 

@@ -45,7 +45,7 @@ HOST_NAMES = {
 ACTIVE = {"queued", "waiting", "running", "stopping", "paused"}
 TERMINAL = {"complete", "failed", "cancelled"}
 DP_PROGRAMS = {"dp", "dp_distributed"}
-MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned"}
+MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned", "match_gpu"}
 WINDOW_SECONDS = 24 * 3600
 BUCKET_SECONDS = 15 * 60
 LONG_WINDOW_SECONDS = 7 * 24 * 3600
@@ -104,6 +104,19 @@ def union_seconds(intervals: list[tuple[float, float]]) -> float:
             total += high - end
             end = high
     return total
+
+
+def node_gpus(node: dict) -> list[dict] | None:
+    """Decode a node's advertised GPUs (gpus_json); None when the leader predates GPU support."""
+    if "gpus_json" not in node:
+        return None
+    try:
+        devices = json.loads(node.get("gpus_json") or "[]")
+    except ValueError:
+        return []
+    return [{"index": item.get("index"), "name": str(item.get("name", "")),
+             "total_bytes": int(item.get("total_bytes") or 0)}
+            for item in devices if isinstance(item, dict)]
 
 
 class Snapshots:
@@ -355,6 +368,7 @@ class Snapshots:
                 "physical_cores": node.get("physical_core_count"),
                 "runtime_version": (node.get("runtime_version") or "")[:12],
                 "storage_validation": node.get("storage_validation_mode"),
+                "gpus": node_gpus(node),
                 "cpus": cpus,
                 "work": work,
                 "utilization": series.get(name, []),
@@ -381,6 +395,10 @@ class Snapshots:
             "phase": run.get("progress_phase"), "done": run.get("progress_done"),
             "total": run.get("progress_total"), "units": run.get("progress_units"),
             "cpus": cpus, "memory": None if role == "partner" else run.get("reserved_memory_bytes"),
+            # A fenced GPU lease, or a DP tile that ran on the host GPU opportunistically.
+            "gpu": run.get("gpu_index"),
+            "accelerated": ("(gpu)" in (run.get("progress_message") or "") or
+                            '"engine":"gpu"' in (run.get("progress_details") or "")),
             "started": run.get("started"), "health": solver_health(run, now),
             "root_state": root_state, "orphaned": root_state in TERMINAL,
         }
@@ -484,6 +502,7 @@ class Snapshots:
                 "GROUP BY artifact_hash) "
                 "SELECT t.parent_run_id,t.row,t.column,t.child_run_id,c.state,c.node_name,c.started,"
                 "c.finished,c.progress_done,c.progress_total,c.progress_phase,c.lease_attempt,c.error,"
+                "c.progress_details,"
                 "COALESCE(copies.n,0) AS replicas FROM distributed_tiles t "
                 "LEFT JOIN runs c ON c.run_id=t.child_run_id "
                 "LEFT JOIN copies ON copies.artifact_hash=c.artifact_hash "
@@ -536,6 +555,8 @@ class Snapshots:
                                 t0=item["started"], t1=item["finished"], att=item["lease_attempt"])
                     if item["node_name"]:
                         cell["node"] = names.get(item["node_name"], item["node_name"])
+                    if '"engine":"gpu"' in (item["progress_details"] or ""):
+                        cell["gpu"] = 1
                     if status == "running":
                         cell.update(done=item["progress_done"], total=item["progress_total"],
                                     phase=item["progress_phase"])
@@ -555,6 +576,7 @@ class Snapshots:
                 "rows": 1 + max((cell["r"] for cell in cells), default=-1),
                 "columns": 1 + max((cell["c"] for cell in cells), default=-1),
                 "counts": counts,
+                "gpu_tiles": sum(1 for cell in cells if cell.get("gpu")),
                 "boundary": boundary or ("clear" if root["state"] not in TERMINAL else None),
                 "median_tile_seconds": statistics.median(durations) if durations else None,
                 "cells": cells,

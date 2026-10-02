@@ -51,6 +51,15 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Encoding"], "gzip")
         self.assertEqual(json.loads(gzip.decompress(body))["generated_at"], plain["generated_at"])
 
+    def test_front_end_version_header(self) -> None:
+        import server
+        _, snapshot_headers, _ = self.client.request("/api/snapshot")
+        _, static_headers, _ = self.client.request("/static/app.js")
+        version = snapshot_headers.get("X-Dashboard-Version")
+        self.assertRegex(version or "", r"^[0-9a-f]{16}$")
+        self.assertEqual(static_headers.get("X-Dashboard-Version"), version)
+        self.assertEqual(server.code_version(), version)
+
     def test_refresh_requires_post(self) -> None:
         self.assertEqual(self.client.request("/api/refresh", "POST", {})[0], 200)
         self.assertEqual(self.client.request("/api/refresh")[0], 404)

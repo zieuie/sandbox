@@ -12,6 +12,26 @@ from logs import LogWatcher, process_info
 STALE_RECONCILE_SECONDS = 600
 
 
+def engine_label(plan: dict) -> str | None:
+    """Human label for a feeder matching plan."""
+    if not plan.get("program"):
+        return None
+    if plan["program"] == "match_gpu":
+        from snapshot import HOST_NAMES  # lazy: snapshot imports this module
+        hosts = [HOST_NAMES.get("192.168.4." + name.rsplit("-", 1)[-1], name)
+                 for name in plan.get("hosts") or []]
+        return "GPU on " + ", ".join(hosts) if hosts else "single GPU"
+    workers = plan.get("workers") or 1
+    return f"{plan['program']} · {workers} machine{'s' if workers != 1 else ''}"
+
+
+def gpu_bytes(q, requests) -> int | None:
+    """Device memory match_gpu would need (gpu_match_solver/adapter.py:device_bytes, blocks ignored)."""
+    if not q or not requests:
+        return None
+    return 8 * q + 24 * requests + 18 * (requests // 8 + 1) + 16 * 1024**2
+
+
 def feeder_process(state: Path) -> dict:
     """Report the feeder recorded in feeder_process.json, checked against /proc."""
     path = state / "feeder_process.json"
@@ -110,7 +130,8 @@ def build_feeder(state: Path, watcher: LogWatcher, roots: list[dict] | None, now
             "matching_attempts": len(matching),
             "poly": latest.get("poly") if latest else None,
             "admission": record.get("matching_admission"),
-            "engine": f"{plan['program']} / {plan['workers']}" if plan.get("program") else None,
+            "engine": engine_label(plan),
+            "gpu_bytes": gpu_bytes(record.get("q"), record.get("requests")),
             "notes": [text for text in (
                 record.get("matching_failure") and f"matching gave up: {record['matching_failure']}",
                 record.get("candidate_exhausted") and "every primitive polynomial tried") if text],
@@ -119,7 +140,8 @@ def build_feeder(state: Path, watcher: LogWatcher, roots: list[dict] | None, now
 
     matchable = sum(1 for record in fields.values()
                     if record.get("dp_artifact") and not record.get("matching_complete") and
-                    record.get("matching_admission") in {"admitted", "waiting for nodes"})
+                    record.get("matching_admission") in {"admitted", "waiting for nodes",
+                                                          "admitted: single GPU"})
     demand = pipeline.get("demand", {})
     free = shutil.disk_usage(state).free
 

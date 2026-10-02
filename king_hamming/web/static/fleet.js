@@ -1,6 +1,6 @@
 // Fleet: one card per machine with CPUs, memory, current work and 24 h utilisation.
 import {
-  html, setHTML, field, fmtBytes, fmtDuration, fmtInt, pct, sparkline, bar, tooltips, now,
+  html, setHTML, field, fmtBytes, fmtDuration, fmtInt, pct, sparkline, bar, tooltips, now, gpuName,
 } from './util.js';
 import { button } from './command.js';
 
@@ -49,10 +49,23 @@ function workEntry(item, index, generatedAt) {
     <div class="work-meta">${item.phase || ''}${progress ? html` · ${progress}` : ''}
       · ${item.cpus.length} CPU${item.cpus.length === 1 ? '' : 's'}
       ${item.memory ? html` · ${fmtBytes(item.memory)}` : ''}
+      ${item.gpu !== null && item.gpu !== undefined ? html` · <span class="gpu-tag" title="Fenced GPU lease">GPU ${item.gpu}</span>`
+        : item.accelerated ? html` · <span class="gpu-tag" title="This tile is computing on the host GPU">GPU</span>` : ''}
       ${elapsed !== null ? html` · ${fmtDuration(elapsed)}` : ''}</div>
     ${item.role !== 'partner' && item.total ? bar(fraction, `w${index % 6}`) : ''}
     ${actions(item)}
   </li>`;
+}
+
+function gpuLine(node) {
+  if (node.gpus === null || node.gpus === undefined) {
+    return html`<div class="memline gpuline"><span>GPU</span><span class="hint" title="This leader does not record GPUs yet">not reported</span></div>`;
+  }
+  const devices = node.gpus;
+  if (!devices.length) return html`<div class="memline gpuline"><span>GPU</span><span>none usable</span></div>`;
+  const busy = node.work.some((item) => (item.gpu !== null && item.gpu !== undefined) || item.accelerated);
+  return html`<div class="memline gpuline"><span>GPU${busy ? html` <span class="gpu-tag">busy</span>` : ''}</span>
+    <span title="${devices.map((d) => d.name).join(', ')}">${devices.map((d) => `${gpuName(d.name)} · ${fmtBytes(d.total_bytes)}`).join(', ')}</span></div>`;
 }
 
 function card(node, generatedAt) {
@@ -73,6 +86,7 @@ function card(node, generatedAt) {
     <div class="memline"><span>Memory reserved</span>
       <span>${fmtBytes(node.reserved_memory_bytes)} / ${fmtBytes(node.memory_bytes)}</span></div>
     ${bar(node.memory_bytes ? node.reserved_memory_bytes / node.memory_bytes : 0, 'mem')}
+    ${gpuLine(node)}
     ${node.work.length
       ? html`<ul class="work-list">${node.work.map((item, i) => workEntry(item, i, generatedAt))}</ul>`
       : html`<p class="idle">Idle: ${node.idle_reason || 'unknown reason'}</p>`}

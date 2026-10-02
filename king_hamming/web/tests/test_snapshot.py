@@ -65,6 +65,35 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual([cpu["state"] for cpu in nodes["merlin"]["cpus"]],
                          ["reserved", "free", "free", "free", "reserved", "free", "free", "free"])
 
+    def test_gpu_fields(self) -> None:
+        connection = sqlite3.connect(self.deployments / "live" / "leader.sqlite")
+        connection.execute("UPDATE nodes SET gpus_json=? WHERE node_name='dp-151'",
+                           ('[{"index":0,"name":"RTX 3060","arch":86,"total_bytes":6000000000}]',))
+        connection.execute("UPDATE runs SET progress_details='{\"engine\":\"gpu\"}' WHERE run_id='t00'")
+        dp = (fixture.ROOT / "examples" / "5_3.khdp").read_bytes()
+        import base64, hashlib
+        fixture.run(connection, "gpu-match", {"program": "match_gpu", "arguments": {
+            "dp_b64": base64.b64encode(dp).decode(), "dp_sha256": hashlib.sha256(dp).hexdigest(),
+            "poly": [2, 3, 0, 1], "threads": 4, "max_bytes": 2**31}}, "complete",
+            node_name="dp-151", gpu_index=0, started=NOW - 100, finished=NOW - 90,
+            progress_done=125, progress_total=125,
+            progress_message='{"matched":125,"required":125,"phases":2,"scans":900,"engine":"gpu",'
+                             '"device":"RTX 3060","seconds":{"field":0.01,"greedy":0.002,"augment":0.003}}')
+        connection.commit()
+        connection.close()
+        built = self.build()
+        nodes = {card["hostname"]: card for card in built["fleet"]["nodes"]}
+        self.assertEqual(nodes["merlin"]["gpus"][0]["name"], "RTX 3060")
+        self.assertEqual(nodes["fearless"]["gpus"], [])
+        root = built["roots"][0]
+        self.assertEqual(root["gpu_tiles"], 1)
+        self.assertEqual({(c["r"], c["c"]) for c in root["cells"] if c.get("gpu")}, {(0, 0)})
+        run = next(item for item in built["matching"]["runs"] if item["run_id"] == "gpu-match")
+        self.assertEqual(run["engine"], "gpu")
+        self.assertEqual((run["gpu"]["index"], run["gpu"]["device"], run["gpu"]["phases"]), (0, "RTX 3060", 2))
+        self.assertEqual(run["outcome"], "matched")
+        self.assertIsNone(snapshot.node_gpus({"node_name": "old-leader-row"}))
+
     def test_utilization_and_busy_fraction(self) -> None:
         fearless = next(card for card in self.build()["fleet"]["nodes"] if card["name"] == "dp-101")
         cpu_seconds = sum(fearless["utilization"]) * snapshot.BUCKET_SECONDS * 4

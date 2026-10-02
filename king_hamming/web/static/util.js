@@ -152,6 +152,9 @@ export function toLogin() {
   location.assign(`/login?next=${encodeURIComponent(location.pathname + location.hash)}`);
 }
 
+// Front-end version this page was loaded with; a different one means a redeploy.
+let loadedVersion = null;
+
 // fetch JSON; POSTs carry the CSRF token. A 401 sends the browser to the login page.
 export async function api(path, { method = 'GET', body } = {}) {
   const headers = {};
@@ -170,6 +173,16 @@ export async function api(path, { method = 'GET', body } = {}) {
     location.reload();
     throw new Error('signing in again');
   }
+  // After a redeploy the server's front-end code differs from what this page runs:
+  // reload once so open tabs pick up new views instead of rendering new data with old code.
+  const version = response.headers.get('X-Dashboard-Version');
+  if (version) {
+    if (loadedVersion === null) loadedVersion = version;
+    else if (version !== loadedVersion) {
+      location.reload();
+      throw new Error('dashboard updated; reloading');
+    }
+  }
   let value = null;
   try { value = await response.json(); } catch (error) { value = null; }
   if (response.status === 401 && path !== '/api/reauth' && path !== '/api/password') {
@@ -183,4 +196,9 @@ export async function api(path, { method = 'GET', body } = {}) {
     throw error;
   }
   return value;
+}
+
+// Short GPU label: "NVIDIA GeForce RTX 3060 Laptop GPU" -> "RTX 3060 Laptop".
+export function gpuName(name) {
+  return String(name || 'GPU').replace(/^NVIDIA\s+/, '').replace(/^GeForce\s+/, '').replace(/\s+GPU$/, '') || 'GPU';
 }

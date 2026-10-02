@@ -63,6 +63,12 @@ listens on the network at all:
 python3 king_hamming/web/server.py serve --trust-proxy --secure-cookies
 ```
 
+To load new dashboard code, run `king_hamming/web/restart_dashboard.sh`. It
+stops the server listening on port 8070 and restarts it detached from any
+terminal, with the arguments above. It logs to
+`~/.local/share/king_hamming/web/dashboard.log` and waits until the dashboard
+answers. Sessions are stored on disk, so signed-in users stay signed in.
+
 Point the tunnel's public hostname at `http://127.0.0.1:8070`. That is
 *Service → HTTP → localhost:8070* in the Zero Trust dashboard, or in a local
 `config.yml`:
