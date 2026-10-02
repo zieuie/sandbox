@@ -1,8 +1,9 @@
 # Continuous household campaign
 
 The unified campaign owns DP and distributed matching on one leader and one
-nine-agent pool: workers `.101` through `.108`, plus Merlin (`.151`) with its
-leader physical core reserved. Its retained state is
+ten-agent pool: workers `.101` through `.108`, Merlin (`.151`) with its
+leader physical core reserved, and Pellinore (`.152`) with 12 compute CPUs.
+Its retained state is
 `cluster/deployments/continuous-campaign` and its leader is port `8061`.
 
 ## Check status
@@ -61,19 +62,25 @@ compute thread is pinned to one distinct CPU, while all threads share the large
 read-only field and matching state instead of duplicating it in per-core
 processes. New matching submissions use configurable 2/4/full group tiers by
 request count; existing queued specifications retain their original group.
-DP tiles likewise use pinned multicore teams. A ready tile receives all free
-host CPUs that fit its existing tile memory ceiling, rather than being confined
-to one supervisor slot. The scheduler fences the whole CPU set and aggregate
-memory for the lease; an explicit `max_cpus` in a distributed DP specification
-can cap its tile teams if several smaller processes are desired. Old retained
-tile specifications also gain the expanded teams without changing results.
+DP tiles likewise use pinned multicore teams. A ready tile receives up to two
+free host CPUs by default, leaving room for other tile processes to fetch and
+publish while one computes. The scheduler fences each team's CPU set and
+aggregate reserved memory; an explicit `max_cpus` in a distributed DP
+specification can override the team width. Old retained tile specifications
+also use the smaller default without changing results. At equal manual
+priority, ready tiles from roots with fewer active leases are scheduled first,
+so a long-running root does not indefinitely starve another.
 Status shows `allocated=N/M`; this is reserved capacity, not measured CPU use.
 Use the thread view or canary above to measure activity. One native process can
-use all eight CPUs (fourteen on Merlin); each compute thread still has a
-one-CPU affinity. Native matching workers pull bounded chunks from a shared
-work queue, and DP diagonals spread central and boundary cells across the team.
+use all eight CPUs (fourteen on Merlin, twelve on Pellinore); each compute
+thread still has a one-CPU affinity. Native matching workers pull bounded
+chunks from a shared work queue, and DP diagonals spread central and boundary
+cells across the team.
 Dependency barriers, startup, transfers and matching group assembly can still
 cause idle intervals; allocation is not a guarantee of 100% utilization.
+Workers prefer verified local predecessor packets and share a bounded 4 GiB
+per-node dependency cache. The remaining border-only and soft-row-locality
+optimizations are scoped in [DP_NETWORK_LOCALITY.md](DP_NETWORK_LOCALITY.md).
 
 The campaign admits up to a conservative 6 GiB native allocation,
 which includes `7^9` and `5^11` on the current hosts.
@@ -96,6 +103,9 @@ python3 king_hamming/cluster/kh.py \
 # after every root and child run is idle. The command refuses a race, preserves
 # work/blob roots, verifies worker bundle identities, and deliberately leaves
 # dispatch stopped.
+python3 king_hamming/dp_solver/launch_dp.py \
+  --state king_hamming/cluster/deployments/continuous-campaign drain
+# Wait for active leases to finish normally before upgrading.
 python3 king_hamming/dp_solver/launch_dp.py \
   --state king_hamming/cluster/deployments/continuous-campaign upgrade-workers
 ```

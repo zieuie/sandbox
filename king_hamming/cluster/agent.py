@@ -978,6 +978,7 @@ def run_job(
         specification = adapter.worker_specification(job["specification"], cpus)
         solver = solver_command(specification, output, checkpoint, int(job.get("checkpoint_seconds", 1800)))
         solver.extend(adapter.prepare(specification, run_directory, job, leader))
+        solver.extend(adapter.locality_args(specification, storage_root, storage_url, work_root))
         if adapter.checkpoint_handshake(specification):
             solver.append("--checkpoint-handshake")
         command = [sys.executable, str(Path(__file__).with_name("affinity_exec.py")),

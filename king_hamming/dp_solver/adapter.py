@@ -148,7 +148,10 @@ class DPAdapter(SolverAdapter):
         maximum = int(arguments.get("max_tile_bytes", 2 * 1024**3))
         fixed = memory_bytes(arguments["p"], target, 1) - 8 * 1024**2
         stacks = max(0, (maximum - fixed) // (8 * 1024**2))
-        return min(available, stacks, int(arguments.get("max_cpus", 1024)))
+        # Input fetches and durable publication hold the lease but use little CPU.
+        # Keep several independent tiles in flight per host by default; callers
+        # can still opt into a wider team for a measured compute-bound field.
+        return min(available, stacks, int(arguments.get("max_cpus", 2)))
 
     def initialize(self, connection):
         """Initialize tile state, ownership, and repair legacy queued root transitions."""
@@ -268,6 +271,14 @@ class DPAdapter(SolverAdapter):
         task = directory/'task.json'
         task.write_text(json.dumps(specification))
         return ['--specification',str(task),'--leader',leader,'--run-id',job['run_id'],'--lease-token',job['lease_token']]
+
+    def locality_args(self, specification, storage_root, storage_url, work_root):
+        """Allow distributed tasks to reuse this worker's verified input packets."""
+        if specification['program'] not in {'dp_tile', 'dp_distributed'}:
+            return []
+        return ['--local-storage-root', str(storage_root),
+                '--local-storage-url', storage_url,
+                '--shared-cache-root', str(work_root / '.dependency-cache')]
 
     def checkpoint_handshake(self, specification):
         """Return true; immutable helper jobs accept the flag without emitting snapshots."""

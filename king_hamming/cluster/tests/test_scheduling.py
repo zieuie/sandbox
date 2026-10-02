@@ -162,8 +162,8 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(reconstruction["run_id"], roots[0])
             self.assertEqual(reconstruction["specification"]["program"], "dp_distributed")
 
-    def test_tile_borrows_all_free_cpus_without_overlapping_leases(self) -> None:
-        """An old one-thread spec gets a full team, with memory-safe fallback."""
+    def test_tile_leases_use_disjoint_small_teams_with_memory_safe_fallback(self) -> None:
+        """Old one-thread specs get two CPUs by default, leaving another team free."""
         from dp_solver.tiles import tile, memory_bytes
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "leader.sqlite"
@@ -182,20 +182,25 @@ class QueueTests(unittest.TestCase):
                     }}})
             first = handler.dispatch_post("/v1/lease", {
                 "node_name": "elastic", "slot_id": 2})["job"]
-            self.assertEqual(first["assigned_cpu_set"], "1,3,5,7")
+            self.assertEqual(first["assigned_cpu_set"], "1,3")
             adapter = adapters.get(first["specification"])
-            local = adapter.worker_specification(first["specification"], [1, 3, 5, 7])
-            self.assertEqual(local["arguments"]["threads"], 4)
+            local = adapter.worker_specification(first["specification"], [1, 3])
+            self.assertEqual(local["arguments"]["threads"], 2)
             self.assertEqual(first["specification"]["arguments"]["threads"], 1)
+            concurrent = handler.dispatch_post("/v1/lease", {
+                "node_name": "elastic", "slot_id": 0})["job"]
+            self.assertEqual(concurrent["assigned_cpu_set"], "5,7")
             self.assertIsNone(handler.dispatch_post("/v1/lease", {
-                "node_name": "elastic", "slot_id": 0})["job"])
+                "node_name": "elastic", "slot_id": 1})["job"])
             # Stop/release fences every CPU in the team, not only its slot ID.
             handler.dispatch_post("/v1/requeue", {
                 "run_id": first["run_id"], "lease_token": first["lease_token"]})
-            second = handler.dispatch_post("/v1/lease", {
-                "node_name": "elastic", "slot_id": 0})["job"]
-            self.assertEqual(second["assigned_cpu_set"], "1,3,5,7")
-            spec = second["specification"]
+            with leader.connect(database) as connection:
+                active = connection.execute(
+                    "SELECT assigned_cpu_set FROM runs WHERE node_name='elastic' AND state='running'"
+                ).fetchall()
+            self.assertEqual([row[0] for row in active], ["5,7"])
+            spec = first["specification"]
             args = spec["arguments"]
             target = tile(args["p"], args["r"], args["tile_side"], 0, 0)
             args["max_tile_bytes"] = memory_bytes(args["p"], target, 2)
@@ -203,6 +208,38 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(adapter.cpu_width(spec, 0), 0)
             args["max_tile_bytes"] -= 1
             self.assertEqual(adapter.cpu_width(spec, 14), 1)
+
+    def test_ready_tile_roots_share_leases_before_shorter_root_repeats(self) -> None:
+        """A queued tile from an inactive root outranks another cheap tile."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            handler.dispatch_post("/v1/register", {
+                "node_name": "fair", "cpu_set": "0,1,2",
+                "memory_bytes": 10 * 1024**3,
+                "slots": [{"slot_id": cpu, "cpu_set": str(cpu)} for cpu in range(3)],
+            })
+            roots = [handler.dispatch_post("/v1/enqueue", {"specification": {
+                "program": "dp_distributed", "arguments": {
+                    "p": p, "r": 3, "tile_side": 4, "max_cpus": 1,
+                },
+            }})["run_id"] for p in (3, 5)]
+            with leader.connect(database) as connection:
+                connection.execute(
+                    "INSERT INTO runs(run_id,calculation_id,specification,state,priority,"
+                    "from_scratch,created,estimated_seconds,parent_run_id) "
+                    "SELECT 'extra-cheap',calculation_id,specification,state,priority,"
+                    "from_scratch,created,estimated_seconds,parent_run_id FROM runs "
+                    "WHERE parent_run_id=? AND state='queued' LIMIT 1", (roots[0],),
+                )
+            first = handler.dispatch_post("/v1/lease", {
+                "node_name": "fair", "slot_id": 0})["job"]
+            second = handler.dispatch_post("/v1/lease", {
+                "node_name": "fair", "slot_id": 1})["job"]
+            self.assertEqual(first["specification"]["arguments"]["parent_run_id"], roots[0])
+            self.assertEqual(second["specification"]["arguments"]["parent_run_id"], roots[1])
 
     def test_runtime_order_priority_duplicates_and_upgrade(self) -> None:
         """Late cheap jobs run first; priority overrides and a retained rerun remain distinct."""

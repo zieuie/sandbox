@@ -401,6 +401,28 @@ def stop_dispatch_if_idle(database_path: Path) -> None:
         database.commit()
 
 
+def drain_dispatch(database_path: Path) -> int:
+    """Stop granting new leases without asking any running solver to stop.
+
+    The transaction serializes with the leader's lease transactions. Existing
+    tiles finish and publish normally; upgrade-workers still separately refuses
+    to proceed until every running/stopping row has gone idle.
+    """
+
+    with sqlite3.connect(database_path, timeout=45) as database:
+        database.execute('BEGIN IMMEDIATE')
+        current = database.execute(
+            "SELECT value FROM settings WHERE key='campaign_state'").fetchone()
+        if current is None or current[0] not in {'running', 'stopped'}:
+            raise ValueError('unknown campaign state')
+        database.execute(
+            "UPDATE settings SET value='stopped' WHERE key='campaign_state'")
+        active = database.execute(
+            "SELECT COUNT(*) FROM runs WHERE state IN ('running','stopping')").fetchone()[0]
+        database.commit()
+    return active
+
+
 def upgrade_workers(path: Path) -> None:
     """Replace idle agent runtimes while preserving all retained campaign data."""
 
@@ -617,7 +639,7 @@ def main() -> int:
     expansion = commands.add_parser('extend', help='add new prime powers without repeating existing entries')
     expansion.add_argument('--max-visits', type=int, default=30_000_000_000_000)
     expansion.add_argument('--limit', type=int, default=100)
-    for name in ('status', 'stop', 'resume', 'collect', 'ensure-feeder'):
+    for name in ('status', 'stop', 'resume', 'collect', 'ensure-feeder', 'drain'):
         commands.add_parser(name)
     arguments = parser.parse_args()
     if arguments.action is None:
@@ -639,6 +661,9 @@ def main() -> int:
             extend(arguments, path)
         elif arguments.action == 'ensure-feeder':
             print(json.dumps({"feeder_started": ensure_feeder(path.parent)}, indent=2))
+        elif arguments.action == 'drain':
+            print(json.dumps({"campaign_state": "stopped", "active_finishing":
+                              drain_dispatch(path.parent / 'leader.sqlite')}, indent=2))
         else:
             manifest = json.loads(path.read_text())
             if arguments.action == 'collect':

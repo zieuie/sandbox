@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Pellinore local network reachability every minute
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Unit=pellinore-network-watchdog.service
+
+[Install]
+WantedBy=timers.target

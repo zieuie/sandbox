@@ -86,6 +86,10 @@ class SolverAdapter:
         """Prepare private inputs; return additional solver arguments."""
         return []
 
+    def locality_args(self, specification, storage_root, storage_url, work_root):
+        """Return optional trusted worker-local input paths for this solver."""
+        return []
+
     def peer_command(self, specification, cpus, worker_index=1, worker_count=2):
         """Return a trusted peer-worker argv, or reject peer tunnels for this program."""
         raise ValueError("solver does not expose a peer worker")

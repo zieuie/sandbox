@@ -321,6 +321,7 @@ def initialize(
                 estimate = 1e100
             connection.execute("UPDATE runs SET estimated_seconds=? WHERE run_id=?", (estimate, run["run_id"]))
         connection.execute("CREATE INDEX IF NOT EXISTS runs_runtime_queue ON runs(state,priority DESC,estimated_seconds,created,run_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS runs_parent_active ON runs(parent_run_id,state)")
         connection.execute("CREATE INDEX IF NOT EXISTS lease_retry_nodes ON lease_history(run_id,node_name,outcome,finished)")
 
 
@@ -877,7 +878,12 @@ def make_handler(
                         "WHERE state='queued' AND NOT EXISTS (SELECT 1 FROM lease_history h WHERE h.run_id=runs.run_id "
                         "AND h.node_name=? AND h.outcome='engine retry' AND h.finished>?) "
                         "ORDER BY (progress_phase='reconstructing') DESC, "
-                        "priority DESC, estimated_seconds ASC, created ASC, run_id ASC LIMIT 100",
+                        "priority DESC, "
+                        "CASE WHEN parent_run_id IS NULL THEN 0 ELSE "
+                        "(SELECT COUNT(*) FROM runs active "
+                        "WHERE active.parent_run_id=runs.parent_run_id "
+                        "AND active.state='running') END ASC, "
+                        "estimated_seconds ASC, created ASC, run_id ASC LIMIT 100",
                         (node["node_name"], now-30),
                     ).fetchall()
                     row = None

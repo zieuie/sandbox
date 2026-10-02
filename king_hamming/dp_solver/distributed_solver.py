@@ -23,6 +23,7 @@ import time
 
 from agent import request_json
 from blob_store import fetch_blob
+from dependency_cache import checkout
 from dp_solver.scheduling import dp_estimate
 from dp_solver.tiles import build_halo, tile
 
@@ -127,7 +128,9 @@ def acquire(record: dict, arguments, p: int, r: int, side: int, cache: Path) -> 
 
         nonlocal last_check
         if REPORTER is not None:
-            partial=cache/"blobs"/".downloads"/(record["sha256"]+".part")
+            download_root = (arguments.shared_cache_root if arguments.shared_cache_root
+                             else cache/"blobs")
+            partial=download_root/".downloads"/(record["sha256"]+".part")
             if partial.exists():
                 REPORTER.done=min(REPORTER.total,REPORTER.base+partial.stat().st_size)
         if STOP:
@@ -138,7 +141,12 @@ def acquire(record: dict, arguments, p: int, r: int, side: int, cache: Path) -> 
             if response["stop_requested"]:
                 raise InterruptedError("campaign stopped")
 
-    packet=fetch_blob(cache/"blobs",record["sha256"],record["size"],record["locations"],check)
+    if arguments.shared_cache_root:
+        packet=checkout(arguments.shared_cache_root,cache/"packets",
+                        record["sha256"],record["size"],record["locations"],
+                        arguments.local_storage_root,arguments.local_storage_url,check)
+    else:
+        packet=fetch_blob(cache/"blobs",record["sha256"],record["size"],record["locations"],check)
     directory=cache/record["sha256"]
     if not directory.exists():
         unpack(packet,directory,rectangle,p,r)
@@ -281,6 +289,9 @@ def main() -> int:
     parser.add_argument("--run-id")
     parser.add_argument("--lease-token")
     parser.add_argument("--output",type=Path)
+    parser.add_argument("--local-storage-root",type=Path)
+    parser.add_argument("--local-storage-url")
+    parser.add_argument("--shared-cache-root",type=Path)
     parser.add_argument("--checkpoint-handshake",action="store_true",help="agent protocol compatibility; completed tiles are immutable checkpoints")
     arguments=parser.parse_args()
     if arguments.specification is None:

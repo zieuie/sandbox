@@ -1,0 +1,9 @@
+[Unit]
+Description=Recover Pellinore Wi-Fi after sustained loss of local peers
+After=NetworkManager.service
+Wants=NetworkManager.service
+ConditionPathExists=/sys/class/net/wlp59s0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pellinore-network-watchdog

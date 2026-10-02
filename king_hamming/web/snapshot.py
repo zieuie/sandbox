@@ -40,6 +40,7 @@ HOST_NAMES = {
     "192.168.4.101": "fearless", "192.168.4.102": "red", "192.168.4.103": "lover",
     "192.168.4.104": "folklore", "192.168.4.105": "evermore", "192.168.4.106": "midnights",
     "192.168.4.107": "poets", "192.168.4.108": "showgirl", "192.168.4.151": "merlin",
+    "192.168.4.152": "pellinore",
 }
 ACTIVE = {"queued", "waiting", "running", "stopping", "paused"}
 TERMINAL = {"complete", "failed", "cancelled"}

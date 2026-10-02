@@ -43,6 +43,18 @@ def retained_state(directory: str, states: list[tuple[str, str]]) -> Path:
 class RolloutTests(unittest.TestCase):
     """Upgrades never interrupt work and retain worker data roots."""
 
+    def test_drain_stops_new_dispatch_without_stopping_active_tile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            retained_state(directory, [("tile-child", "running")])
+            self.assertEqual(launch_dp.drain_dispatch(Path(directory) / "leader.sqlite"), 1)
+            with sqlite3.connect(Path(directory) / "leader.sqlite") as database:
+                self.assertEqual(database.execute(
+                    "SELECT value FROM settings WHERE key='campaign_state'").fetchone()[0],
+                    "stopped")
+                self.assertEqual(database.execute(
+                    "SELECT state FROM runs WHERE run_id='tile-child'").fetchone()[0],
+                    "running")
+
     def test_active_child_refuses_before_control_or_signals(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             manifest = retained_state(directory, [("tile-child", "running")])

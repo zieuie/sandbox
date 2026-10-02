@@ -59,8 +59,8 @@ class DistributedTests(unittest.TestCase):
             finally:
                 cluster.close()
 
-    def test_uncapped_tile_uses_every_registered_cpu(self) -> None:
-        """The agent passes an expanded allocation through Python to the C pool."""
+    def test_explicit_wide_tile_uses_every_registered_cpu(self) -> None:
+        """An explicit width override passes through Python to the C pool."""
         count = min(4, len(os.sched_getaffinity(0)))
         if count < 2:
             self.skipTest("two allowed CPUs required")
@@ -73,6 +73,7 @@ class DistributedTests(unittest.TestCase):
                 request_json(cluster.url, "POST", "/v1/enqueue", {"specification": {
                     "program": "dp_distributed", "arguments": {
                         "p": 31, "r": 3, "tile_side": 512, "threads": 1,
+                        "max_cpus": count,
                         "max_visits": 9_000_000_000_000_000_000,
                     }}})
 
