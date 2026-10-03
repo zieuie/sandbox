@@ -137,6 +137,34 @@ def reconstruction_drain_target(connection, now, lease_seconds, resources):
     return None
 
 
+# Locality is only a tie-break: priority, reconstruction and per-root fairness decide first.
+def locality_order(connection, node_name, candidates, now):
+    """Reorder candidates so node_name prefers runs whose inputs it already holds.
+
+    The sort key is the SQL queue order with the adapter's locality score inserted
+    just before creation time, so it can only separate runs of the same priority,
+    phase, root load and estimate. KH_ROW_AFFINITY=0 restores the plain order.
+    """
+
+    if os.environ.get("KH_ROW_AFFINITY", "1") == "0" or len(candidates) < 2:
+        return candidates
+    groups: dict[int, tuple[Any, list]] = {}
+    for candidate in candidates:
+        specification = json.loads(candidate["specification"])
+        adapter = adapters.get(specification)
+        groups.setdefault(id(adapter), (adapter, []))[1].append(
+            (candidate["run_id"], specification, candidate["created"]))
+    scores: dict[str, int] = {}
+    for adapter, items in groups.values():
+        scores.update(adapter.locality_scores(connection, node_name, items, now))
+    if not any(scores.values()):
+        return candidates
+    return sorted(candidates, key=lambda c: (
+        c["progress_phase"] != "reconstructing", -c["priority"], c["peers"],
+        -1.0 if c["estimated_seconds"] is None else c["estimated_seconds"],
+        -scores.get(c["run_id"], 0), c["created"], c["run_id"]))
+
+
 # Keep scheduler liveness separate from campaign policy and worker heartbeats.
 class SchedulerHealth:
     """Record whether the background queue advance loop is making progress."""
@@ -883,7 +911,12 @@ def make_handler(
                         return {"job": None, "campaign_state": campaign}
 
                     candidates = connection.execute(
-                        "SELECT run_id, specification, priority, progress_phase, from_scratch, lease_attempt, engine_failures FROM runs "
+                        "SELECT run_id, specification, priority, progress_phase, from_scratch, lease_attempt, engine_failures, "
+                        "created, estimated_seconds, "
+                        "CASE WHEN parent_run_id IS NULL THEN 0 ELSE "
+                        "(SELECT COUNT(*) FROM runs active "
+                        "WHERE active.parent_run_id=runs.parent_run_id "
+                        "AND active.state='running') END AS peers FROM runs "
                         "WHERE state='queued' AND NOT EXISTS (SELECT 1 FROM lease_history h WHERE h.run_id=runs.run_id "
                         "AND h.node_name=? AND h.outcome='engine retry' AND h.finished>?) "
                         "ORDER BY (progress_phase='reconstructing') DESC, "
@@ -895,6 +928,8 @@ def make_handler(
                         "estimated_seconds ASC, created ASC, run_id ASC LIMIT 100",
                         (node["node_name"], now-30),
                     ).fetchall()
+                    candidates = locality_order(connection, node["node_name"],
+                                                [dict(candidate) for candidate in candidates], now)
                     row = None
                     selected = []
                     live_compute = connection.execute(

@@ -110,6 +110,19 @@ matches the full recurrence, field partitions match independent polynomial
 arithmetic, and binary artifacts pass both independent decoders on feasible examples.
 Command examples and checks are in [README.md](README.md).
 
+## Edge bands
+
+A finished tile publishes, besides its packet, up to three compressed edge bands
+(`bands.py`): `bottom`, `right` and `corner`, each `p^2` cells thick and clipped to
+the tile. A successor's halo reaches at most `p^2` cells into a predecessor, so it
+needs only one band from each: `bottom` from the tile above, `right` from the tile
+to the left, `corner` from the diagonal one (`tiles.band_kind`). `build_halo`
+accepts a whole-tile file or a band `piece_t` and refuses one that does not cover
+the halo. The leader indexes bands by packet hash (`tile_bands`) and lists one in a
+descriptor only while it has a live replica; the packet is always listed too, and
+any band problem falls back to it. Details and measurements are in
+[DP_NETWORK_LOCALITY.md](../docs/DP_NETWORK_LOCALITY.md).
+
 ## Cluster integration
 
 The Python modules here adapt the C kernels to the generic cluster lifecycle.

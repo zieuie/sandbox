@@ -12,6 +12,20 @@ per tile, even though its `p²=169`-cell predecessor border contains only about
 evaluation. Completed packets also need durable replication, so download traffic
 is not the only network cost.
 
+## Status
+
+| Step | State |
+| --- | --- |
+| 1. Local replica first, shared bounded cache | done (`cluster/dependency_cache.py`) |
+| 2. Border-only input format | done: edge bands (below) |
+| 3. Soft row affinity | done: a bounded tie-break in the lease choice (below) |
+
+Measured on a real interior `13^9` tile (90,25), whose three predecessors held
+65.1 MiB of packets: the three bands it needs are **1.47 MiB (44x less)**, and the
+assembled halo is byte-identical to the one built from whole packets. Remaining:
+compare network bytes per completed tile on the live campaign (`progress_details`
+records them, see "Measuring").
+
 ## Incremental plan
 
 1. **Local replica first, with a shared bounded cache.** If the executing node
@@ -35,12 +49,67 @@ is not the only network cost.
    support old packets until existing roots finish; never reinterpret a legacy
    packet as a band. Measure total bytes including sidecar replication before
    making the sidecars mandatory.
+   **As built.** When a tile finishes, its worker cuts three bands from the tile's
+   values and indexes them with the leader, by the hash of the tile's packet:
+   `bottom` (the last `p^2` rows, full width), `right` (the last `p^2` columns, full
+   height) and `corner` (their overlap). A successor needs, from each predecessor,
+   the `bottom` band if it is in the same tile column, the `right` band if it is in
+   the same tile row, and the `corner` otherwise (`tiles.band_kind`). A band is a
+   deterministic gzip blob (`dp_solver/bands.py`): one JSON identity line (format,
+   field, source tile, kind, global cell range, byte order) then the raw values.
+   Bands are ordinary content-addressed artifacts, so the existing replication,
+   hard-linking and dependency cache apply, and a band is about 1 MiB or less
+   against a 25 MiB packet. Tiles with no successor on a side do not publish that
+   band. The packet is unchanged and still serves reconstruction, durability and
+   `reuse_tiles`.
+
+   **Compatibility and safety.** The leader lists a band in a predecessor's
+   descriptor only while it has a live replica, and always lists the packet as
+   well. A worker that finds any band unusable (missing, unreachable, hash or
+   identity mismatch, wrong length) logs it and fetches the packet instead, so old
+   tiles, imported tiles and half-replicated bands all still work. A worker that
+   cannot publish bands (old leader, disk or network error) still completes the
+   tile. `build_halo` refuses a piece that does not cover every halo cell it must
+   fill. `KH_DP_BANDS=0` in a worker's environment turns publishing and use off.
+
 3. **Soft row affinity.** Prefer a node holding the left predecessor and other
    required replicas, but let any eligible node take the tile if that node is
    busy or unhealthy. Do not lease an entire row exclusively: each tile also
    depends on the row above, and hard row ownership would reduce the ready
    wave's parallelism. Once the shared cache and bands exist, measure whether
    row affinity still improves throughput enough to justify scheduler cost.
+
+   **As built.** The leader asks the adapter to score the queued candidates for the
+   node that is leasing (`locality_scores`; DP: `distributed.locality_scores`): 3 when
+   the node ran the tile's left neighbour, 2 when it merely stores it, plus 1 when
+   it stores the upper neighbour. Candidates are then sorted by the unchanged queue
+   order (reconstruction, priority, the root's running tiles, estimate) with the
+   score inserted just before creation time, so affinity can only separate tiles of
+   the same root and priority. A tile that has waited longer than 15 minutes
+   (`KH_ROW_AFFINITY_WAIT` seconds) scores above everything, so preference delays no
+   tile by more than that. No node is ever denied work, and rows are not leased.
+   `KH_ROW_AFFINITY=0` in the leader's environment restores the plain order.
+
+   **Expected value.** With bands, the left neighbour's `right` band is about a
+   third of a tile's already small input (0.46 of 1.47 MiB in the example above),
+   so affinity now saves well under 1% of the original traffic. It is cheap, and
+   it helps most when each tile has few copies (CAMPAIGN_NOTES item 20), but the
+   measurement below decides whether it earns its keep.
+
+## Measuring
+
+Every tile's final progress record carries `input_mode` (`bands`, `packets`,
+`mixed` or `none`), `input_bytes`, `input_band_bytes` and `bands_published`,
+stored in `runs.progress_details`. Compare `AVG(input_bytes)` of tiles run before
+and after the upgrade, and the fraction run on a node that produced their left
+neighbour, for example:
+
+```sql
+SELECT json_extract(progress_details,'$.input_mode') AS mode,
+       COUNT(*), AVG(json_extract(progress_details,'$.input_bytes'))/1048576.0 AS mib
+FROM runs WHERE json_extract(specification,'$.program')='dp_tile' AND state='complete'
+GROUP BY mode;
+```
 
 ## Safety and success criteria
 

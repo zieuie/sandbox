@@ -79,8 +79,11 @@ cells across the team.
 Dependency barriers, startup, transfers and matching group assembly can still
 cause idle intervals; allocation is not a guarantee of 100% utilization.
 Workers prefer verified local predecessor packets and share a bounded 4 GiB
-per-node dependency cache. The remaining border-only and soft-row-locality
-optimizations are scoped in [DP_NETWORK_LOCALITY.md](DP_NETWORK_LOCALITY.md).
+per-node dependency cache. A finished tile also publishes small edge bands
+(about 1 MiB against a 25 MiB packet), so a successor downloads about 1.5 MiB
+instead of about 65 MiB; the whole packet remains the fallback. The leader prefers
+giving a tile to a node that already holds its left neighbour, only as a bounded
+tie-break. See [DP_NETWORK_LOCALITY.md](DP_NETWORK_LOCALITY.md).
 
 Fields that fit an advertised GPU (Merlin's 3060: up to ~180 M labels; P600s:
 ~55 M) are matched by the single-GPU `match_gpu` program instead, and DP tile

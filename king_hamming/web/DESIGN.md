@@ -273,7 +273,8 @@ dashboard, independent of snapshot builds, measures each machine directly:
   - a listing of `blobs/` with each file's name, allocated bytes and inode
 - **Classification:** the dashboard classifies blobs itself, against the
   leader's database:
-  - a hash whose artifact belongs to a `dp_tile` run counts as **tiles**
+  - a hash whose artifact belongs to a `dp_tile` run, or is a band listed in
+    `tile_bands`, counts as **tiles**
   - matching artifacts, checkpoint members and unknown hashes count as
     **other**
   - unknown hashes are also counted separately as *unregistered*

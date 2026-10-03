@@ -74,6 +74,16 @@ class SolverAdapter:
         """Return authorized input descriptors for run, or reject unsupported requests."""
         raise ValueError('solver does not expose leased input descriptors')
 
+    def locality_scores(self, connection, node_name, items, now):
+        """Return {run_id: score} for queued runs whose inputs node_name already holds; higher is better.
+
+        items is a list of (run_id, specification, created). The scores only break
+        ties between runs the scheduler would otherwise treat alike, and an adapter
+        should give a long-waiting run the top score so no run waits for locality
+        indefinitely. Runs it has no opinion about are simply omitted.
+        """
+        return {}
+
     def worker_specification(self, specification, cpus):
         """Return worker-specific operational settings without changing mathematical identity."""
         return specification

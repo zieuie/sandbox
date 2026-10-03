@@ -256,6 +256,11 @@ Items 19 and 20 together would bring today's 1.66 TB down to about 470 GB.
     - **Effect:** 11⁹ (finished and matched) still holds 193 GB, 7¹¹ 128 GB,
       19⁷ 123 GB and 17⁷ 63 GB. The tiles of failed attempts stay as well,
       even once a later attempt has finished.
+    - **Edge bands (added 2026-10-02):** each tile now also has up to three small
+      band artifacts (about 1 MiB per tile in all, indexed in `tile_bands` by the
+      tile's packet hash). They are protected like every artifact and must be
+      deleted with their packet; the disk figures above predate them and rise
+      by about 5%.
     - **Possible change:**
       - When a root is complete and its KHD1 result is safely stored (in the
         feeder's manifest and `results/`, and ideally checked by

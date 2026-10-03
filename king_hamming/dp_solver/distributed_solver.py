@@ -22,11 +22,12 @@ import threading
 import time
 
 from agent import request_json
-from blob_store import fetch_blob
+from blob_store import fetch_blob, file_digest, storage_transaction, store_blob
 from dependency_cache import checkout
 import gpus
+from dp_solver.bands import read_band, write_band
 from dp_solver.scheduling import dp_estimate
-from dp_solver.tiles import build_halo, tile
+from dp_solver.tiles import band_kind, band_region, build_halo, needed_bands, tile
 
 ROOT = Path(__file__).resolve().parent
 GPU_TILE = ROOT.parent / "gpu_dp_solver" / "kh_gpu_dp_tile"
@@ -113,14 +114,25 @@ def descriptions(arguments, **extra) -> list[dict]:
         offset=response["next"]
 
 
-# Resolve a complete artifact directly from its live peer HTTP sources.
-def acquire(record: dict, arguments, p: int, r: int, side: int, cache: Path) -> Path:
-    """Fetch and validate one tile packet in bounded buffers; return its private extracted directory."""
+# Let long local copies notice an intentional stop between blocks.
+def stopped() -> None:
+    """Raise InterruptedError once the agent has asked this tile to stop."""
 
-    rectangle=tile(p,r,side,record["row"],record["column"])
-    maximum=(rectangle.value_bytes+rectangle.value_bytes//2)*101//100+16384
-    if type(record["size"]) is not int or not 0<record["size"]<=maximum:
-        raise ValueError("tile packet exceeds expected byte size")
+    if STOP:
+        raise InterruptedError("tile stopped")
+
+
+# Bands are an optimization with a rollback switch: KH_DP_BANDS=0 neither publishes nor uses them.
+def bands_enabled() -> bool:
+    """Return whether this worker publishes and consumes edge bands."""
+
+    return os.environ.get("KH_DP_BANDS", "1") != "0"
+
+
+# Resolve one hashed blob from this node's disk, the shared cache or live peers.
+def fetch(record: dict, arguments, cache: Path) -> Path:
+    """Fetch and hash-check the blob a descriptor names, fencing long transfers; return its local path."""
+
     last_check=0.0
     if REPORTER is not None:
         REPORTER.total+=record["size"]
@@ -149,13 +161,102 @@ def acquire(record: dict, arguments, p: int, r: int, side: int, cache: Path) -> 
                         arguments.local_storage_root,arguments.local_storage_url,check)
     else:
         packet=fetch_blob(cache/"blobs",record["sha256"],record["size"],record["locations"],check)
-    directory=cache/record["sha256"]
-    if not directory.exists():
-        unpack(packet,directory,rectangle,p,r)
     if REPORTER is not None:
         REPORTER.base+=record["size"]
         REPORTER.done=REPORTER.base
+    return packet
+
+
+# Resolve a complete artifact directly from its live peer HTTP sources.
+def acquire(record: dict, arguments, p: int, r: int, side: int, cache: Path) -> Path:
+    """Fetch and validate one tile packet in bounded buffers; return its private extracted directory."""
+
+    rectangle=tile(p,r,side,record["row"],record["column"])
+    maximum=(rectangle.value_bytes+rectangle.value_bytes//2)*101//100+16384
+    if type(record["size"]) is not int or not 0<record["size"]<=maximum:
+        raise ValueError("tile packet exceeds expected byte size")
+    packet=fetch(record,arguments,cache)
+    directory=cache/record["sha256"]
+    if not directory.exists():
+        unpack(packet,directory,rectangle,p,r)
     return directory
+
+
+# Fetch just the edge band of a predecessor that the target's halo can reach.
+def acquire_band(band: dict, arguments, p: int, r: int, predecessor, kind: str, cache: Path):
+    """Fetch, hash-check and identity-check one band; return the piece of values it holds."""
+
+    region=band_region(p,predecessor,kind)
+    maximum=region.value_bytes*101//100+16384
+    if type(band["size"]) is not int or not 0<band["size"]<=maximum:
+        raise ValueError("band exceeds expected byte size")
+    blob=fetch(band,arguments,cache)
+    return read_band(blob,cache/("band-"+band["sha256"]),p,r,predecessor,kind,stopped)
+
+
+# Prefer the small band; any problem with it falls back to the whole packet, which is always listed.
+def acquire_input(record: dict, arguments, p: int, r: int, side: int, target, cache: Path):
+    """Return (values source, "band" or "packet", bytes fetched) for one predecessor of target."""
+
+    band=record.get("band")
+    if band is not None and bands_enabled():
+        predecessor=tile(p,r,side,record["row"],record["column"])
+        kind=band_kind(target,predecessor)
+        if band.get("kind")==kind:
+            before=(REPORTER.total,REPORTER.base) if REPORTER is not None else None
+            try:
+                return acquire_band(band,arguments,p,r,predecessor,kind,cache),"band",band["size"]
+            except InterruptedError:
+                raise
+            except (ValueError,OSError,KeyError) as error:
+                print(f"{kind} band of tile {record['row']},{record['column']} unusable, fetching the whole packet: {error}",
+                      file=sys.stderr,flush=True)
+                shutil.rmtree(cache/("band-"+band["sha256"]),ignore_errors=True)
+                if REPORTER is not None:
+                    REPORTER.total,REPORTER.base=before
+    directory=acquire(record,arguments,p,r,side,cache)
+    return directory/"values.bin","packet",record["size"]
+
+
+# Cut the bands from the finished tile and index them, so successors can skip the whole packet.
+def publish_bands(arguments, p: int, r: int, side: int, rectangle, values: Path, packet: Path) -> int:
+    """Store this tile's needed bands in local storage and register them; return how many were registered.
+
+    Failures are never fatal: the tile's own packet is complete, and a successor
+    without bands just downloads packets as before.
+    """
+
+    if not (bands_enabled() and arguments.local_storage_root and arguments.local_storage_url):
+        return 0
+    kinds=needed_bands(p,r,side,rectangle)
+    if not kinds:
+        return 0
+    work=packet.parent/"bands"
+    stored={}
+    try:
+        work.mkdir()
+        entries={}
+        with storage_transaction(arguments.local_storage_root,stopped):
+            for kind in kinds:
+                blob=work/(kind+".khband")
+                write_band(values,p,r,rectangle,kind,blob,stopped)
+                digest,path=store_blob(blob,arguments.local_storage_root,stopped)
+                stored[kind]=path
+                entries[kind]={"sha256":digest,"size":path.stat().st_size,
+                               "location":f"{arguments.local_storage_url.rstrip('/')}/blobs/{digest}"}
+        response=request_json(arguments.leader,"/v1/tile-input",
+                              {"run_id":arguments.run_id,"lease_token":arguments.lease_token,
+                               "publish_bands":{"packet":file_digest(packet),"bands":entries}})
+        if response.get("registered")!=len(entries):
+            raise ValueError("leader did not register the bands")
+        return len(entries)
+    except InterruptedError:
+        raise
+    except Exception as error:
+        print(f"tile bands not published: {error}",file=sys.stderr,flush=True)
+        return 0
+    finally:
+        shutil.rmtree(work,ignore_errors=True)
 
 
 # Compute an immutable tile from peer artifacts, leaving whole-calculation state on no worker.
@@ -168,9 +269,13 @@ def compute(arguments, specification: dict) -> None:
     cache=arguments.output.parent/"tile-inputs"
     cache.mkdir()
     sources={}
+    fetched={"band":0,"packet":0}
+    counts={"band":0,"packet":0}
     for record in descriptions(arguments):
-        directory=acquire(record,arguments,p,r,side,cache)
-        sources[(record["row"],record["column"])]=directory/"values.bin"
+        source,mode,size=acquire_input(record,arguments,p,r,side,rectangle,cache)
+        sources[(record["row"],record["column"])]=source
+        fetched[mode]+=size
+        counts[mode]+=1
     halo=arguments.output.parent/"halo.bin"
     build_halo(p,r,side,rectangle,sources,halo,int(options.get("max_tile_bytes",2*1024**3)))
     shutil.rmtree(cache)
@@ -228,9 +333,13 @@ def compute(arguments, specification: dict) -> None:
                 archive.add(output/name,arcname=name,recursive=False)
         stream.flush()
         os.fsync(stream.fileno())
+    published=publish_bands(arguments,p,r,side,rectangle,output/"values.bin",arguments.output)
     cells=rectangle.value_bytes//8
+    mode="none" if not counts["band"]+counts["packet"] else "bands" if not counts["packet"] else "packets" if not counts["band"] else "mixed"
     print(json.dumps({"done":cells,"total":cells,"checkpoint_done":cells,"units":"cells","phase":"complete","heartbeat":True,
-                      "engine":"gpu" if computed else "cpu"}),flush=True)
+                      "engine":"gpu" if computed else "cpu","input_mode":mode,
+                      "input_bytes":fetched["band"]+fetched["packet"],"input_band_bytes":fetched["band"],
+                      "bands_published":published}),flush=True)
 
 
 # Reconstruct through on-demand native choice shards without downloading a whole field table.

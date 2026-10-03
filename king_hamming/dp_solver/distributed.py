@@ -8,13 +8,15 @@ else:
     from . import bootstrap
 
 import json
+import os
 import sqlite3
 import uuid
 from typing import Any
 
+from blob_store import valid_digest
 from common import calculation_id, canonical_json
 from dp_solver.scheduling import dp_estimate
-from dp_solver.tiles import dependencies, memory_bytes, tile
+from dp_solver.tiles import BAND_KINDS, band_kind, dependencies, memory_bytes, tile
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS distributed_tiles (
@@ -34,9 +36,16 @@ CREATE TABLE IF NOT EXISTS distributed_tile_retries (
     next_retry REAL NOT NULL,
     PRIMARY KEY(parent_run_id,row,column)
 );
+CREATE TABLE IF NOT EXISTS tile_bands (
+    packet_hash TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    band_hash TEXT NOT NULL,
+    PRIMARY KEY(packet_hash,kind)
+);
 """
 
 REUSE_BATCH = 128
+MAX_BAND_BYTES = 2 * 1024**3
 TILE_RETRY_LIMIT = 3
 TILE_RETRY_BASE_SECONDS = 30
 TILE_RETRY_MAX_SECONDS = 300
@@ -89,6 +98,55 @@ def artifact_record(connection: sqlite3.Connection, row: sqlite3.Row, now: float
     )]
     size = connection.execute("SELECT size FROM artifacts WHERE artifact_hash=?", (row["artifact_hash"],)).fetchone()[0]
     return {"sha256": row["artifact_hash"], "size": size, "locations": sources}
+
+
+# A band is addressed by the packet it was cut from, so reused tiles keep their bands for free.
+def band_record(connection: sqlite3.Connection, packet_hash: str, kind: str, now: float) -> dict[str, Any] | None:
+    """Return kind's band descriptor for packet_hash with live sources, or None if none is available."""
+
+    row = connection.execute("SELECT band_hash FROM tile_bands WHERE packet_hash=? AND kind=?",
+                             (packet_hash, kind)).fetchone()
+    if row is None:
+        return None
+    deadline = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
+    sources = [record[0] for record in connection.execute(
+        "SELECT r.location FROM replicas r JOIN nodes n USING(node_name) WHERE r.artifact_hash=? AND n.last_heartbeat>? ORDER BY node_name",
+        (row["band_hash"], now-deadline),
+    )]
+    size = connection.execute("SELECT size FROM artifacts WHERE artifact_hash=?", (row["band_hash"],)).fetchone()
+    if not sources or size is None or size[0] is None:
+        return None
+    return {"kind": kind, "sha256": row["band_hash"], "size": size[0], "locations": sources}
+
+
+# The worker stored the band blobs on its own disk; the leader indexes them like any artifact.
+def publish_bands(connection: sqlite3.Connection, run: sqlite3.Row, request: dict[str, Any], now: float) -> dict[str, Any]:
+    """Index the edge bands a leased tile cut from its packet; return how many were registered.
+
+    Bands are an optimization. Registering them never changes the tile's result,
+    and a missing or damaged band simply sends a successor to the whole packet.
+    """
+
+    if json.loads(run["specification"])["program"] != "dp_tile":
+        raise ValueError("only a tile task publishes bands")
+    published = request["publish_bands"]
+    packet = published["packet"]
+    bands = published["bands"]
+    if not valid_digest(packet) or not isinstance(bands, dict) or not 0 < len(bands) <= len(BAND_KINDS):
+        raise ValueError("invalid band publication")
+    for kind, entry in bands.items():
+        if (kind not in BAND_KINDS or not isinstance(entry, dict) or not valid_digest(entry.get("sha256")) or
+                type(entry.get("size")) is not int or not 0 < entry["size"] <= MAX_BAND_BYTES or
+                not isinstance(entry.get("location"), str) or not 0 < len(entry["location"]) <= 512):
+            raise ValueError("invalid band description")
+    for kind, entry in bands.items():
+        connection.execute("INSERT OR IGNORE INTO artifacts(artifact_hash,target_replicas,created,size) VALUES(?,3,?,?)",
+                           (entry["sha256"], now, entry["size"]))
+        connection.execute("INSERT OR REPLACE INTO replicas(artifact_hash,node_name,location,created) VALUES(?,?,?,?)",
+                           (entry["sha256"], run["node_name"], entry["location"], now))
+        connection.execute("INSERT OR REPLACE INTO tile_bands(packet_hash,kind,band_hash) VALUES(?,?,?)",
+                           (packet, kind, entry["sha256"]))
+    return {"registered": len(bands)}
 
 
 def child_specification(parent: sqlite3.Row, row: int, column: int) -> dict[str, Any]:
@@ -253,6 +311,66 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
                                (child,parent["run_id"],target.row,target.column))
 
 
+AFFINITY_MAX_WAIT_SECONDS = 900
+
+
+# Row affinity: the node that finished a tile's left neighbour is the natural one to run it next.
+def locality_scores(connection: sqlite3.Connection, node_name: str, items: list, now: float) -> dict[str, int]:
+    """Score queued tiles for node_name; higher means more predecessor data is already on its disk.
+
+    Left neighbour produced here scores 3, merely stored here 2; an upper
+    neighbour stored here adds 1. A tile that has waited longer than
+    AFFINITY_MAX_WAIT_SECONDS scores above all of them, so preference can delay a
+    tile by at most that long. The scores are only a tie-break among tiles of one
+    root and priority; they never change which roots or phases are served first.
+    """
+
+    wanted = {}
+    for run_id, specification, created in items:
+        if specification.get("program") != "dp_tile":
+            continue
+        arguments = specification["arguments"]
+        if now - created > float(os.environ.get("KH_ROW_AFFINITY_WAIT", AFFINITY_MAX_WAIT_SECONDS)):
+            wanted[run_id] = None
+            continue
+        row, column = arguments["row"], arguments["column"]
+        wanted[run_id] = (arguments["parent_run_id"], row, column)
+    scores = {run_id: 5 for run_id, key in wanted.items() if key is None}
+    neighbours = []
+    for run_id, key in wanted.items():
+        if key is None:
+            continue
+        parent, row, column = key
+        if column > 0:
+            neighbours.append((parent, row, column - 1))
+        if row > 0:
+            neighbours.append((parent, row - 1, column))
+    held = {}
+    for start in range(0, len(neighbours), 300):
+        chunk = list(dict.fromkeys(neighbours[start:start + 300]))
+        values = ",".join("(?,?,?)" for _ in chunk)
+        for parent, row, column, producer, stored in connection.execute(
+                f"WITH want(parent,row,column) AS (VALUES {values}) "
+                "SELECT w.parent,w.row,w.column,r.node_name,"
+                "EXISTS(SELECT 1 FROM replicas x WHERE x.artifact_hash=r.artifact_hash AND x.node_name=?) "
+                "FROM want w JOIN distributed_tiles t ON t.parent_run_id=w.parent AND t.row=w.row AND t.column=w.column "
+                "JOIN runs r ON r.run_id=t.child_run_id AND r.state='complete'",
+                [value for key in chunk for value in key] + [node_name]):
+            held[(parent, row, column)] = (producer == node_name, bool(stored))
+    for run_id, key in wanted.items():
+        if key is None:
+            continue
+        parent, row, column = key
+        score = 0
+        produced, stored = held.get((parent, row, column - 1), (False, False)) if column > 0 else (False, False)
+        score += 3 if produced else 2 if stored else 0
+        _, up = held.get((parent, row - 1, column), (False, False)) if row > 0 else (False, False)
+        score += 1 if up else 0
+        if score:
+            scores[run_id] = score
+    return scores
+
+
 # Page only the immutable predecessor descriptions required by the currently owned task.
 def inputs(connection: sqlite3.Connection, run: sqlite3.Row, request: dict[str, Any], now: float) -> dict[str, Any]:
     """Return a bounded page of live artifact sources, enforcing task-specific tile scope."""
@@ -260,6 +378,8 @@ def inputs(connection: sqlite3.Connection, run: sqlite3.Row, request: dict[str, 
     specification = json.loads(run["specification"])
     arguments = specification["arguments"]
     program = specification["program"]
+    if "publish_bands" in request:
+        return publish_bands(connection, run, request, now)
     if program == "dp_tile":
         parent = arguments["parent_run_id"]
         target = tile(arguments["p"],arguments["r"],arguments["tile_side"],arguments["row"],arguments["column"])
@@ -279,6 +399,12 @@ def inputs(connection: sqlite3.Connection, run: sqlite3.Row, request: dict[str, 
         descriptor = None if row is None else artifact_record(connection,row,now)
         if not descriptor or not descriptor["locations"]:
             raise ValueError("tile dependency has no live complete artifact")
-        records.append({"row":target.row,"column":target.column,**descriptor})
+        record = {"row":target.row,"column":target.column,**descriptor}
+        if program == "dp_tile":
+            # The whole packet stays in the record: it is the fallback for any band problem.
+            band = band_record(connection, descriptor["sha256"], band_kind(tile(arguments["p"],arguments["r"],arguments["tile_side"],arguments["row"],arguments["column"]), target), now)
+            if band is not None:
+                record["band"] = band
+        records.append(record)
     next_offset = offset+len(records)
     return {"records":records,"next":next_offset if next_offset<len(wanted) else None}

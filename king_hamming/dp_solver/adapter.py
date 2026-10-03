@@ -242,6 +242,10 @@ class DPAdapter(SolverAdapter):
         """Return only predecessor descriptors authorized for this leased DP task."""
         return distributed.inputs(connection, run, request, now)
 
+    def locality_scores(self, connection, node_name, items, now):
+        """Prefer tiles whose left (then upper) predecessor this node produced or already stores."""
+        return distributed.locality_scores(connection, node_name, items, now)
+
     def worker_specification(self, specification, cpus):
         """Cap operational thread count to the replacement worker's assigned CPUs."""
         specification = json.loads(json.dumps(specification))
@@ -291,7 +295,7 @@ class DPAdapter(SolverAdapter):
     def cleanup(self, specification, directory):
         """Delete disposable native scratch only after durable completion acknowledgment."""
         if self.retry_elsewhere(specification):
-            for name in ('tile-output','tile-inputs','reconstruction'):
+            for name in ('tile-output','tile-inputs','reconstruction','bands'):
                 path = directory/name
                 if path.is_dir():
                     shutil.rmtree(path)
