@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import time
 import unittest
+import uuid
 from unittest.mock import patch
 
 os.environ["KH_ENABLE_TEST_FIXTURES"] = "1"
@@ -17,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 import leader
 from dp_solver import distributed
+from common import canonical_json
 
 
 SPECIFICATION = {"program": "dp_distributed", "arguments": {
@@ -58,6 +61,99 @@ class TileReuseTests(unittest.TestCase):
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NULL",
                 (root,)).fetchone()[0], 15)
+
+    def test_tile_input_read_does_not_wait_for_writer_and_fences_expired_lease(self) -> None:
+        root = self.enqueue()
+        child = self.child(root)
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created,size) "
+                               "VALUES(?,2,?,9)", (HASH, now))
+            connection.execute("UPDATE runs SET state='complete',artifact_hash=? WHERE run_id=?",
+                               (HASH, child["run_id"]))
+            for name in ("a", "b"):
+                connection.execute("INSERT INTO replicas(artifact_hash,node_name,location,created) "
+                                   "VALUES(?,?,?,?)", (HASH, name, f"http://{name}/blob", now))
+            connection.execute("UPDATE runs SET state='running',node_name='a',lease_token='lease',"
+                               "lease_expires=? WHERE run_id=?", (now + 60, root))
+        blocker = sqlite3.connect(self.database)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            blocker.execute("UPDATE settings SET value=value WHERE key='campaign_state'")
+            result = self.handler.dispatch_post("/v1/tile-input", {
+                "run_id": root, "lease_token": "lease", "row": 0, "column": 0})
+            self.assertEqual(result["records"][0]["sha256"], HASH)
+        finally:
+            blocker.rollback()
+            blocker.close()
+        with leader.connect(self.database) as connection:
+            connection.execute("UPDATE runs SET lease_expires=? WHERE run_id=?", (now - 1, root))
+        with self.assertRaises(PermissionError):
+            self.handler.dispatch_post("/v1/tile-input", {
+                "run_id": root, "lease_token": "lease", "row": 0, "column": 0})
+
+    def test_failed_parent_retries_reconstruction_without_new_tiles(self) -> None:
+        root = self.enqueue()
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            parent = connection.execute("SELECT * FROM runs WHERE run_id=?", (root,)).fetchone()
+            connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created,size) "
+                               "VALUES(?,2,?,9)", (HASH, now))
+            for name in ("a", "b"):
+                connection.execute("INSERT INTO replicas(artifact_hash,node_name,location,created) "
+                                   "VALUES(?,?,?,?)", (HASH, name, f"http://{name}/blob", now))
+            for row, column, child in connection.execute(
+                    "SELECT row,column,child_run_id FROM distributed_tiles WHERE parent_run_id=?",
+                    (root,)).fetchall():
+                if child is None:
+                    child = str(uuid.uuid4())
+                    specification = distributed.child_specification(parent, row, column)
+                    connection.execute(
+                        "INSERT INTO runs(run_id,calculation_id,specification,state,priority,from_scratch,"
+                        "created,parent_run_id,artifact_hash) VALUES(?,?,?,'complete',0,0,?,?,?)",
+                        (child, child, canonical_json(specification).decode(), now, root, HASH))
+                    connection.execute("UPDATE distributed_tiles SET child_run_id=? "
+                                       "WHERE parent_run_id=? AND row=? AND column=?",
+                                       (child, root, row, column))
+                else:
+                    connection.execute("UPDATE runs SET state='complete',artifact_hash=? WHERE run_id=?",
+                                       (HASH, child))
+            connection.execute("UPDATE runs SET state='failed',error='timed out',engine_failures=1 "
+                               "WHERE run_id=?", (root,))
+            count_before = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        response = self.handler.dispatch_post("/v1/run-command", {
+            "run_id": root, "action": "retry-reconstruction"})
+        self.assertEqual(response, {"run_id": root, "state": "queued", "retained_tiles": 16})
+        with leader.connect(self.database) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0], count_before)
+            state = connection.execute("SELECT state,engine_failures,progress_phase FROM runs WHERE run_id=?",
+                                       (root,)).fetchone()
+            self.assertEqual(tuple(state), ("queued", 0, "reconstructing"))
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NOT NULL",
+                (root,)).fetchone()[0], 16)
+
+    def test_reconstruction_retry_refuses_incomplete_grid(self) -> None:
+        root = self.enqueue()
+        with leader.connect(self.database) as connection:
+            connection.execute("UPDATE runs SET state='failed',error='timed out' WHERE run_id=?", (root,))
+        with self.assertRaisesRegex(ValueError, "every original tile"):
+            self.handler.dispatch_post("/v1/run-command", {
+                "run_id": root, "action": "retry-reconstruction"})
+        with leader.connect(self.database) as connection:
+            self.assertEqual(connection.execute("SELECT state FROM runs WHERE run_id=?",
+                                                (root,)).fetchone()[0], "failed")
+
+    def test_bounded_scheduler_rotates_across_waiting_roots(self) -> None:
+        first = self.enqueue()
+        second = self.enqueue(rerun=True)
+        with leader.connect(self.database) as connection:
+            with patch.object(distributed, "_last_scan", {}), patch.object(
+                    distributed, "reuse_tiles", wraps=distributed.reuse_tiles) as scans:
+                distributed.advance(connection, time.time(), max_roots=1)
+                distributed.advance(connection, time.time() + 1, max_roots=1)
+            self.assertEqual({call.args[1]["run_id"] for call in scans.call_args_list},
+                             {first, second})
 
     def test_large_roots_are_rescanned_at_a_bounded_rate(self) -> None:
         """A root above FULL_SCAN_TILES is skipped until its interval passes; small roots never are."""

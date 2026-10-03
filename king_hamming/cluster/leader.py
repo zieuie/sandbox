@@ -30,7 +30,7 @@ import adapters
 import gpus
 from resources import ResourceRequest, fits as resource_fits, normalized_slots
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_heartbeat REAL NOT NULL,
     state TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS node_dispatch_pauses (
+    node_name TEXT PRIMARY KEY REFERENCES nodes(node_name)
+);
 CREATE TABLE IF NOT EXISTS artifacts (
     artifact_hash TEXT PRIMARY KEY,
     target_replicas INTEGER NOT NULL,
@@ -120,7 +123,6 @@ def connect(database: Path, timeout: float = 30.0) -> sqlite3.Connection:
 
     connection = sqlite3.connect(database, timeout=timeout)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
 
@@ -137,6 +139,27 @@ def session(database: Path, timeout: float = 30.0):
             yield connection
     finally:
         connection.close()
+
+
+@contextmanager
+def writer_session(database: Path, route: str, health: "SchedulerHealth", timeout: float = 8.0):
+    """Measure writer wait and transaction hold time, including commit/rollback."""
+
+    started = time.monotonic()
+    acquired = None
+    error = None
+    try:
+        with session(database, timeout=timeout) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            acquired = time.monotonic()
+            yield connection
+    except Exception as failure:
+        error = failure
+        raise
+    finally:
+        ended = time.monotonic()
+        health.transaction(route, (acquired or ended) - started,
+                           0.0 if acquired is None else ended - acquired, error)
 
 
 DEFAULT_DISK_FLOOR_BYTES = 10 * 1024**3
@@ -163,6 +186,7 @@ def reconstruction_drain_target(connection, now, lease_seconds, resources):
         "COALESCE(SUM(active.exclusive_host),0) AS exclusive_count "
         "FROM nodes n LEFT JOIN runs active ON active.node_name=n.node_name "
         "AND active.state='running' WHERE n.compute_enabled=1 "
+        "AND NOT EXISTS (SELECT 1 FROM node_dispatch_pauses pause WHERE pause.node_name=n.node_name) "
         "AND n.last_heartbeat>? AND NOT EXISTS "
         "(SELECT 1 FROM node_reservations reserve WHERE reserve.node_name=n.node_name) "
         "GROUP BY n.node_name ORDER BY active_count,n.node_name",
@@ -217,6 +241,27 @@ class SchedulerHealth:
         self.last_success: float | None = None
         self.last_error: str | None = None
         self.consecutive_failures = 0
+        self.transactions: dict[str, dict[str, float | int]] = {}
+        self.last_lock_error: float | None = None
+
+    def transaction(self, route: str, wait: float, held: float, error: BaseException | None) -> None:
+        """Keep bounded per-route writer timing without printing every busy request."""
+
+        with self.lock:
+            if route not in self.transactions and len(self.transactions) >= 64:
+                route = "other"
+            item = self.transactions.setdefault(route, {"calls": 0, "wait_seconds": 0.0,
+                                                        "held_seconds": 0.0, "max_wait_seconds": 0.0,
+                                                        "max_held_seconds": 0.0, "lock_errors": 0})
+            item["calls"] += 1
+            item["wait_seconds"] += wait
+            item["held_seconds"] += held
+            item["max_wait_seconds"] = max(item["max_wait_seconds"], wait)
+            item["max_held_seconds"] = max(item["max_held_seconds"], held)
+            if isinstance(error, sqlite3.OperationalError) and "locked" in str(error).lower():
+                item["lock_errors"] += 1
+                if route != "scheduler":
+                    self.last_lock_error = time.time()
 
     def attempting(self) -> None:
         """Record the start of one scheduler transaction."""
@@ -249,14 +294,17 @@ class SchedulerHealth:
                 and (self.last_success is None or self.last_attempt > self.last_success)
             )
             stalled = bool(unfinished and now - self.last_attempt > self.stall_seconds)
-            healthy = self.consecutive_failures == 0 and not stalled
+            contended = self.last_lock_error is not None and now - self.last_lock_error < 60
+            healthy = self.consecutive_failures == 0 and not stalled and not contended
             return {
-                "status": "healthy" if healthy else "stalled" if stalled else "retrying",
+                "status": "healthy" if healthy else "stalled" if stalled else "contended" if contended else "retrying",
                 "healthy": healthy,
                 "last_attempt": self.last_attempt,
                 "last_success": self.last_success,
                 "last_error": self.last_error,
                 "consecutive_failures": self.consecutive_failures,
+                "last_lock_error": self.last_lock_error,
+                "transactions": {route: dict(item) for route, item in self.transactions.items()},
             }
 
 
@@ -334,6 +382,7 @@ def initialize(
     database.parent.mkdir(parents=True, exist_ok=True)
 
     with session(database) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
         connection.executescript(SCHEMA)
 
         # Add supervision fields without replacing existing runs or artifacts.
@@ -482,8 +531,11 @@ def make_handler(
                     reservations = {entry["node_name"]: entry["run_id"] for entry in connection.execute(
                         "SELECT node_name,run_id FROM node_reservations"
                     )}
+                    dispatch_pauses = {entry[0] for entry in connection.execute(
+                        "SELECT node_name FROM node_dispatch_pauses")}
                     for participant in nodes:
                         participant["reserved_for"] = reservations.get(participant["node_name"])
+                        participant["dispatch_paused"] = participant["node_name"] in dispatch_pauses
                     recovery.add_status(connection, runs, time.time())
                     adapters.augment_status(connection, runs, time.time())
                     run_ids = [run["run_id"] for run in runs]
@@ -608,16 +660,42 @@ def make_handler(
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             except PermissionError as error:
                 self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error).lower():
+                    raise
+                self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "leader database busy; retry"})
 
         # Apply one protocol operation transactionally.
         def dispatch_post(self, route: str, request: dict[str, Any]) -> dict[str, Any]:
             """Apply route using request and return its response object."""
 
-            with session(database) as connection:
+            if route == "/v1/tile-input" and "publish_bands" not in request:
+                # Immutable input descriptors do not need the global writer lock.
+                with session(database) as connection:
+                    connection.execute("BEGIN")
+                    now = time.time()
+                    row = connection.execute("SELECT * FROM runs WHERE run_id=?",
+                                             (request["run_id"],)).fetchone()
+                    if (row is None or row["lease_token"] != request["lease_token"] or
+                            row["state"] != "running" or row["lease_expires"] is None or
+                            row["lease_expires"] <= now):
+                        raise PermissionError("stale or invalid lease")
+                    specification = json.loads(row["specification"])
+                    adapter = adapters.get(specification)
+                    if route not in adapter.input_routes:
+                        raise ValueError("solver has no tile inputs")
+                    return adapter.inputs(connection, row, request, now)
+
+            with writer_session(database, route, scheduler) as connection:
                 # Serialize lease validation and mutation to fence racing stale submissions.
-                connection.execute("BEGIN IMMEDIATE")
                 now = time.time()
-                recovery.expire(connection, now)
+                # The scheduler expires leases once per tick. Doing a global
+                # expiry scan on every heartbeat or blob request held the writer
+                # lock in proportion to unrelated work.
+                # A lease request also expires promptly so an idle replacement
+                # need not wait for the next scheduler tick.
+                if route == "/v1/lease":
+                    recovery.expire(connection, now)
                 lease_seconds = recovery.setting(connection, "lease_seconds")
                 if route == "/v1/enqueue":
                     specification = request["specification"]
@@ -677,6 +755,18 @@ def make_handler(
 
                     return {"campaign_state": state}
 
+                if route == "/v1/node-control":
+                    name, action = request["node_name"], request["action"]
+                    if type(name) is not str or action not in {"drain", "resume"}:
+                        raise ValueError("node-control requires a node name and drain/resume action")
+                    if connection.execute("SELECT 1 FROM nodes WHERE node_name=?", (name,)).fetchone() is None:
+                        raise ValueError("unknown node")
+                    if action == "drain":
+                        connection.execute("INSERT OR IGNORE INTO node_dispatch_pauses(node_name) VALUES(?)", (name,))
+                    else:
+                        connection.execute("DELETE FROM node_dispatch_pauses WHERE node_name=?", (name,))
+                    return {"node_name": name, "dispatch_paused": action == "drain"}
+
                 if route == "/v1/run-command":
                     run_id = request["run_id"]
                     action = request["action"]
@@ -689,8 +779,12 @@ def make_handler(
                             raise ValueError("priority must be an integer")
                         connection.execute("UPDATE runs SET priority=? WHERE run_id=?", (priority, run_id))
                         return {"run_id": run_id, "state": row["state"], "priority": priority}
+                    if action == "retry-reconstruction":
+                        specification = json.loads(row["specification"])
+                        return adapters.get(specification).retry_reconstruction(
+                            connection, row, specification, now)
                     if action not in {"cancel", "pause", "resume"}:
-                        raise ValueError("action must be cancel, pause, resume, or reprioritize")
+                        raise ValueError("action must be cancel, pause, resume, reprioritize, or retry-reconstruction")
                     if action == "resume":
                         if row["state"] != "paused":
                             raise ValueError("only a paused run can be resumed")
@@ -974,6 +1068,9 @@ def make_handler(
 
                     if not node["compute_enabled"]:
                         return {"job": None, "campaign_state": "storage-only"}
+                    if connection.execute("SELECT 1 FROM node_dispatch_pauses WHERE node_name=?",
+                                          (node["node_name"],)).fetchone() is not None:
+                        return {"job": None, "campaign_state": "draining"}
 
                     slots = normalized_slots(json.loads(node["slots_json"] or "[]"),
                                              node["cpu_set"])
@@ -1027,7 +1124,8 @@ def make_handler(
                     row = None
                     selected = []
                     live_compute = connection.execute(
-                        "SELECT COUNT(*) FROM nodes WHERE compute_enabled=1 AND last_heartbeat>?",
+                        "SELECT COUNT(*) FROM nodes n WHERE compute_enabled=1 AND last_heartbeat>? "
+                        "AND NOT EXISTS (SELECT 1 FROM node_dispatch_pauses pause WHERE pause.node_name=n.node_name)",
                         (now-lease_seconds,),
                     ).fetchone()[0]
                     for candidate in candidates:
@@ -1090,6 +1188,7 @@ def make_handler(
                         available = connection.execute(
                             "SELECT n.node_name,n.address,n.cpu_set,n.memory_bytes FROM nodes n "
                             "WHERE n.compute_enabled=1 AND n.last_heartbeat>? AND n.node_name<>? "
+                            "AND NOT EXISTS (SELECT 1 FROM node_dispatch_pauses pause WHERE pause.node_name=n.node_name) "
                             "AND NOT EXISTS (SELECT 1 FROM runs active WHERE active.node_name=n.node_name AND active.state='running') "
                             "AND NOT EXISTS (SELECT 1 FROM node_reservations reserve WHERE reserve.node_name=n.node_name) "
                             "ORDER BY n.node_name",
@@ -1193,7 +1292,9 @@ def make_handler(
                         (request["run_id"],),
                     ).fetchone()
 
-                    if row is None or row["lease_token"] != request["lease_token"] or row["state"] != "running":
+                    if (row is None or row["lease_token"] != request["lease_token"] or
+                            row["state"] != "running" or row["lease_expires"] is None or
+                            row["lease_expires"] <= now):
                         raise PermissionError("stale or invalid lease")
 
                     if route == "/v1/resource-usage":
@@ -1478,8 +1579,7 @@ def scheduler_loop(
         health.attempting()
 
         try:
-            with session(database, timeout=connect_timeout) as connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with writer_session(database, "scheduler", health, timeout=connect_timeout) as connection:
                 now = time.time()
                 recovery.expire(connection, now)
                 adapters.advance(connection, now)

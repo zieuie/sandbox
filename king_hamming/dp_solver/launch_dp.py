@@ -716,6 +716,63 @@ def upgrade_leader_live(path: Path) -> None:
                       'restart_seconds': round(outage, 2)}, indent=2))
 
 
+def upgrade_worker_rolling(path: Path, host: str, wait_seconds: float) -> None:
+    """Drain one host's new leases, then replace only its idle owned agent."""
+
+    manifest = json.loads(path.read_text())
+    worker = next((item for item in manifest['workers'] if item['host'] == host), None)
+    if worker is None:
+        raise ValueError(f'{host} is not a retained campaign worker')
+    validate_owned_leader(manifest, path.parent / 'leader.sqlite')
+    node_name = 'dp-' + host.rsplit('.', 1)[1]
+    build_runtime()
+    archive = bundle()
+    version = hashlib.sha256(archive).hexdigest()
+    request(manifest['leader'], '/v1/node-control', {'node_name': node_name, 'action': 'drain'})
+
+    def idle() -> bool:
+        with sqlite3.connect(f"file:{path.parent / 'leader.sqlite'}?mode=ro", uri=True) as database:
+            active = database.execute(
+                "SELECT COUNT(*) FROM runs WHERE node_name=? AND state IN ('running','stopping')",
+                (node_name,)).fetchone()[0]
+            partners = database.execute(
+                "SELECT COUNT(*) FROM node_reservations WHERE node_name=?", (node_name,)).fetchone()[0]
+        return active == 0 and partners == 0
+
+    try:
+        wait(idle, f'{node_name} to finish its existing leases', wait_seconds)
+    except Exception:
+        request(manifest['leader'], '/v1/node-control', {'node_name': node_name, 'action': 'resume'})
+        raise
+
+    # Leave this node drained on any replacement failure: a future retry can
+    # recover it, but the leader must never lease against a half-updated agent.
+    stop_owned_worker(host, worker)
+    replace_runtime(host, worker['root'], archive)
+    replacement = launch_worker(host, worker['root'], manifest['leader'],
+                                host == urlparse(manifest['leader']).hostname,
+                                version, private_network(manifest, host))
+    replacement['runtime_version'] = version
+    manifest['workers'][manifest['workers'].index(worker)] = replacement
+    save(path, manifest)
+
+    def healthy() -> bool:
+        status = request(manifest['leader'], '/v1/status')
+        return any(node['node_name'] == node_name and node.get('state') == 'healthy' and
+                   node.get('runtime_version') == version for node in status['nodes'])
+
+    wait(healthy, f'{node_name} upgraded registration', 60)
+    request(manifest['leader'], '/v1/node-control', {'node_name': node_name, 'action': 'resume'})
+    if all(item.get('runtime_version') == version or
+           item.get('command', '').split('--runtime-version ', 1)[-1].split()[0] == version
+           for item in manifest['workers']):
+        manifest['runtime_version'] = version
+        save(path, manifest)
+    print(json.dumps({'upgraded_host': host, 'runtime_version': version,
+                      'campaign_state': 'running', 'other_workers_preserved': len(manifest['workers']) - 1},
+                     indent=2))
+
+
 # Expand the table frontier while preserving previously submitted mathematical entries.
 def extend(arguments: argparse.Namespace, path: Path) -> None:
     """Submit up to limit new prime powers under max_visits, retaining old runs and settings."""
@@ -851,6 +908,10 @@ def main() -> int:
                         help='restart the owned leader (idle by default, or guarded live restart)')
     leader_upgrade.add_argument('--live', action='store_true',
                                 help='preserve active leases and running dispatch; refuse stale workers/leases')
+    rolling = commands.add_parser('upgrade-worker-rolling',
+                                  help='drain one node without stopping its active work, then upgrade it')
+    rolling.add_argument('--host', required=True)
+    rolling.add_argument('--wait-seconds', type=float, default=180)
     expansion = commands.add_parser('extend', help='add new prime powers without repeating existing entries')
     expansion.add_argument('--max-visits', type=int, default=30_000_000_000_000)
     expansion.add_argument('--limit', type=int, default=100)
@@ -879,6 +940,10 @@ def main() -> int:
                 upgrade_leader_live(path)
             else:
                 upgrade_leader(path)
+        elif arguments.action == 'upgrade-worker-rolling':
+            if not 0 < arguments.wait_seconds <= 3600:
+                raise ValueError('wait-seconds must be from 1 to 3600')
+            upgrade_worker_rolling(path, arguments.host, arguments.wait_seconds)
         elif arguments.action == 'extend':
             extend(arguments, path)
         elif arguments.action == 'ensure-feeder':

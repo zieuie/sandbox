@@ -824,7 +824,11 @@ def supervise_solver(
             except HTTPError as error:
                 if error.code == 409:
                     raise LeaseLost("resource usage rejected for stale lease") from error
-                raise
+                if error.code < 500:
+                    raise
+                if keeper is None:
+                    raise
+                keeper.check()
             except OSError:
                 if keeper is None:
                     raise
@@ -841,7 +845,11 @@ def supervise_solver(
         except HTTPError as error:
             if error.code == 409:
                 raise LeaseLost("progress rejected for stale lease") from error
-            raise
+            if error.code < 500:
+                raise
+            if keeper is None:
+                raise
+            keeper.check()
         except OSError:
             if keeper is None:
                 raise
@@ -876,7 +884,11 @@ def supervise_solver(
                         except HTTPError as error:
                             if error.code == 409:
                                 raise LeaseLost("resource usage rejected for stale lease") from error
-                            raise
+                            if error.code < 500:
+                                raise
+                            if keeper is None:
+                                raise
+                            keeper.check()
                         except OSError:
                             if keeper is None:
                                 raise
@@ -1156,10 +1168,22 @@ def run_job(
         with storage_transaction(storage_root, keeper.check):
             digest, path = store_blob(output, storage_root, keeper.check)
             keeper.check()
-            request_json(leader, "/v1/complete", {
-                **identity, "artifact_hash": digest, "artifact_size": path.stat().st_size,
-                "artifact_location": f"{storage_url.rstrip('/')}/blobs/{digest}",
-            })
+            completion = {**identity, "artifact_hash": digest, "artifact_size": path.stat().st_size,
+                          "artifact_location": f"{storage_url.rstrip('/')}/blobs/{digest}"}
+            while True:
+                keeper.check()
+                try:
+                    request_json(leader, "/v1/complete", completion)
+                    break
+                except HTTPError as error:
+                    if error.code == 409:
+                        raise LeaseLost("completion rejected for stale lease") from error
+                    if error.code < 500:
+                        raise
+                except OSError:
+                    pass
+                keeper.check()
+                time.sleep(min(control_seconds, 1.0))
         adapter.cleanup(specification, run_directory)
         discard = True
 

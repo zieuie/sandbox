@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS tile_bands (
 );
 """
 
-REUSE_BATCH = 128
+REUSE_BATCH = 32
 MAX_BAND_BYTES = 2 * 1024**3
 TILE_RETRY_LIMIT = 3
 TILE_RETRY_BASE_SECONDS = 30
@@ -242,7 +242,7 @@ def reuse_tiles(connection: sqlite3.Connection, parent: sqlite3.Row, now: float)
 
 
 RETIRE_SCAN_SECONDS = 120
-RETIRE_BATCH = 500
+RETIRE_BATCH = 100
 _ACTIVE_ROOT = "('waiting','queued','running','stopping','paused')"
 
 
@@ -308,6 +308,32 @@ def durable_tiles(connection: sqlite3.Connection, parent_run_id: str, now: float
         (parent_run_id, now - lease_seconds))}
 
 
+def retry_reconstruction(connection: sqlite3.Connection, run: sqlite3.Row,
+                         specification: dict[str, Any], now: float) -> dict[str, Any]:
+    """Requeue a failed root's reconstruction without making new tile rows or artifacts."""
+
+    if specification.get("program") != "dp_distributed" or run["parent_run_id"] is not None:
+        raise ValueError("only a distributed DP root can retry reconstruction")
+    if run["state"] != "failed":
+        raise ValueError("only a failed reconstruction can be retried")
+    total, complete = connection.execute(
+        "SELECT COUNT(*),SUM(child.state='complete') FROM distributed_tiles t "
+        "LEFT JOIN runs child ON child.run_id=t.child_run_id WHERE t.parent_run_id=?",
+        (run["run_id"],)).fetchone()
+    lease = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
+    if not total or complete != total or len(durable_tiles(connection, run["run_id"], now, lease)) != total:
+        raise ValueError("reconstruction retry requires every original tile to be complete and durable")
+    budget = dp_estimate(specification)["budget"]
+    connection.execute(
+        "UPDATE runs SET state='queued',control_state='running',node_name=NULL,lease_token=NULL,"
+        "lease_expires=NULL,finished=NULL,error=NULL,failure_kind=NULL,stop_requested=0,"
+        "engine_failures=0,progress_done=?,progress_total=?,progress_checkpoint_done=?,"
+        "progress_phase='reconstructing',progress_message='retrying from preserved tiles',"
+        "last_progress_at=? WHERE run_id=?",
+        (budget * budget, budget * budget, budget * budget, now, run["run_id"]))
+    return {"run_id": run["run_id"], "state": "queued", "retained_tiles": total}
+
+
 # The same cover as tiles.dependencies(), as grid coordinates only: building full tile
 # descriptors for every blocked tile dominated scheduling passes on large roots.
 def predecessor_coordinates(p: int, side: int, row: int, column: int):
@@ -323,7 +349,8 @@ def predecessor_coordinates(p: int, side: int, row: int, column: int):
 
 
 # Dispatch roots by creating only ready child leases; parent state contains no bulk arrays.
-def advance(connection: sqlite3.Connection, now: float) -> None:
+def advance(connection: sqlite3.Connection, now: float, max_roots: int | None = None,
+            parent_run_id: str | None = None) -> None:
     """Advance waiting DAGs inside the caller's transaction and queue reconstruction when durable."""
 
     # Reclaiming dead tiles schedules nothing, so it continues while dispatch is stopped.
@@ -331,7 +358,11 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
     campaign = connection.execute("SELECT value FROM settings WHERE key='campaign_state'").fetchone()[0]
     if campaign != "running":
         return
-    parents = connection.execute("SELECT * FROM runs WHERE state='waiting' ORDER BY priority DESC,estimated_seconds,created").fetchall()
+    parents = connection.execute(
+        "SELECT * FROM runs WHERE state='waiting' AND (? IS NULL OR run_id=?) "
+        "ORDER BY priority DESC,estimated_seconds,created",
+        (parent_run_id, parent_run_id)).fetchall()
+    eligible = []
     for parent in parents:
         specification = json.loads(parent["specification"])
         if specification.get("program") != "dp_distributed":
@@ -343,7 +374,18 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
             last = _last_scan.get(parent["run_id"])
             if last is not None and 0 <= now - last < min(MAX_SCAN_INTERVAL, count * count / FULL_SCAN_TILES):
                 continue
-            _last_scan[parent["run_id"]] = now
+        eligible.append(parent)
+    if max_roots is not None:
+        # Fairness across roots matters more than rescanning a high-priority
+        # blocked grid every second. Reconstruction still wins at lease time.
+        eligible.sort(key=lambda parent: (_last_scan.get(parent["run_id"], float("-inf")),
+                                          -parent["priority"], parent["created"]))
+        eligible = eligible[:max_roots]
+    for parent in eligible:
+        _last_scan[parent["run_id"]] = now
+        specification = json.loads(parent["specification"])
+        arguments = specification["arguments"]
+        p, r, side = arguments["p"], arguments["r"], int(arguments.get("tile_side", 4096))
         reuse_tiles(connection, parent, now)
         rows = connection.execute(
             "SELECT t.row,t.column,t.child_run_id,r.* FROM distributed_tiles t LEFT JOIN runs r ON r.run_id=t.child_run_id "

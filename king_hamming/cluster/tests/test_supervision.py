@@ -48,6 +48,45 @@ class SupervisionTests(unittest.TestCase):
         self.assertIs(classify(1, True, False, False), SolverOutcome.STOP_FAILURE)
         self.assertIs(classify(1, False, False, True), SolverOutcome.ENGINE_FAILURE)
 
+    def test_writer_contention_is_visible_in_health(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            health = leader.SchedulerHealth(30)
+            blocker = sqlite3.connect(database)
+            try:
+                blocker.execute("BEGIN IMMEDIATE")
+                with self.assertRaises(sqlite3.OperationalError):
+                    with leader.writer_session(database, "/v1/heartbeat", health, timeout=0):
+                        pass
+            finally:
+                blocker.rollback()
+                blocker.close()
+            snapshot = health.snapshot()
+            self.assertEqual(snapshot["status"], "contended")
+            self.assertEqual(snapshot["transactions"]["/v1/heartbeat"]["lock_errors"], 1)
+
+    def test_node_drain_blocks_new_leases_without_stopping_existing_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            handler.dispatch_post("/v1/register", {"node_name": "worker"})
+            first = handler.dispatch_post("/v1/enqueue", {"specification": {"program": "demo"}})
+            job = handler.dispatch_post("/v1/lease", {"node_name": "worker"})["job"]
+            handler.dispatch_post("/v1/node-control", {"node_name": "worker", "action": "drain"})
+            self.assertFalse(handler.dispatch_post("/v1/run-control", {
+                "run_id": first["run_id"], "lease_token": job["lease_token"],
+            })["stop_requested"])
+            self.assertIsNone(handler.dispatch_post("/v1/lease", {"node_name": "worker"})["job"])
+            with leader.connect(database) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT COUNT(*) FROM node_dispatch_pauses WHERE node_name='worker'").fetchone()[0], 1)
+            handler.dispatch_post("/v1/node-control", {"node_name": "worker", "action": "resume"})
+            with leader.connect(database) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT COUNT(*) FROM node_dispatch_pauses WHERE node_name='worker'").fetchone()[0], 0)
+
     def test_scheduler_retries_database_lock(self) -> None:
         """A transient writer lock must not permanently stop queue advancement."""
 

@@ -20,6 +20,7 @@ import sys
 import tarfile
 import threading
 import time
+from urllib.error import HTTPError
 
 from agent import request_json
 from blob_store import fetch_blob, file_digest, storage_transaction, store_blob
@@ -70,6 +71,27 @@ def stop(signum, frame) -> None:
 
     global STOP
     STOP = True
+
+
+def leader_request(arguments, route: str, body: dict) -> dict:
+    """Wait out transient leader congestion while the agent independently renews the lease."""
+
+    delay = 0.5
+    while not STOP:
+        try:
+            return request_json(arguments.leader, route, body)
+        except HTTPError as error:
+            if error.code == 409:
+                raise InterruptedError("lease was reassigned") from error
+            if error.code < 500:
+                raise
+        except OSError:
+            pass
+        deadline = time.monotonic() + delay
+        while not STOP and time.monotonic() < deadline:
+            time.sleep(min(0.2, deadline - time.monotonic()))
+        delay = min(8.0, delay * 2)
+    raise InterruptedError("leader request stopped")
 
 
 # A format-2 packet names its field, rectangle and native layout in its header.
@@ -127,7 +149,7 @@ def descriptions(arguments, **extra) -> list[dict]:
     while True:
         if STOP:
             raise InterruptedError("dependency request stopped")
-        response=request_json(arguments.leader,"/v1/tile-input",{"run_id":arguments.run_id,"lease_token":arguments.lease_token,"offset":offset,**extra})
+        response=leader_request(arguments,"/v1/tile-input",{"run_id":arguments.run_id,"lease_token":arguments.lease_token,"offset":offset,**extra})
         records.extend(response["records"])
         if response["next"] is None:
             return records
@@ -170,7 +192,7 @@ def fetch(record: dict, arguments, cache: Path) -> Path:
         if STOP:
             raise InterruptedError("tile transfer stopped")
         if time.monotonic()-last_check>=2:
-            response=request_json(arguments.leader,"/v1/run-control",{"run_id":arguments.run_id,"lease_token":arguments.lease_token})
+            response=leader_request(arguments,"/v1/run-control",{"run_id":arguments.run_id,"lease_token":arguments.lease_token})
             last_check=time.monotonic()
             if response["stop_requested"]:
                 raise InterruptedError("campaign stopped")

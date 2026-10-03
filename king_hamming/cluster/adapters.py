@@ -67,6 +67,10 @@ class SolverAdapter:
         """Return the durable state and progress phase for a paused run being resumed."""
         return 'queued', 'queued'
 
+    def retry_reconstruction(self, connection, run, specification, now):
+        """Requeue a failed reconstruction without rebuilding immutable child work."""
+        raise ValueError('solver does not support reconstruction-only retry')
+
     def advance(self, connection, now):
         """Advance adapter workflows inside the leader transaction; return no value."""
 

@@ -215,7 +215,7 @@ class DPAdapter(SolverAdapter):
         """Create the DP DAG when requested; return the root's initial state."""
         if specification['program']=='dp_distributed':
             distributed.create(connection, run_id, specification)
-            distributed.advance(connection, now)
+            distributed.advance(connection, now, parent_run_id=run_id)
             return 'waiting'
         return 'queued'
 
@@ -225,9 +225,13 @@ class DPAdapter(SolverAdapter):
             return 'waiting', 'tiles'
         return super().resume_transition(connection, run, specification, now)
 
+    def retry_reconstruction(self, connection, run, specification, now):
+        """Retry a failed parent only when every original tile is still durable."""
+        return distributed.retry_reconstruction(connection, run, specification, now)
+
     def advance(self, connection, now):
         """Advance DP tile dependencies using the leader transaction."""
-        distributed.advance(connection, now)
+        distributed.advance(connection, now, max_roots=1)
 
     def inputs(self, connection, run, request, now):
         """Return only predecessor descriptors authorized for this leased DP task."""
