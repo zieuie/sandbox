@@ -20,3 +20,7 @@
 deployments/
 experiments/
 matching_solver/tests/shard_pool_unit
+
+# Local campaign safety copies and recoverable editor state are not source.
+/cluster/backups/*.tar
+*.swp
