@@ -1,8 +1,9 @@
 # Continuous household campaign
 
-The unified campaign owns DP and distributed matching on one leader and one
-ten-agent pool: workers `.101` through `.108`, Merlin (`.151`) with its
-leader physical core reserved, and Pellinore (`.152`) with 12 compute CPUs.
+The unified campaign owns DP and distributed matching on one leader and an
+eleven-agent pool: workers `.101` through `.108`, Merlin (`.151`) with its
+leader physical core reserved, Pellinore (`.152`) with 12 compute CPUs, and
+Gawain (`.156`) on Wi-Fi.
 Its retained state is
 `cluster/deployments/continuous-campaign` and its leader is port `8061`.
 
@@ -49,6 +50,43 @@ for task in /proc/PID/task/*; do grep -H Cpus_allowed_list "$task/status"; done
 `cluster/continuous_campaign.py` remains a compatibility command for retained
 manifests and older operator notes; new automation should use the campaign
 module above.
+
+## Wired data network
+
+The eight `.101`–`.108` workers and Merlin have permanent `10.203.0.X/24`
+addresses on the same 1 Gb/s switch (`X` is their Wi-Fi address suffix).
+Their wired NetworkManager profiles have no gateway or DNS; Wi-Fi remains the
+default route, SSH fallback, and leader control address. `.152` and `.156` are
+Wi-Fi-only. `.106` has a separate `King Hamming wired` profile so its preexisting
+`evermore-rescue` profile is untouched; the other eight use `Wired connection 1`.
+
+Each wired agent advertises both its public `192.168.4.X` blob URL and a
+`10.203.0.X` URL in private group `kh-switch`. A worker in that group tries
+same-group Ethernet sources first, then public Wi-Fi URLs; a Wi-Fi-only worker
+never receives the isolated Ethernet URL. When at least three healthy wired
+nodes have disk capacity, a Wi-Fi agent is not assigned a copy of an artifact
+already held on the wired network. If wired capacity drops below the artifact's
+replica target, cross-group copying remains possible. Matching and DP compute
+leases may still run on `.152` or `.156`.
+
+After a deliberate full-agent quiesce, use `resume-workers` to guard stopped
+dispatch, redeploy the current runtime, recover a verified-absent leader if
+necessary, and restart only missing agents on their *existing* blob roots. The
+leader revalidates retained blobs and republishes their public URLs; do not
+rewrite `replicas` in SQLite by hand. To change the private subnet mapping,
+first verify each address on its host, then while idle/stopped run:
+
+```sh
+python3 king_hamming/dp_solver/launch_dp.py \
+  --state king_hamming/cluster/deployments/continuous-campaign \
+  set-storage-addresses --group kh-switch 192.168.4.101=10.203.0.101
+python3 king_hamming/dp_solver/launch_dp.py \
+  --state king_hamming/cluster/deployments/continuous-campaign resume-workers
+```
+
+The manifest already records the full nine-host mapping. `resume-workers`
+leaves dispatch stopped; resume the campaign and its feeder separately after
+checking all agent registrations and storage validation.
 
 The feeder derives its ready-tile target from the current healthy compute count
 (never below the configured floor), and can admit additional independent roots,

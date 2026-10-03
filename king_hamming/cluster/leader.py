@@ -28,7 +28,7 @@ import adapters
 import gpus
 from resources import ResourceRequest, fits as resource_fits, normalized_slots
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -349,6 +349,10 @@ def initialize(
             connection.execute("ALTER TABLE nodes ADD COLUMN storage_free_bytes INTEGER NOT NULL DEFAULT 0")
         if "gpus_json" not in node_columns:
             connection.execute("ALTER TABLE nodes ADD COLUMN gpus_json TEXT NOT NULL DEFAULT '[]'")
+        if "private_address" not in node_columns:
+            connection.execute("ALTER TABLE nodes ADD COLUMN private_address TEXT NOT NULL DEFAULT ''")
+        if "private_group" not in node_columns:
+            connection.execute("ALTER TABLE nodes ADD COLUMN private_group TEXT NOT NULL DEFAULT ''")
         connection.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('campaign_state', 'running')"
         )
@@ -760,16 +764,19 @@ def make_handler(
                         request.get("cpu_set", existing["cpu_set"] if existing is not None else ""),
                     )
                     connection.execute(
-                        "INSERT INTO nodes(node_name,address,cpu_set,storage_root,last_heartbeat,state,session_id,compute_enabled,memory_bytes,runtime_version,physical_core_count,storage_generation,storage_validation_mode,slots_json,storage_free_bytes,gpus_json) "
-                        "VALUES(?,?,?,?,?,'healthy',?,?,?,?,?,?,?,?,?,?) ON CONFLICT(node_name) DO UPDATE SET "
-                        "address=excluded.address,cpu_set=excluded.cpu_set,storage_root=excluded.storage_root, "
+                        "INSERT INTO nodes(node_name,address,private_address,private_group,cpu_set,storage_root,last_heartbeat,state,session_id,compute_enabled,memory_bytes,runtime_version,physical_core_count,storage_generation,storage_validation_mode,slots_json,storage_free_bytes,gpus_json) "
+                        "VALUES(?,?,?,?,?,?,?,'healthy',?,?,?,?,?,?,?,?,?,?) ON CONFLICT(node_name) DO UPDATE SET "
+                        "address=excluded.address,private_address=excluded.private_address,"
+                        "private_group=excluded.private_group,cpu_set=excluded.cpu_set,storage_root=excluded.storage_root, "
                         "last_heartbeat=excluded.last_heartbeat,state='healthy',session_id=excluded.session_id, "
                         "compute_enabled=excluded.compute_enabled,memory_bytes=excluded.memory_bytes,"
                         "runtime_version=excluded.runtime_version,physical_core_count=excluded.physical_core_count,"
                         "storage_generation=excluded.storage_generation,storage_validation_mode=excluded.storage_validation_mode,"
                         "slots_json=excluded.slots_json,storage_free_bytes=excluded.storage_free_bytes,"
                         "gpus_json=excluded.gpus_json",
-                        (request["node_name"], request.get("address", ""), request.get("cpu_set", ""),
+                        (request["node_name"], request.get("address", ""),
+                         request.get("private_address", ""), request.get("private_group", ""),
+                         request.get("cpu_set", ""),
                          request.get("storage_root", ""), now, session_id,
                          int(not request.get("storage_only", False)),
                          max(0, int(request.get(
@@ -887,7 +894,8 @@ def make_handler(
                     grace = max(lease_seconds, retention.number(
                         connection, "replica_grace_seconds", retention.DEFAULT_REPLICA_GRACE_SECONDS))
                     return {"replication": replication.assign(connection, node, now,
-                                                               lease_seconds, grace)}
+                                                               lease_seconds, grace,
+                                                               disk_floor(connection))}
 
                 if route in {"/v1/replication-renew", "/v1/replication-release"}:
                     node = recovery.require_node(connection, request)

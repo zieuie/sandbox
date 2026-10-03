@@ -63,7 +63,7 @@ def build_runtime() -> None:
 
 
 def launch_worker(host: str, directory: str, leader: str, leader_node: bool = False,
-                  runtime_version: str = "") -> dict:
+                  runtime_version: str = "", private_network: dict | None = None) -> dict:
     """Start one agent on host; return its exact command and process identity."""
 
     code = '''import json,pathlib,shlex,socket,subprocess,sys
@@ -76,17 +76,51 @@ arguments=[sys.executable,str(root/'cluster'/'agent.py'),'run','--leader',sys.ar
     '--work-root',str(root/'work'),'--storage-root',str(root/'blobs'),
     '--storage-listen',f'0.0.0.0:{port}','--storage-url',f'http://{sys.argv[3]}:{port}',
     '--runtime-version',sys.argv[5]]
+if sys.argv[6]:
+    arguments.extend(['--storage-private-url',f'http://{sys.argv[6]}:{port}',
+                      '--storage-private-group',sys.argv[7]])
 if sys.argv[4]=='1':
     arguments.append('--leader-node')
 with (root/'agent.log').open('ab') as log:
     process=subprocess.Popen(arguments,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
 start=pathlib.Path(f'/proc/{process.pid}/stat').read_text().split()[21]
-record={'host':sys.argv[3],'root':str(root),'pid':process.pid,'start':start,'port':port,'command':shlex.join(arguments)}
+record={'host':sys.argv[3],'private_network':{'address':sys.argv[6],'group':sys.argv[7]} if sys.argv[6] else None,
+        'root':str(root),'pid':process.pid,'start':start,'port':port,'command':shlex.join(arguments)}
 (root/'process.json').write_text(json.dumps(record,indent=2)+'\\n')
 print(json.dumps(record))
 '''
     return remote(host, code, [directory, leader, host,
-                               '1' if leader_node else '0', runtime_version])
+                               '1' if leader_node else '0', runtime_version,
+                               (private_network or {}).get('address', ''),
+                               (private_network or {}).get('group', '')])
+
+
+def private_network(manifest: dict, host: str) -> dict | None:
+    """Return an optional same-LAN data endpoint without replacing the fallback URL."""
+
+    return manifest.get('private_networks', {}).get(host)
+
+
+def set_storage_addresses(path: Path, group: str, assignments: list[str]) -> None:
+    """Record same-LAN data IPs without changing Wi-Fi SSH, leader, or fallback URLs."""
+
+    manifest = json.loads(path.read_text())
+    if not group or len(group) > 64 or not all(c.isalnum() or c in '-_' for c in group):
+        raise ValueError('network group must be a short name containing letters, digits, - or _')
+    known = {worker['host'] for worker in manifest['workers']}
+    mapping = dict(manifest.get('private_networks', {}))
+    for assignment in assignments:
+        host, separator, address = assignment.partition('=')
+        if not separator or host not in known:
+            raise ValueError(f'expected a retained worker HOST=IP: {assignment}')
+        ipaddress.ip_address(address)
+        mapping[host] = {'address': address, 'group': group}
+    if len({item['address'] for item in mapping.values()}) != len(mapping):
+        raise ValueError('private data addresses must be unique')
+    stop_dispatch_if_idle(path.parent / 'leader.sqlite')
+    manifest['private_networks'] = mapping
+    save(path, manifest)
+    print(json.dumps({'private_networks': mapping, 'campaign_state': 'stopped'}, indent=2))
 
 
 # Check all target machines before creating a campaign or starting any computation.
@@ -156,7 +190,7 @@ def start(arguments: argparse.Namespace, path: Path) -> None:
         remote(host, "import json,pathlib,sys; pathlib.Path(sys.argv[1]).parent.mkdir(parents=True,exist_ok=True); print(json.dumps({'ok':True}))", [directory])
         deploy(host, directory, archive)
         record = launch_worker(host, directory, base, host == arguments.address,
-                               runtime_version)
+                               runtime_version, private_network(manifest, host))
         manifest['workers'].append(record)
         save(path, manifest)
     expected = {'dp-'+host.rsplit('.',1)[1] for host in arguments.hosts}
@@ -202,7 +236,7 @@ def add_workers(arguments: argparse.Namespace, path: Path) -> None:
         leader_host = urlparse(manifest['leader']).hostname
         manifest['workers'].append(launch_worker(
             host, directory, manifest['leader'], host == leader_host,
-            runtime_version))
+            runtime_version, private_network(manifest, host)))
         save(path, manifest)
     print(json.dumps({'added_workers': len(hosts), 'total_workers': len(manifest['workers']),
                       'manifest': str(path)}, indent=2))
@@ -286,6 +320,46 @@ def restart_owned_leader(manifest: dict, manifest_path: Path) -> None:
             return False
 
     wait(healthy, "upgraded leader startup", 30)
+
+
+def start_absent_leader(manifest: dict, manifest_path: Path) -> None:
+    """Recover a dead retained leader without ever creating a duplicate instance."""
+
+    database = manifest_path.parent / 'leader.sqlite'
+    record = manifest.get('leader_process') or {}
+    command = shlex.split(str(record.get('command', '')))
+    program = str(ROOT / 'leader.py')
+    if (program not in command or str(database) not in command or
+            not database.is_file() or Path(f"/proc/{int(record.get('pid', 0))}").exists()):
+        raise RuntimeError('refusing to recover an unverified or still-present leader')
+    for process in Path('/proc').iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            actual = (process / 'cmdline').read_bytes().split(b'\0')
+        except OSError:
+            continue
+        if program.encode() in actual and str(database).encode() in actual:
+            raise RuntimeError(f'an unrecorded leader is already running as PID {process.name}')
+    with (manifest_path.parent / 'leader.log').open('ab') as log:
+        replacement = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                       stdout=log, stderr=log, start_new_session=True)
+    manifest['leader_process'] = {
+        'pid': replacement.pid,
+        'start': Path(f'/proc/{replacement.pid}/stat').read_text().split()[21],
+        'command': shlex.join(command),
+    }
+    save(manifest_path, manifest)
+
+    def healthy() -> bool:
+        if replacement.poll() is not None:
+            raise RuntimeError('recovered leader exited during startup')
+        try:
+            return bool(request(manifest['leader'], '/v1/health').get('ok'))
+        except OSError:
+            return False
+
+    wait(healthy, 'recovered leader startup', 30)
 
 
 def validate_owned_feeder(state: Path) -> tuple[dict, list[str]] | None:
@@ -393,6 +467,88 @@ print(json.dumps({'stopped':pid}))
     remote(host, code, [record['root'], str(record['pid']), str(record['start'])])
 
 
+def resume_workers(path: Path) -> None:
+    """Deploy current code and start absent retained agents without replacing blobs."""
+
+    stop_dispatch_if_idle(path.parent / 'leader.sqlite')
+    manifest = json.loads(path.read_text())
+    leader_absent = not Path(f"/proc/{int(manifest['leader_process']['pid'])}").exists()
+    if not leader_absent:
+        validate_owned_leader(manifest, path.parent / 'leader.sqlite')
+    old_workers = list(manifest['workers'])
+    code = '''import json,pathlib,subprocess,sys
+root=pathlib.Path(sys.argv[1]); expected=sys.argv[2]
+if not root.is_dir() or not (root/'blobs').is_dir():
+    raise RuntimeError('retained worker root or blob storage is missing')
+addresses={entry['local'] for interface in json.loads(subprocess.check_output(['ip','-j','address']))
+           for entry in interface.get('addr_info',[]) if entry.get('family')=='inet'}
+if expected not in addresses:
+    raise RuntimeError('configured data address is not assigned on this host: '+expected)
+program=str(root/'cluster'/'agent.py').encode()
+running=[]
+for proc in pathlib.Path('/proc').iterdir():
+    if not proc.name.isdecimal():continue
+    try:
+        command=(proc/'cmdline').read_bytes().split(b'\\0')
+        if program in command:
+            running.append({'pid':int(proc.name),'start':(proc/'stat').read_text().split()[21],
+                            'command':b' '.join(command).decode(errors='replace')})
+    except (OSError,IndexError):pass
+print(json.dumps({'running':running}))
+'''
+    checks = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(old_workers)) as pool:
+        futures = {pool.submit(remote, worker['host'], code,
+                               [worker['root'], private_network(manifest, worker['host'])['address']
+                                if private_network(manifest, worker['host']) else worker['host']]): worker
+                   for worker in old_workers}
+        for future in concurrent.futures.as_completed(futures):
+            worker = futures[future]
+            checks[worker['host']] = future.result()
+    for worker in old_workers:
+        running = checks[worker['host']]['running']
+        if running and (len(running) != 1 or running[0]['pid'] != worker['pid'] or
+                        running[0]['start'] != str(worker['start']) or
+                        worker.get('private_network') != private_network(manifest, worker['host'])):
+            raise RuntimeError(f"unrecorded or differently configured agent on {worker['host']}")
+    build_runtime()
+    archive = bundle()
+    runtime_version = hashlib.sha256(archive).hexdigest()
+    if any(checks[worker['host']]['running'] and
+           worker.get('command', '').split('--runtime-version ', 1)[-1].split()[0] != runtime_version
+           for worker in old_workers):
+        raise RuntimeError('a running retained agent has a different runtime version')
+    if leader_absent:
+        start_absent_leader(manifest, path)
+    else:
+        restart_owned_leader(manifest, path)
+    leader_host = urlparse(manifest['leader']).hostname
+    resumed = []
+    for index, worker in enumerate(old_workers):
+        running = checks[worker['host']]['running']
+        if running:
+            continue
+        replace_runtime(worker['host'], worker['root'], archive)
+        replacement = launch_worker(worker['host'], worker['root'], manifest['leader'],
+                                    worker['host'] == leader_host, runtime_version,
+                                    private_network(manifest, worker['host']))
+        manifest['workers'][index] = replacement
+        save(path, manifest)
+        resumed.append(worker['host'])
+    expected = {'dp-' + worker['host'].rsplit('.', 1)[1] for worker in old_workers}
+    def registered():
+        status = request(manifest['leader'], '/v1/status')
+        healthy = {node['node_name'] for node in status['nodes']
+                   if node['state'] == 'healthy' and node['runtime_version'] == runtime_version}
+        return status if expected <= healthy else None
+    status = wait(registered, 'retained worker registration', 60)
+    manifest['runtime_version'] = runtime_version
+    manifest['state'] = 'stopped-after-worker-resume'
+    save(path, manifest)
+    print(json.dumps({'resumed_hosts': resumed, 'campaign_state': status['campaign_state'],
+                      'workers': len(expected)}, indent=2))
+
+
 def stop_dispatch_if_idle(database_path: Path) -> None:
     """Atomically latch dispatch stopped only when no solver or tile is active."""
 
@@ -464,7 +620,8 @@ def upgrade_workers(path: Path) -> None:
             replace_runtime(worker['host'], worker['root'], archive)
             replacement = launch_worker(
                 worker['host'], worker['root'], manifest['leader'],
-                worker['host'] == leader_host, runtime_version)
+                worker['host'] == leader_host, runtime_version,
+                private_network(manifest, worker['host']))
             replacements.append(replacement)
             report["workers"] = replacements
             manifest['workers'] = [*replacements, *old_workers[len(replacements):]]
@@ -639,6 +796,12 @@ def main() -> int:
     attach.add_argument('--hosts', nargs='+', required=True)
     commands.add_parser('upgrade-workers',
                         help='replace idle worker runtimes and leave dispatch stopped')
+    commands.add_parser('resume-workers',
+                        help='start absent retained agents after a quiesce, preserving their storage')
+    network = commands.add_parser('set-storage-addresses',
+                                  help='record optional same-LAN blob addresses for retained agents')
+    network.add_argument('--group', required=True)
+    network.add_argument('assignments', nargs='+', metavar='HOST=IP')
     commands.add_parser('upgrade-leader',
                         help='restart the owned idle leader and leave dispatch stopped')
     expansion = commands.add_parser('extend', help='add new prime powers without repeating existing entries')
@@ -660,6 +823,10 @@ def main() -> int:
             add_workers(arguments, path)
         elif arguments.action == 'upgrade-workers':
             upgrade_workers(path)
+        elif arguments.action == 'resume-workers':
+            resume_workers(path)
+        elif arguments.action == 'set-storage-addresses':
+            set_storage_addresses(path, arguments.group, arguments.assignments)
         elif arguments.action == 'upgrade-leader':
             upgrade_leader(path)
         elif arguments.action == 'extend':

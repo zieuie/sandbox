@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 import uuid
 
+import topology
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS replica_transfers (
@@ -28,7 +30,8 @@ def initialize(connection: sqlite3.Connection) -> None:
 
 
 def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
-           lease_seconds: float, grace_seconds: float) -> dict | None:
+           lease_seconds: float, grace_seconds: float,
+           disk_floor_bytes: int = 0) -> dict | None:
     """Reserve one needed transfer; unblock active DP tiles before background copies.
 
     At most one node may fetch an artifact at a time. The leader's surrounding
@@ -45,7 +48,7 @@ def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
     # their children avoids evaluating JSON and replica counts for every old,
     # retired artifact in the database on each worker poll.
     row = connection.execute(
-        "SELECT a.artifact_hash,a.size FROM runs parent "
+        "SELECT a.artifact_hash,a.size,a.target_replicas FROM runs parent "
         "JOIN runs child ON child.parent_run_id=parent.run_id AND child.state='complete' "
         "JOIN artifacts a ON a.artifact_hash=child.artifact_hash "
         "WHERE parent.state='waiting' "
@@ -64,7 +67,7 @@ def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
         # Background work starts from indexed replicas, never from the many
         # retained artifact rows whose bytes have intentionally been retired.
         row = connection.execute(
-            "SELECT a.artifact_hash,a.size FROM replicas source "
+            "SELECT a.artifact_hash,a.size,a.target_replicas FROM replicas source "
             "JOIN nodes sender ON sender.node_name=source.node_name "
             "JOIN artifacts a ON a.artifact_hash=source.artifact_hash "
             "WHERE sender.last_heartbeat>? "
@@ -81,11 +84,25 @@ def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
         ).fetchone()
     if row is None:
         return None
-    locations = [record[0] for record in connection.execute(
-        "SELECT r.location FROM replicas r JOIN nodes n USING(node_name) "
-        "WHERE r.artifact_hash=? AND n.last_heartbeat>? ORDER BY n.node_name",
+    # An isolated Wi-Fi agent must not claim a copy that three healthy members
+    # of the producer's private LAN could keep entirely on that faster LAN.
+    # If that LAN loses capacity, cross-group replication becomes eligible again.
+    source_groups = [record[0] for record in connection.execute(
+        "SELECT DISTINCT n.private_group FROM replicas r JOIN nodes n USING(node_name) "
+        "WHERE r.artifact_hash=? AND n.private_group<>'' AND n.last_heartbeat>?",
         (row["artifact_hash"], now - lease_seconds),
     )]
+    if source_groups and node["private_group"] not in source_groups:
+        for group in source_groups:
+            available = connection.execute(
+                "SELECT COUNT(*) FROM nodes WHERE private_group=? AND last_heartbeat>? "
+                "AND (storage_free_bytes<0 OR storage_free_bytes>=?)",
+                (group, now - lease_seconds, disk_floor_bytes),
+            ).fetchone()[0]
+            if available >= row["target_replicas"]:
+                return None
+    locations = topology.locations(connection, row["artifact_hash"],
+                                   node["node_name"], now - lease_seconds)
     if not locations:
         return None
     token = str(uuid.uuid4())

@@ -15,6 +15,7 @@ from typing import Any
 
 from blob_store import valid_digest
 import retention as retention_module
+import topology
 from common import calculation_id, canonical_json
 from dp_solver.scheduling import dp_estimate
 from dp_solver.tiles import BAND_KINDS, band_kind, dependencies, memory_bytes, tile
@@ -87,22 +88,21 @@ def create(connection: sqlite3.Connection, run_id: str, specification: dict[str,
 
 
 # Only live complete artifact replicas establish an available predecessor.
-def artifact_record(connection: sqlite3.Connection, row: sqlite3.Row, now: float) -> dict[str, Any] | None:
+def artifact_record(connection: sqlite3.Connection, row: sqlite3.Row, now: float,
+                    requester: str | None = None) -> dict[str, Any] | None:
     """Return row's artifact descriptor with live sources, or None if it is not complete."""
 
     if row["state"] != "complete" or not row["artifact_hash"]:
         return None
     deadline = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
-    sources = [record[0] for record in connection.execute(
-        "SELECT r.location FROM replicas r JOIN nodes n USING(node_name) WHERE r.artifact_hash=? AND n.last_heartbeat>? ORDER BY node_name",
-        (row["artifact_hash"], now-deadline),
-    )]
+    sources = topology.locations(connection, row["artifact_hash"], requester, now-deadline)
     size = connection.execute("SELECT size FROM artifacts WHERE artifact_hash=?", (row["artifact_hash"],)).fetchone()[0]
     return {"sha256": row["artifact_hash"], "size": size, "locations": sources}
 
 
 # A band is addressed by the packet it was cut from, so reused tiles keep their bands for free.
-def band_record(connection: sqlite3.Connection, packet_hash: str, kind: str, now: float) -> dict[str, Any] | None:
+def band_record(connection: sqlite3.Connection, packet_hash: str, kind: str, now: float,
+                requester: str | None = None) -> dict[str, Any] | None:
     """Return kind's band descriptor for packet_hash with live sources, or None if none is available."""
 
     row = connection.execute("SELECT band_hash FROM tile_bands WHERE packet_hash=? AND kind=?",
@@ -110,10 +110,7 @@ def band_record(connection: sqlite3.Connection, packet_hash: str, kind: str, now
     if row is None:
         return None
     deadline = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
-    sources = [record[0] for record in connection.execute(
-        "SELECT r.location FROM replicas r JOIN nodes n USING(node_name) WHERE r.artifact_hash=? AND n.last_heartbeat>? ORDER BY node_name",
-        (row["band_hash"], now-deadline),
-    )]
+    sources = topology.locations(connection, row["band_hash"], requester, now-deadline)
     size = connection.execute("SELECT size FROM artifacts WHERE artifact_hash=?", (row["band_hash"],)).fetchone()
     if not sources or size is None or size[0] is None:
         return None
@@ -451,13 +448,13 @@ def inputs(connection: sqlite3.Connection, run: sqlite3.Row, request: dict[str, 
     for target in wanted[offset:offset+64]:
         row = connection.execute("SELECT r.* FROM distributed_tiles t JOIN runs r ON r.run_id=t.child_run_id WHERE t.parent_run_id=? AND t.row=? AND t.column=?",
                                  (parent,target.row,target.column)).fetchone()
-        descriptor = None if row is None else artifact_record(connection,row,now)
+        descriptor = None if row is None else artifact_record(connection,row,now,run["node_name"])
         if not descriptor or not descriptor["locations"]:
             raise ValueError("tile dependency has no live complete artifact")
         record = {"row":target.row,"column":target.column,**descriptor}
         if program == "dp_tile":
             # The whole packet stays in the record: it is the fallback for any band problem.
-            band = band_record(connection, descriptor["sha256"], band_kind(tile(arguments["p"],arguments["r"],arguments["tile_side"],arguments["row"],arguments["column"]), target), now)
+            band = band_record(connection, descriptor["sha256"], band_kind(tile(arguments["p"],arguments["r"],arguments["tile_side"],arguments["row"],arguments["column"]), target), now, run["node_name"])
             if band is not None:
                 record["band"] = band
         records.append(record)

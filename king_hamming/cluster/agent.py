@@ -492,7 +492,9 @@ def bad_blob_reporter(
         """Map location to a registered peer; None denotes this agent's own corrupt cache."""
 
         source = identity.get("node_name") if location is None else next(
-            (peer["node_name"] for peer in peers if location == f"{peer['address'].rstrip('/')}/blobs/{digest}"), None,
+            (peer["node_name"] for peer in peers
+             if any(location == f"{base.rstrip('/')}/blobs/{digest}"
+                    for base in (peer.get("address"), peer.get("private_address")) if base)), None,
         )
 
         if source is None:
@@ -1204,6 +1206,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--storage-root", type=Path, default=Path("state/blobs"))
     run.add_argument("--storage-listen", default="0.0.0.0:8042", metavar="HOST:PORT")
     run.add_argument("--storage-url", default="http://127.0.0.1:8042")
+    run.add_argument("--storage-private-url", default="",
+                     help="optional faster URL reachable by peers in --storage-private-group")
+    run.add_argument("--storage-private-group", default="",
+                     help="name of the shared private data network")
     run.add_argument("--runtime-version", default="",
                      help="SHA-256 identity of the deployed runtime bundle")
     run.add_argument("--poll-seconds", type=float, default=2.0)
@@ -1271,9 +1277,13 @@ def main() -> int:
 
     arguments.storage_root.mkdir(parents=True, exist_ok=True)
     arguments.work_root.mkdir(parents=True, exist_ok=True)
+    if bool(arguments.storage_private_url) != bool(arguments.storage_private_group):
+        parser.error("--storage-private-url and --storage-private-group must be supplied together")
     node_record = {
         "node_name": arguments.name,
         "address": arguments.storage_url,
+        "private_address": arguments.storage_private_url,
+        "private_group": arguments.storage_private_group,
         "cpu_set": ",".join(str(cpu) for cpu in cpus),
         "storage_root": str(arguments.storage_root.resolve()),
         "session_id": str(uuid.uuid4()),
