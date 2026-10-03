@@ -93,7 +93,7 @@ records them, see "Measuring").
    **Expected value.** With bands, the left neighbour's `right` band is about a
    third of a tile's already small input (0.46 of 1.47 MiB in the example above),
    so affinity now saves well under 1% of the original traffic. It is cheap, and
-   it helps most when each tile has few copies (CAMPAIGN_NOTES item 20), but the
+   it helps most when each tile has few copies (CAMPAIGN_NOTES item 23), but the
    measurement below decides whether it earns its keep.
 
 ## Measuring
