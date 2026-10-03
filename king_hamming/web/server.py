@@ -25,12 +25,14 @@ import socket
 import sys
 import threading
 import time
+from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from snapshot import ROOT, Snapshots  # first: sets up the import path
+from snapshot import HOST_NAMES, ROOT, Snapshots  # first: sets up the import path
 from audit import Audit  # noqa: E402
 from auth import DEFAULT_STATE, ROLES, SESSION_SECONDS, Auth, check_password  # noqa: E402
 from commands import CommandError, CommandService, Context  # noqa: E402
+import disk  # noqa: E402
 from jobs import Jobs, git_state  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -73,6 +75,7 @@ MAX_BODY = 64 * 1024
 MAX_CONNECTIONS = 64
 REQUEST_TIMEOUT = 30          # seconds a connection may sit idle (defeats slow-drip connections)
 PASSWORD_CHECKS = threading.BoundedSemaphore(4)  # each scrypt check costs ~80 ms and 32 MiB
+LOCAL_HOST = "192.168.4.151"  # this machine (merlin/uther): measured directly, not over SSH
 SAFE_PATH = re.compile(r"/(?!/)[A-Za-z0-9._~!$&'()*+,;=:@%/#?-]*")
 
 
@@ -82,6 +85,7 @@ class Config:
     auth: Auth
     audit: Audit
     commands: CommandService | None = None
+    disk: Any = None               # disk.DiskMonitor, or None when disk measurement is off
     trust_proxy: bool = False      # honour CF-Connecting-IP / X-Forwarded-* from a loopback proxy
     secure_cookies: bool = False   # always mark the cookie Secure (otherwise only on proxied HTTPS)
     trusted_proxies: tuple = dataclass_field(default_factory=tuple)  # further proxy addresses to trust
@@ -341,6 +345,7 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
                     "/api/login": self.post_login,
                     "/api/logout": self.post_logout,
                     "/api/refresh": self.post_refresh,
+                    "/api/disk/measure": self.post_disk_measure,
                     "/api/reauth": self.post_reauth,
                     "/api/password": self.post_password,
                     "/api/command/preview": self.post_command_preview,
@@ -387,6 +392,17 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
         def post_refresh(self) -> None:
             self.authorized()
             self.send_snapshot(force=True)
+
+        def post_disk_measure(self) -> None:
+            session, _ = self.operator()
+            if config.disk is None:
+                raise Reject(HTTPStatus.NOT_FOUND, "disk measurement is not enabled")
+            answer = config.disk.request()
+            audit.record("disk-measure", session["user"], self.address(),
+                         "started" if answer["started"] else answer["reason"])
+            if not answer["started"] and "retry_after" in answer:
+                raise Reject(HTTPStatus.TOO_MANY_REQUESTS, answer["reason"], retry_after=answer["retry_after"])
+            self.send_json(HTTPStatus.OK, answer)
 
         def post_reauth(self) -> None:
             session = self.authorized()
@@ -512,6 +528,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="the live deployment shown in the fleet and tile views")
     serve.add_argument("--listen", type=parse_listen, default=("127.0.0.1", 8070),
                        help="HOST:PORT (default 127.0.0.1:8070)")
+    serve.add_argument("--disk-interval", type=float, default=disk.DEFAULT_INTERVAL, metavar="SECONDS",
+                       help="how often to measure every machine's disk over SSH (0 turns it off; default 1800)")
     serve.add_argument("--ttl", type=float, default=15.0,
                        help="seconds a snapshot is reused before rebuilding (default 15)")
     serve.add_argument("--trust-proxy", action="store_true",
@@ -612,7 +630,16 @@ def main() -> int:
     audit = Audit(arguments.state_dir)
     context = Context(arguments.deployments, arguments.campaign, snapshots,
                       Jobs(arguments.state_dir / "jobs"))
-    config = Config(snapshots, auth, audit, CommandService(context, audit),
+    monitor = None
+    if arguments.disk_interval > 0:
+        repository = ROOT / "cluster"
+        monitor = disk.DiskMonitor(
+            arguments.state_dir, arguments.deployments, arguments.campaign, list(HOST_NAMES),
+            disk.ssh_runner(LOCAL_HOST, (str(arguments.deployments), str(repository / "backups"))),
+            arguments.disk_interval, on_change=snapshots.invalidate)
+        snapshots.disk = monitor
+        monitor.start()
+    config = Config(snapshots, auth, audit, CommandService(context, audit), monitor,
                     arguments.trust_proxy, arguments.secure_cookies,
                     tuple(str(ipaddress.ip_address(address)) for address in arguments.trusted_proxy))
     server = DashboardServer((host, port), make_handler(config))

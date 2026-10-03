@@ -313,7 +313,7 @@ def restart_root(context: Context, params: dict) -> Plan:
     """Cancel one DP attempt (if still live) and submit a fresh one that reuses its durable tiles.
 
     This is how a single cancelled or stuck tile gets recomputed today: the
-    leader cannot requeue one tile (see CAMPAIGN_NOTES.md, item 2).
+    leader cannot requeue one tile (see CAMPAIGN_NOTES.md, item 4).
     """
     root = run_row(context, params.get("run_id"))
     description, name = label(context, root)
@@ -601,6 +601,88 @@ def measured_rate(context: Context, now_value: float) -> float | None:
     return statistics.median(rates) if rates else None
 
 
+DISK_FLOOR_DEFAULT = 10 * 1024**3
+STORAGE_MARGIN = 1.25          # edge bands and cells compress a little differently from field to field
+FALLBACK_BYTES_PER_CELL = 1.0
+
+
+def storage_per_cell(connection) -> float:
+    """Bytes of stored tile packet per DP cell, from the fields finished so far (their sizes survive tile deletion)."""
+    from dp_solver.scheduling import dp_estimate
+    stored = cells = 0
+    for encoded, size in connection.execute(
+            "SELECT p.specification,SUM(a.size) FROM runs p JOIN runs c ON c.parent_run_id=p.run_id "
+            "JOIN artifacts a ON a.artifact_hash=c.artifact_hash WHERE p.parent_run_id IS NULL "
+            "AND p.state='complete' AND json_extract(p.specification,'$.program')='dp_distributed' "
+            "AND a.size IS NOT NULL GROUP BY p.run_id"):
+        try:
+            cells += dp_estimate({"arguments": json.loads(encoded)["arguments"]})["state_bytes"] // 12
+        except (ValueError, KeyError):
+            continue
+        stored += size or 0
+    return stored / cells if cells else FALLBACK_BYTES_PER_CELL
+
+
+def usable_disk(context: Context, connection, now: float, floor: int) -> tuple[int, str] | None:
+    """Free bytes above each machine's floor, and where the figure came from; None when nothing is known."""
+    monitor = getattr(context.snapshots, "disk", None)
+    if monitor is not None:
+        view = monitor.view()
+        hosts = [item for item in view["hosts"].values() if item.get("size")]
+        if hosts and view["measured_at"]:
+            return (sum(max(0, item["free"] - floor) for item in hosts),
+                    f"measured {int((now - view['measured_at']) / 60)} min ago")
+    lease = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
+    live = [row[0] for row in connection.execute(
+        "SELECT storage_free_bytes FROM nodes WHERE last_heartbeat>? AND storage_free_bytes>=0", (now - lease,))]
+    return (sum(max(0, free - floor) for free in live), "reported by the leader's live machines") if live else None
+
+
+def check_disk(context: Context, plan: Plan, estimate: dict, now: float) -> None:
+    """Add the field's projected tile storage, and how it compares with the free disk, to plan."""
+    from dp_solver.scheduling import dp_estimate
+    gib = 1024**3
+    copies = 3
+    with context.database() as connection:
+        per_cell = storage_per_cell(connection)
+        floor = int(float((connection.execute("SELECT value FROM settings WHERE key='disk_floor_bytes'").fetchone()
+                           or [DISK_FLOOR_DEFAULT])[0]))
+        reserved = 0.0
+        for encoded, done, total in connection.execute(
+                "SELECT specification,progress_done,progress_total FROM runs WHERE parent_run_id IS NULL "
+                "AND state IN ('waiting','queued','running','paused','stopping') "
+                "AND json_extract(specification,'$.program')='dp_distributed'"):
+            try:
+                cells = dp_estimate({"arguments": json.loads(encoded)["arguments"]})["state_bytes"] // 12
+            except (ValueError, KeyError):
+                continue
+            left = 1.0 - (min(done or 0, total) / total if total else 0.0)
+            reserved += cells * per_cell * STORAGE_MARGIN * copies * left
+        known = usable_disk(context, connection, now, floor)
+    one_copy = estimate["state_bytes"] // 12 * per_cell * STORAGE_MARGIN
+    need = one_copy * copies
+    plan.changes.append({"label": "Tile storage", "before": None, "after": (
+        f"≈ {need / gib:,.0f} GiB at {copies} copies ({one_copy / gib:,.0f} GiB each, "
+        f"{per_cell:.2f} bytes per DP cell as measured on finished fields)")})
+    if known is None:
+        plan.warnings.append("Free disk is not known right now (no machine is reporting and the dashboard has not "
+                             "measured the disks), so the field's storage could not be checked.")
+        return
+    free, source = known
+    available = max(0.0, free - reserved)
+    plan.changes.append({"label": "Free disk", "before": None, "after": (
+        f"{free / gib:,.0f} GiB above each machine's {floor / gib:g} GiB floor ({source}); "
+        f"{reserved / gib:,.0f} GiB of it is still needed by fields in progress")})
+    if need > available:
+        plan.blockers.append(
+            f"It needs about {need / gib:,.0f} GiB of tile storage but only about {available / gib:,.0f} GiB is free "
+            "after fields already in progress. Finished fields' tiles are deleted automatically (CAMPAIGN_NOTES item "
+            "22), so this may fit once more fields finish, or free space first.")
+    elif need > 0.5 * available:
+        plan.warnings.append(f"It would use about {100 * need / available:.0f}% of the disk space that is free "
+                             f"({available / gib:,.0f} GiB after fields in progress).")
+
+
 def submit_field(context: Context, params: dict) -> Plan:
     """Submit a DP root for any supported field, outside the feeder's frontier."""
     import time as time_module
@@ -689,6 +771,7 @@ def submit_field(context: Context, params: dict) -> Plan:
             f"Its DP state is {estimate['state_bytes'] / largest:,.0f}× the largest completed so far "
             f"({largest / gib:,.1f} GiB). Tiles are kept in two copies: about "
             f"{2 * estimate['state_bytes'] / gib:,.0f} GiB of worker disk in total while it runs.")
+    check_disk(context, plan, estimate, time_module.time())
     if big:
         plan.warnings.append("It is beyond the feeder's own limits (max_visits / max_state_bytes); the feeder "
                              "would never have chosen it, but will still collect its result.")

@@ -140,6 +140,25 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(fields[(11, 7)]["status"], "dp_cancelled")
         self.assertEqual(fields[(7, 5)]["status"], "dp_failed")  # a failure still wins
 
+    def test_a_finished_field_shows_its_deleted_tiles_as_done_not_as_missing_copies(self) -> None:
+        """Tiles of a complete field are deleted after a retention period; they must not look under-replicated."""
+
+        with sqlite3.connect(self.deployments / "live" / "leader.sqlite") as connection:
+            connection.row_factory = sqlite3.Row
+            fixture.run(connection, "done-root", {"program": "dp_distributed", "arguments": {"p": 5, "r": 3, "tile_side": fixture.SIDE}},
+                        "complete", finished=NOW - 600, artifact_hash="d" * 64)
+            fixture.run(connection, "done-t00", fixture.tile_spec(0, 0, "done-root"), "complete", parent="done-root",
+                        artifact_hash="e" * 64, started=NOW - 5000, finished=NOW - 4000)
+            connection.execute("INSERT INTO distributed_tiles(parent_run_id,row,column,child_run_id) VALUES('done-root',0,0,'done-t00')")
+            connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created) VALUES(?,3,?)", ("e" * 64, NOW))
+        roots = {root["run_id"]: root for root in self.build()["roots"]}
+        cell = roots["done-root"]["cells"][0]
+        self.assertEqual((cell["s"], cell["rep"]), ("durable", 0))
+        self.assertEqual(roots["done-root"]["counts"]["durable"], 1)
+        # An unfinished root with the same missing copies still shows the tile as merely complete.
+        live = roots["root-5-3"]
+        self.assertTrue(any(item["s"] == "complete" for item in live["cells"]))
+
     def test_status_header(self) -> None:
         status = self.build()["status"]
         self.assertEqual((status["nodes_healthy"], status["nodes_total"]), (2, 3))

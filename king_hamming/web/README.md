@@ -1,9 +1,10 @@
 # Campaign dashboard
 
-A read-only web view of the continuous DP → matching campaign: a results
-heatmap, the nine-machine fleet, live DP tile grids, a machine timeline, the
-feeder, and a problems feed. It reads the retained
-campaign files and never contacts the leader. See [DESIGN.md](DESIGN.md).
+A web view of the continuous DP → matching campaign: a results heatmap, the
+fleet with each machine's disk usage, live DP tile grids, a machine timeline, the
+feeder, and a problems feed. It reads the retained campaign files and the
+leader's database, and contacts the other machines only to measure their disks
+(see "Disk usage"). See [DESIGN.md](DESIGN.md).
 
 Every page needs a login. Accounts, sessions and the audit log live in
 `~/.local/share/king_hamming/web/` (mode 0700), outside the repository.
@@ -49,10 +50,49 @@ python3 king_hamming/web/server.py snapshot
 
 Options:
 
+- `--disk-interval SECONDS`: how often to measure every machine's disk (default
+  1800; 0 turns it off). See "Disk usage".
 - `--deployments DIR`: default `king_hamming/cluster/deployments`.
 - `--campaign NAME`: the live deployment; default `continuous-campaign`.
 - `--ttl SECONDS`: how long a snapshot is reused; default 15.
 - `--state-dir DIR`: where accounts, sessions and the audit log live.
+
+## Disk usage
+
+The Fleet tab shows each machine's disk, and all of them together, as one bar in
+four parts:
+
+| Part | What it counts |
+| --- | --- |
+| **Tiles** | DP tile packets and their edge bands in the agent's blob store |
+| **Other king_hamming data** | everything else the campaign keeps: other blobs (matching inputs, checkpoints), run scratch in `work/`, earlier deployments, and on this machine the repository's `cluster/deployments` and `cluster/backups` |
+| **Unrelated files** | everything on the filesystem that isn't king_hamming's, including the blocks the filesystem reserves for root (about 5%) |
+| **Free** | space the campaign's user can still write |
+
+Hover a bar for the detail: tiles split into finished fields, unfinished fields
+and failed attempts, the largest fields, how many machines hold each tile on
+average, and the parts of "other". Above the cards, the summary also estimates
+what could be reclaimed (CAMPAIGN_NOTES items 22–24).
+
+The numbers come from the machines themselves, not from the leader, so they stay
+right when agents are stopped. A background thread in the dashboard runs one fixed
+script on each machine, every 30 minutes and when an operator presses **Measure
+disks now** (at most once a minute):
+
+- Other machines are reached with `ssh -o BatchMode=yes` as the dashboard's own
+  user, so the dashboard needs working key-based SSH to them (the same as the
+  upgrade scripts). This machine is measured directly.
+- The command is fixed. Its only argument is the machine's blob-store path from
+  the leader's database, and a path that doesn't match
+  `/home/USER/.local/share/king_hamming/NAME/blobs` is refused.
+- The script reports allocated bytes (each hard-linked file once), the filesystem's
+  size and free space, and a list of blob names and sizes. The dashboard checks
+  each blob against the leader's database to tell tiles from the rest. This takes
+  a second or two per machine.
+- Page loads never start a measurement. A machine that can't be reached keeps its
+  last numbers, dimmed and labelled with their age and the error.
+- The latest result is kept in `disk.json` in the state directory, so a restart
+  shows it at once.
 
 ## Behind the Cloudflare tunnel
 
@@ -166,7 +206,11 @@ way:
   limits of at most 10,000 tiles and each tile within `max_tile_bytes`. 11⁹,
   for example, needs side 2048 (6,241 tiles), not the feeder's 512.
 - a runtime estimate from the throughput of recently completed roots
-- the worker disk needed for both tile copies
+- the tile storage the field will need at three copies, from the bytes per DP
+  cell measured on finished fields, compared with the free disk above each
+  machine's floor (from the last disk measurement, or the leader's live figures)
+  after what fields in progress still need. It warns when the field would take
+  more than half of what is free, and refuses when it cannot fit
 - whether the field exceeds the matching limits
 
 Fields beyond the feeder's own limits need the field typed to confirm.

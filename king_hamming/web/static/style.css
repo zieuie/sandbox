@@ -35,6 +35,9 @@
   --t-cancelled: #7b8494;
   --t-unscheduled: #eceff3;
 
+  /* disk usage: tiles strong, other king_hamming a lighter tint of it, unrelated neutral, free the track */
+  --disk-tiles: #2f62c9; --disk-other: #8fb0ee; --disk-unrelated: #b4bcc9; --disk-free: #eef1f5;
+
   /* per-work colours, shared by CPU squares and work rows */
   --w0: #3f78e0; --w1: #e07a3f; --w2: #2aa3b0; --w3: #a35bd6; --w4: #c9a227; --w5: #d64f8a;
 
@@ -56,6 +59,7 @@
     --t-unscheduled: #222b3c;
     --t-ready: #c9ac3e;
     --t-complete: #7fae4a;
+    --disk-tiles: #7aa2ff; --disk-other: #3d5a94; --disk-unrelated: #66718a; --disk-free: #1f2738;
     --shadow: none;
   }
 }
@@ -63,6 +67,7 @@
   --bg: #0f1420; --panel: #171e2c; --ink: #e4e8f0; --muted: #93a0b8; --line: #2a3346;
   --soft: #1f2738; --accent: #7aa2ff; --st-dp-running: #4d6fae; --t-blocked: #39445a;
   --t-unscheduled: #222b3c; --t-ready: #c9ac3e; --t-complete: #7fae4a; --shadow: none;
+  --disk-tiles: #7aa2ff; --disk-other: #3d5a94; --disk-unrelated: #66718a; --disk-free: #1f2738;
 }
 
 * { box-sizing: border-box; }
@@ -225,6 +230,23 @@ table.mini tr.error-row td { color: var(--bad); border-bottom: 1px solid var(--l
 .w3 { --wc: var(--w3); } .w4 { --wc: var(--w4); } .w5 { --wc: var(--w5); }
 .memline, .util-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
 svg.bar { width: 100%; height: 6px; display: block; }
+/* disk usage bars: four segments, with swatches in the text so colour is never the only cue */
+svg.diskbar { width: 100%; height: 12px; display: block; margin: 5px 0; border-radius: 4px; overflow: hidden; }
+svg.diskbar rect { stroke: var(--panel); stroke-width: 1; vector-effect: non-scaling-stroke; }
+svg.diskbar .disk-tiles, .swatch.disk-tiles { fill: var(--disk-tiles); }
+svg.diskbar .disk-other, .swatch.disk-other { fill: var(--disk-other); }
+svg.diskbar .disk-unrelated, .swatch.disk-unrelated { fill: var(--disk-unrelated); }
+svg.diskbar .disk-free { fill: var(--disk-free); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; border: 1px solid var(--line); }
+.swatch.disk-tiles { background: var(--disk-tiles); } .swatch.disk-other { background: var(--disk-other); }
+.swatch.disk-unrelated { background: var(--disk-unrelated); } .swatch.disk-free { background: var(--disk-free); }
+.disk-figures, .disk-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 12px; color: var(--muted); }
+.disk-note { font-size: 12px; color: var(--muted); }
+.disk-stale svg.diskbar { opacity: .55; }
+.disk-summary { margin: 12px 0 16px; }
+.disk-summary .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.disk-summary h4 { margin: 0; }
+table.disk-tip td.num { text-align: right; padding-left: 14px; font-variant-numeric: tabular-nums; }
 .bar-track { fill: var(--soft); }
 .bar-fill { fill: var(--wc, var(--accent)); }
 svg.bar.mem .bar-fill { fill: var(--muted); }

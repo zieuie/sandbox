@@ -146,6 +146,7 @@ class Snapshots:
         self.dependency_cache: dict[tuple, list[tuple[int, int]]] = {}
         self.descriptions: dict[str, dict] = {}
         self.long_utilization: tuple[float, dict] | None = None  # (computed at, 7-day hourly series)
+        self.disk = None  # a disk.DiskMonitor; its latest result is merged into the fleet, never measured here
         state = deployments / campaign
         self.leader_log = LogWatcher(state / "leader.log", LeaderLogParser())
         self.feeder_log = LogWatcher(state / "feeder.log", FeederLogParser())
@@ -369,6 +370,9 @@ class Snapshots:
                 "runtime_version": (node.get("runtime_version") or "")[:12],
                 "storage_validation": node.get("storage_validation_mode"),
                 "gpus": node_gpus(node),
+                # The leader's own last figure; negative means the agent never reported one.
+                "leader_free_bytes": (node.get("storage_free_bytes")
+                                      if (node.get("storage_free_bytes") or 0) >= 0 else None),
                 "cpus": cpus,
                 "work": work,
                 "utilization": series.get(name, []),
@@ -377,8 +381,14 @@ class Snapshots:
         order = sorted(HOST_NAMES)
         cards.sort(key=lambda card: (order.index(card["host"]) if card["host"] in order else 99,
                                      card["name"]))
+        disk = None
+        if self.disk is not None:
+            view = self.disk.view()
+            for card in cards:
+                card["disk"] = view["hosts"].get(card["host"])
+            disk = {key: view[key] for key in ("cluster", "measured_at", "interval", "running")}
         return {"nodes": cards, "bucket_seconds": BUCKET_SECONDS, "window_seconds": WINDOW_SECONDS,
-                "dispatch": dispatch}
+                "dispatch": dispatch, "disk": disk}
 
     def work_item(self, run: dict, role: str, node: dict, now: float,
                   root_states: dict[str, str]) -> dict:
@@ -519,8 +529,10 @@ class Snapshots:
             live_children = sum(item["state"] in {"running", "stopping", "queued", "waiting", "paused"}
                                 for item in rows)
             active = root["state"] not in TERMINAL or live_children > 0
+            # A finished field's tiles are deleted after a retention period, so their copies say nothing.
+            finished = root["state"] == "complete"
             durable = {(item["row"], item["column"]) for item in rows
-                       if item["state"] == "complete" and item["replicas"] >= 2}
+                       if item["state"] == "complete" and (finished or item["replicas"] >= 2)}
             counts = {key: 0 for key in ("durable", "complete", "running", "paused", "queued", "ready",
                                          "blocked", "failed", "cancelled", "unscheduled")}
             boundary, cells, durations = None, [], []

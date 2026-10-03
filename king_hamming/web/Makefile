@@ -8,6 +8,7 @@ check:
 	cd tests && python3 test_views.py
 	cd tests && python3 test_auth.py
 	cd tests && python3 test_commands.py
+	cd tests && python3 test_disk.py
 
 clean:
 	rm -rf __pycache__ tests/__pycache__

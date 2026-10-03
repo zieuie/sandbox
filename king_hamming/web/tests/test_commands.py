@@ -216,6 +216,74 @@ class CommandTests(unittest.TestCase):
         forced = self.preview("field.submit", {"p": 11, "r": 9, "tile_side": 512})[2]
         self.assertIn("No tile side up to 512", forced["blockers"][0])
 
+    def live_nodes(self, free: int) -> None:
+        """Make the fixture's nodes report `free` bytes just now (the preview ignores stale heartbeats)."""
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("UPDATE nodes SET last_heartbeat=?,storage_free_bytes=?", (time.time(), free))
+
+    def test_submit_preview_shows_tile_storage_and_free_disk(self) -> None:
+        self.live_nodes(500 * 1024**3)
+        preview = self.preview("field.submit", {"p": 7, "r": 3})[2]
+        changes = {change["label"]: change["after"] for change in preview["changes"]}
+        self.assertIn("at 3 copies", changes["Tile storage"])
+        self.assertIn("bytes per DP cell", changes["Tile storage"])
+        self.assertIn("GiB above each machine's 10 GiB floor", changes["Free disk"])
+        self.assertEqual(preview["blockers"], [])
+
+    def test_a_field_that_cannot_fit_in_the_free_disk_is_refused(self) -> None:
+        self.live_nodes(11 * 1024**3)                 # one GiB per machine above the floor
+        big = self.preview("field.submit", {"p": 11, "r": 9})[2]
+        self.assertTrue(any("tile storage but only about" in blocker for blocker in big["blockers"]), big["blockers"])
+        self.assertIn("item 22", big["blockers"][0])       # names the automatic deletion that may make room
+
+    def test_a_field_that_would_use_most_of_the_free_disk_is_warned(self) -> None:
+        # 11^9 needs ~97 GB at the fallback rate; three machines with 50 GB usable each is enough but tight.
+        self.live_nodes(10 * 1024**3 + 50 * 1000**3)
+        big = self.preview("field.submit", {"p": 11, "r": 9})[2]
+        self.assertEqual(big["blockers"], [])
+        self.assertTrue(any("of the disk space that is free" in warning for warning in big["warnings"]), big["warnings"])
+
+    def test_unknown_free_disk_is_a_warning_not_a_refusal(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("UPDATE nodes SET last_heartbeat=0")
+        preview = self.preview("field.submit", {"p": 7, "r": 3})[2]
+        self.assertEqual(preview["blockers"], [])
+        self.assertTrue(any("Free disk is not known" in warning for warning in preview["warnings"]))
+
+    def test_a_machine_that_never_reported_free_space_is_not_counted(self) -> None:
+        self.live_nodes(-1)
+        preview = self.preview("field.submit", {"p": 7, "r": 3})[2]
+        self.assertTrue(any("Free disk is not known" in warning for warning in preview["warnings"]))
+
+    def test_fields_in_progress_reserve_their_remaining_storage(self) -> None:
+        self.live_nodes(10 * 1024**3 + 200 * 1000**3)              # 600 GB usable across three machines
+        self.assertEqual(self.preview("field.submit", {"p": 11, "r": 9})[2]["blockers"], [])
+        with sqlite3.connect(self.database) as connection:         # a paused 13^9 still needs ~520 GB
+            fixture.run(connection, "big-13-9", {"program": "dp_distributed", "arguments": {"p": 13, "r": 9, "tile_side": 4096}},
+                        "paused", progress_total=100, progress_done=0)
+        after = self.preview("field.submit", {"p": 11, "r": 9})[2]
+        self.assertTrue(any("tile storage but only about" in blocker for blocker in after["blockers"]), after)
+        free = next(change["after"] for change in after["changes"] if change["label"] == "Free disk")
+        self.assertIn("still needed by fields in progress", free)
+        # Once that field is mostly done, most of its reservation is released.
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("UPDATE runs SET progress_done=95 WHERE run_id='big-13-9'")
+        self.assertEqual(self.preview("field.submit", {"p": 11, "r": 9})[2]["blockers"], [])
+
+    def test_storage_per_cell_is_measured_from_finished_fields(self) -> None:
+        import commands
+        from dp_solver.scheduling import dp_estimate
+        cells = dp_estimate({"arguments": {"p": 5, "r": 3}})["state_bytes"] // 12
+        with sqlite3.connect(self.database) as connection:
+            fixture.run(connection, "done", {"program": "dp_distributed", "arguments": {"p": 5, "r": 3, "tile_side": 7}}, "complete")
+            for index, size in enumerate((1500, 2500)):
+                digest = f"{index}" * 64
+                fixture.run(connection, f"done-t{index}", fixture.tile_spec(index, 0, "done"), "complete", parent="done",
+                            artifact_hash=digest)
+                connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created,size) VALUES(?,3,?,?)",
+                                   (digest, NOW, size))
+            self.assertAlmostEqual(commands.storage_per_cell(connection), 4000 / cells)
+
     def test_cancel_running_job(self) -> None:
         from jobs import Jobs
         slow_directory = Path(self.directory.name) / "slow"

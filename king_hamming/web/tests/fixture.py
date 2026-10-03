@@ -31,11 +31,11 @@ def database(directory: Path) -> sqlite3.Connection:
     return connection
 
 
-def node(connection, name, address, cpu_set, heartbeat, memory=16 * 1024**3):
+def node(connection, name, address, cpu_set, heartbeat, memory=16 * 1024**3, free=500 * 1024**3):
     connection.execute(
         "INSERT INTO nodes(node_name,address,cpu_set,storage_root,last_heartbeat,state,"
-        "memory_bytes,physical_core_count,slots_json) VALUES(?,?,?,?,?,'healthy',?,?,'[]')",
-        (name, address, cpu_set, "/tmp", heartbeat, memory, 4))
+        "memory_bytes,physical_core_count,slots_json,storage_free_bytes) VALUES(?,?,?,?,?,'healthy',?,?,'[]',?)",
+        (name, address, cpu_set, "/tmp", heartbeat, memory, 4, free))
 
 
 def run(connection, run_id, specification, state, parent=None, **columns):

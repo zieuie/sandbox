@@ -1,8 +1,103 @@
 // Fleet: one card per machine with CPUs, memory, current work and 24 h utilisation.
 import {
-  html, setHTML, field, fmtBytes, fmtDuration, fmtInt, pct, sparkline, bar, tooltips, now, gpuName,
+  html, setHTML, field, fmtBytes, fmtDuration, fmtInt, pct, sparkline, bar, tooltips, now, gpuName, api, ago,
 } from './util.js';
-import { button } from './command.js';
+import { button, isOperator, toast } from './command.js';
+
+// Disk usage in four parts, in bar order. "Other" is everything else king_hamming keeps.
+const DISK_PARTS = [
+  ['tiles', 'Tiles', 'disk-tiles'],
+  ['other', 'Other king_hamming data', 'disk-other'],
+  ['unrelated', 'Unrelated files', 'disk-unrelated'],
+  ['free', 'Free', 'disk-free'],
+];
+let diskRecheck = null;
+
+const diskPct = (part, size) => {
+  if (!size) return '—';
+  const fraction = (part || 0) / size;
+  return `${(fraction * 100).toFixed(fraction > 0 && fraction < 0.1 ? 1 : 0)}%`;
+};
+
+function diskBar(disk, subject) {
+  const size = disk.size || 1;
+  let x = 0;
+  const rects = DISK_PARTS.map(([key, , cls]) => {
+    const width = Math.max(0, disk[key] || 0) / size * 100;
+    const rect = html`<rect class="${cls}" x="${x.toFixed(3)}" y="0" width="${width.toFixed(3)}" height="12"></rect>`;
+    x += width;
+    return rect;
+  });
+  const label = DISK_PARTS.map(([key, name]) => `${name} ${fmtBytes(disk[key])}`).join(', ');
+  return html`<svg class="diskbar" viewBox="0 0 100 12" preserveAspectRatio="none" role="img"
+    aria-label="Disk: ${label}" data-disk="${subject}"><rect class="disk-free" x="0" y="0" width="100" height="12"></rect>${rects}</svg>`;
+}
+
+// Short labels for the card: the free figure is already in the line above the bar.
+const DISK_SHORT = { tiles: 'Tiles', other: 'Other kh', unrelated: 'Unrelated' };
+function diskFigures(disk) {
+  return html`<div class="disk-figures">${DISK_PARTS.filter(([key]) => DISK_SHORT[key]).map(([key, , cls]) => html`<span><span class="swatch ${cls}"></span>${DISK_SHORT[key]} ${fmtBytes(disk[key])}</span>`)}</div>`;
+}
+
+function diskSection(node, fleetDisk, generatedAt) {
+  if (!fleetDisk) return '';
+  const disk = node.disk;
+  if (!disk || !disk.size) {
+    return html`<div class="disk"><div class="memline"><span>Disk</span>
+      <span class="hint">${disk && disk.error ? `not measured: ${disk.error}` : 'not measured yet'}</span></div></div>`;
+  }
+  const stale = Boolean(disk.error) || generatedAt - disk.measured_at > 2 * fleetDisk.interval + 300;
+  return html`<div class="disk ${stale ? 'disk-stale' : ''}">
+    <div class="memline"><span>Disk · ${fmtBytes(disk.size)}</span>
+      <span>${fmtBytes(disk.free)} free (${diskPct(disk.free, disk.size)})</span></div>
+    ${diskBar(disk, node.name)}
+    ${diskFigures(disk)}
+    <div class="disk-note">${disk.error ? html`Last measurement failed (${disk.error}); showing data from ` : 'Measured '}${ago(disk.measured_at)}</div>
+  </div>`;
+}
+
+function diskSummary(fleet, generatedAt) {
+  const state = fleet.disk;
+  if (!state) return '';
+  const cluster = state.cluster;
+  const measure = isOperator() ? html`<button type="button" class="cmd small" data-disk-measure ${state.running ? 'disabled' : ''}>${state.running ? 'Measuring…' : 'Measure disks now'}</button>` : '';
+  if (!cluster || !cluster.total.size) {
+    return html`<section class="disk-summary"><div class="row"><h4>Disk usage</h4>${measure}</div>
+      <p class="hint">${state.running ? 'Measuring every machine now…' : 'Not measured yet. The dashboard measures each machine every '
+        + `${Math.round(state.interval / 60)} minutes.`}</p></section>`;
+  }
+  const total = cluster.total;
+  const reclaim = cluster.reclaimable;
+  return html`<section class="disk-summary">
+    <div class="row"><h4>Disk usage</h4>${measure}</div>
+    ${diskBar(total, 'cluster')}
+    <div class="disk-legend">${DISK_PARTS.map(([key, name, cls]) => html`<span class="legend-item"><span class="swatch ${cls}"></span>${name}
+      <b>${fmtBytes(total[key])}</b> <span class="hint">${diskPct(total[key], total.size)}</span></span>`)}</div>
+    <p class="hint">${total.machines} machines, ${fmtBytes(total.size)} in all, measured ${ago(state.measured_at)} and every
+      ${Math.round(state.interval / 60)} minutes. Unrelated includes the space each disk keeps for root.</p>
+    <p class="hint"><b>Could be reclaimed</b> (estimates; CAMPAIGN_NOTES items 22–24):
+      tiles of finished fields ${fmtBytes(reclaim.finished_tiles)} ·
+      ${reclaim.excess_copies === null ? '' : html`copies above ${cluster.target_copies} per tile ${fmtBytes(reclaim.excess_copies)}
+      (average ${cluster.average_copies} copies) · `}run scratch ${fmtBytes(reclaim.scratch)}.
+      The first two overlap.</p>
+  </section>`;
+}
+
+function diskTooltip(title, disk, cluster) {
+  const rows = DISK_PARTS.map(([key, name, cls]) => html`<tr><td><span class="swatch ${cls}"></span>${name}</td>
+    <td class="num">${fmtBytes(disk[key])}</td><td class="num">${diskPct(disk[key], disk.size)}</td></tr>`);
+  const groups = disk.tiles_by_group;
+  const parts = disk.other_parts;
+  return html`<b>${title}</b>
+    <table class="mini disk-tip"><tbody>${rows}</tbody></table>
+    ${groups ? html`<div>Tiles: finished fields ${fmtBytes(groups.finished)} · unfinished ${fmtBytes(groups.unfinished)}
+      · failed attempts ${fmtBytes(groups.failed)}</div>` : ''}
+    ${disk.top_fields && disk.top_fields.length ? html`<div>Largest: ${disk.top_fields.map(([p, r, size]) => `${field(p, r)} ${fmtBytes(size)}`).join(' · ')}</div>` : ''}
+    ${cluster && cluster.average_copies ? html`<div>Each tile is stored on ${cluster.average_copies} machines on average (target ${cluster.target_copies}).</div>` : ''}
+    ${parts ? html`<div>Other king_hamming: blobs ${fmtBytes(parts.blobs)} · run scratch ${fmtBytes(parts.scratch)}
+      · earlier deployments ${fmtBytes(parts.deployments)}${parts.repository ? html` · repository ${fmtBytes(parts.repository)}` : ''}</div>` : ''}
+    ${disk.reserved ? html`<div class="hint">Unrelated includes ${fmtBytes(disk.reserved)} the filesystem keeps for root.</div>` : ''}`;
+}
 
 function actions(item) {
   if (item.role !== 'lease') return '';
@@ -68,7 +163,7 @@ function gpuLine(node) {
     <span title="${devices.map((d) => d.name).join(', ')}">${devices.map((d) => `${gpuName(d.name)} · ${fmtBytes(d.total_bytes)}`).join(', ')}</span></div>`;
 }
 
-function card(node, generatedAt) {
+function card(node, generatedAt, fleetDisk) {
   const alive = node.state !== 'unavailable';
   const average = node.utilization.length
     ? node.utilization.reduce((a, b) => a + b, 0) / node.utilization.length : 0;
@@ -87,6 +182,7 @@ function card(node, generatedAt) {
       <span>${fmtBytes(node.reserved_memory_bytes)} / ${fmtBytes(node.memory_bytes)}</span></div>
     ${bar(node.memory_bytes ? node.reserved_memory_bytes / node.memory_bytes : 0, 'mem')}
     ${gpuLine(node)}
+    ${diskSection(node, fleetDisk, generatedAt)}
     ${node.work.length
       ? html`<ul class="work-list">${node.work.map((item, i) => workEntry(item, i, generatedAt))}</ul>`
       : html`<p class="idle">Idle: ${node.idle_reason || 'unknown reason'}</p>`}
@@ -123,16 +219,43 @@ export function render(container, snapshot) {
         <p class="hint">${healthy}/${nodes.length} machines healthy · ${busy}/${allocatable} CPUs allocated now ·
           average CPU use over 24 h ${pct(average)}. Allocation is reserved capacity; the graph is measured use.</p>
       </div>
+      ${diskSummary(fleet, snapshot.generated_at || now())}
       <div class="legend">
         <span class="legend-item"><span class="cpu cpu-busy w0"></span>Allocated</span>
         <span class="legend-item"><span class="cpu cpu-free"></span>Free</span>
         <span class="legend-item"><span class="cpu cpu-reserved"></span>Not schedulable (leader core)</span>
       </div>
-      <div class="node-grid">${nodes.map((n) => card(n, snapshot.generated_at || now()))}</div>
+      <div class="node-grid">${nodes.map((n) => card(n, snapshot.generated_at || now(), fleet.disk))}</div>
     </section>`);
 
+  clearTimeout(diskRecheck);
+  if (fleet.disk && fleet.disk.running) {
+    diskRecheck = setTimeout(() => window.dispatchEvent(new Event('kh:changed')), 5000);
+  }
+  container.addEventListener('click', async (event) => {
+    const target = event.target.closest('[data-disk-measure]');
+    if (!target) return;
+    target.disabled = true;
+    try {
+      const answer = await api('/api/disk/measure', { method: 'POST', body: {} });
+      toast(answer.started ? 'Measuring every machine…' : answer.reason);
+      setTimeout(() => window.dispatchEvent(new Event('kh:changed')), 2000);
+    } catch (error) {
+      toast(error.message, 'bad');
+      target.disabled = false;
+    }
+  });
   const byName = new Map(nodes.map((n) => [n.name, n]));
-  tooltips(container, '.cpu[data-node]', (target) => {
+  // One handler for every tooltip here: a second tooltips() call would hide this one's tooltips.
+  tooltips(container, '.cpu[data-node], .diskbar[data-disk]', (target) => {
+    if (target.dataset.disk !== undefined) {
+      if (target.dataset.disk === 'cluster') {
+        return fleet.disk.cluster ? diskTooltip('All machines', fleet.disk.cluster.total, fleet.disk.cluster) : null;
+      }
+      const machine = byName.get(target.dataset.disk);
+      return machine && machine.disk && machine.disk.size
+        ? diskTooltip(`${machine.hostname} disk`, machine.disk, fleet.disk.cluster) : null;
+    }
     const node = byName.get(target.dataset.node);
     const cpu = node && node.cpus[Number(target.dataset.cpu)];
     if (!cpu) return null;
