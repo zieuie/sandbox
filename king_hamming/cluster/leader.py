@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS resource_usage_samples (
 );
 CREATE INDEX IF NOT EXISTS resource_samples_identity
 ON resource_usage_samples(lease_token,component,shard_index,recorded DESC);
+CREATE TABLE IF NOT EXISTS gpu_usage_samples (
+    node_name TEXT NOT NULL,
+    gpu_index INTEGER NOT NULL,
+    util_percent INTEGER NOT NULL,
+    memory_used_bytes INTEGER NOT NULL,
+    recorded REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS gpu_usage_recorded ON gpu_usage_samples(recorded);
 CREATE TABLE IF NOT EXISTS nodes (
     node_name TEXT PRIMARY KEY,
     address TEXT NOT NULL,
@@ -774,6 +782,14 @@ def make_handler(
                          max(0, int(request["storage_free_bytes"])) if "storage_free_bytes" in request else -1,
                          json.dumps(gpu_list, separators=(",", ":"))),
                     )
+                    if route == "/v1/heartbeat" and gpu_list:
+                        # Live GPU usage, kept 7 days like the CPU samples; absent from older agents.
+                        for stat in gpus.normalized_stats(request.get("gpu_stats")):
+                            connection.execute(
+                                "INSERT INTO gpu_usage_samples(node_name,gpu_index,util_percent,memory_used_bytes,recorded) "
+                                "VALUES(?,?,?,?,?)", (request["node_name"], stat["index"], stat["util_percent"],
+                                                      stat["memory_used_bytes"], now))
+                        connection.execute("DELETE FROM gpu_usage_samples WHERE recorded<?", (now - 7 * 86400,))
                     return {"ok": True, "heartbeat_seconds": min(10.0, lease_seconds / 3),
                             "storage_validation_mode": validation_mode}
 
@@ -1300,7 +1316,8 @@ def make_handler(
                         ).fetchone()
                         connection.execute(
                             "UPDATE runs SET state='complete', finished=?, artifact_hash=?, "
-                            "artifact_location=?, progress_message='complete', progress_phase='complete' WHERE run_id=?",
+                            "artifact_location=?, progress_phase='complete', progress_message=CASE WHEN substr(progress_message,1,1)='{' "
+                            "THEN progress_message ELSE 'complete' END WHERE run_id=?",
                             (
                                 now,
                                 request["artifact_hash"],

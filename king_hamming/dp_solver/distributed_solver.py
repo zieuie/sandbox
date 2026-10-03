@@ -311,7 +311,7 @@ def compute(arguments, specification: dict) -> None:
     if (GPU_TILE.exists() and os.environ.get("KH_DISABLE_GPU_DP")!="1" and
             not gpus.recently_unavailable(device)):
         lock=gpus.DeviceLock(device)
-        if lock.acquire(float(os.environ.get("KH_GPU_DP_WAIT_SECONDS","120")),lambda: STOP):
+        if lock.acquire(float(os.environ.get("KH_GPU_DP_WAIT_SECONDS","120")),lambda: STOP,skip_long=True):
             try:
                 code=kernel(GPU_TILE)
             finally:

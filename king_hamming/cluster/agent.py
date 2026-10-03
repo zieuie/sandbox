@@ -387,7 +387,10 @@ def heartbeat_loop(
     while not stop_event.wait(interval):
         try:
             free = shutil.disk_usage(node_record["storage_root"]).free
-            request_json(leader, "/v1/heartbeat", {**node_record, "storage_free_bytes": free})
+            beat = {**node_record, "storage_free_bytes": free}
+            if node_record.get("gpus"):
+                beat["gpu_stats"] = gpus.sample()  # for the dashboard's GPU graph; the leader ignores it if unknown
+            request_json(leader, "/v1/heartbeat", beat)
         except OSError as error:
             print(f"heartbeat failed: {error}", file=sys.stderr, flush=True)
 
@@ -1100,7 +1103,25 @@ def run_job(
             restart_count += 1
             print(f"restarting solver for {run_id} from its checkpoint", file=sys.stderr, flush=True)
 
-        adapter.validate_result(specification, output)
+        # Verifying a large certificate can take minutes: keep reporting a live "verifying" phase
+        # so the run neither looks finished (progress is already at 100%) nor loses its heartbeat.
+        final = result.get("progress") or {}
+        verifying_done = threading.Event()
+
+        def verifying_heartbeat() -> None:
+            report = {key: final[key] for key in ("done", "total", "checkpoint_done", "units") if key in final}
+            while not verifying_done.wait(10):
+                try:
+                    request_json(leader, "/v1/progress", {**report, **identity, "phase": "verifying",
+                                                          "message": "verifying the certificate"})
+                except (OSError, HTTPError):
+                    pass  # the lease keeper decides whether the lease is lost
+
+        threading.Thread(target=verifying_heartbeat, daemon=True).start()
+        try:
+            adapter.validate_result(specification, output)
+        finally:
+            verifying_done.set()
         with storage_transaction(storage_root, keeper.check):
             digest, path = store_blob(output, storage_root, keeper.check)
             keeper.check()

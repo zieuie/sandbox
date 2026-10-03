@@ -99,8 +99,14 @@ class DeviceLock:
         self.path = LOCK_DIRECTORY / f"kh-gpu-{int(index)}.lock"
         self.descriptor: int | None = None
 
-    def acquire(self, timeout: float, should_stop: Callable[[], bool] = lambda: False) -> bool:
-        """Wait up to timeout seconds; return False on timeout or a stop request."""
+    def acquire(self, timeout: float, should_stop: Callable[[], bool] = lambda: False,
+                hold: str = "", skip_long: bool = False) -> bool:
+        """Wait up to timeout seconds; return False on timeout or a stop request.
+
+        hold="long" marks a holder that keeps the device for minutes or longer (block matching).
+        A waiter passing skip_long=True gives up at once when it finds such a hold, so opportunistic
+        work falls back to the CPU instead of queueing for its whole timeout.
+        """
 
         descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o666)
         deadline = time.monotonic() + max(0.0, timeout)
@@ -108,11 +114,17 @@ class DeviceLock:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 self.descriptor = descriptor
+                os.ftruncate(descriptor, 0)
+                if hold:
+                    os.pwrite(descriptor, hold.encode("ascii"), 0)
                 return True
             except OSError as error:
                 if error.errno not in (errno.EAGAIN, errno.EACCES):
                     os.close(descriptor)
                     raise
+            if skip_long and os.pread(descriptor, 8, 0) == b"long":
+                os.close(descriptor)
+                return False
             if should_stop() or time.monotonic() >= deadline:
                 os.close(descriptor)
                 return False
@@ -120,6 +132,10 @@ class DeviceLock:
 
     def release(self) -> None:
         if self.descriptor is not None:
+            try:
+                os.ftruncate(self.descriptor, 0)  # clear any "long" hold marker before unlocking
+            except OSError:
+                pass
             fcntl.flock(self.descriptor, fcntl.LOCK_UN)
             os.close(self.descriptor)
             self.descriptor = None
@@ -145,3 +161,38 @@ def recently_unavailable(index: int, seconds: float = 600.0) -> bool:
     except (OSError, ValueError):
         return False
     return time.time() - stamp < seconds
+
+
+# ----- live usage samples (for the dashboard's GPU graph) ---------------------------------------
+
+def sample(timeout: float = 3.0) -> list[dict[str, int]]:
+    """Read each GPU's utilisation and memory use with nvidia-smi; [] when it is missing or fails."""
+
+    try:
+        done = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if done.returncode:
+        return []
+    return normalized_stats([
+        {"index": fields[0], "util_percent": fields[1], "memory_used_bytes": int(fields[2]) * 1024**2}
+        for fields in (line.replace(" ", "").split(",") for line in done.stdout.splitlines())
+        if len(fields) == 3 and all(item.isdigit() for item in fields)])
+
+
+def normalized_stats(raw: Any) -> list[dict[str, int]]:
+    """Validate a usage sample list from an agent; malformed entries are dropped, not trusted."""
+
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for item in raw[:16]:
+        try:
+            index, util, memory = int(item["index"]), int(item["util_percent"]), int(item["memory_used_bytes"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 0 <= index < 64 and 0 <= util <= 100 and 0 <= memory < 2**50:
+            result.append({"index": index, "util_percent": util, "memory_used_bytes": memory})
+    return result
