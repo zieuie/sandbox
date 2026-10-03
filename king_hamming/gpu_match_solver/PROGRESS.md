@@ -41,9 +41,9 @@ solvers, integrate with `cluster/` (and web UI if needed), deploy. A
       resume). GPUs registered on merlin and .101/.102/.104/.105. First live results: 3^17 matched
       (455 s incl. verification) and archived; 2^27 matched. Median tile time in the first hour:
       13^9 30 s on GPU vs 115 s on CPU; 23^7 49 s vs 632 s.
-- [ ] drivers on .103/.106-.108 (Secure Boot + unenrolled DKMS key) and pellinore (no driver):
-      diagnosed in docs/GPU.md; package install was blocked by the permission check. Commands
-      for Zooey are in docs/GPU.md.
+- [x] drivers on .103/.106-.108 and pellinore: installed by Zooey, verified 2026-10-02 evening
+      (docs/GPU.md). All ten machines pass the CUDA probe, but only merlin and
+      .101/.102/.104/.105 are registered; the other five register when their agents next start.
 
 ## Deploy runbook (run from the repo root on merlin)
 
@@ -64,5 +64,6 @@ queues them at priority 100; DP tiles on .101-.105 and Merlin report `"engine":"
 progress_details. Rollback: check out the previous commit and rerun drain + upgrade-workers;
 GPU columns are additive and ignored by older code.
 
-Fleet GPU probe (01:40): usable P600 on .101-.105, RTX 3060 on merlin. .106-.108: nvidia
-kernel module not loaded; pellinore: no NVIDIA driver. Needs sudo/reboot — left for Zooey.
+Fleet GPU probe (2026-10-02 evening): usable GPU on all ten machines (RTX 3060 on merlin,
+Quadro P600 on .101-.108, GTX 1050 Ti on pellinore), driver 580.178.04. Earlier (01:40) only
+merlin and .101-.105 were usable.

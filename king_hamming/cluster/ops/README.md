@@ -26,4 +26,5 @@ same failure mode this watchdog recovers from; see
 [NETWORK_OUTAGE_2026-10-02.md](../../docs/NETWORK_OUTAGE_2026-10-02.md).
 
 `gpu_driver_fix.sh` repairs NVIDIA drivers on fleet nodes (Secure Boot key enrollment on the
-P600 workers, a fresh driver install on pellinore); see [GPU.md](../../docs/GPU.md).
+P600 workers, a fresh driver install on pellinore); see [GPU.md](../../docs/GPU.md). The drivers
+are installed everywhere now, so its read-only `check HOST...` mode is the useful part.

@@ -85,8 +85,8 @@ instead of about 65 MiB; the whole packet remains the fallback. The leader prefe
 giving a tile to a node that already holds its left neighbour, only as a bounded
 tie-break. See [DP_NETWORK_LOCALITY.md](DP_NETWORK_LOCALITY.md).
 
-Fields that fit an advertised GPU (Merlin's 3060: up to ~180 M labels; P600s:
-~55 M) are matched by the single-GPU `match_gpu` program instead, and DP tile
+Every machine has a GPU. Fields that fit an advertised GPU (Merlin's 3060: up to
+~180 M labels; the eight P600s: ~55 M; pellinore's 1050 Ti: ~110 M, estimated) are matched by the single-GPU `match_gpu` program instead, and DP tile
 leases use a free host GPU opportunistically with byte-identical results; see
 [GPU.md](GPU.md).
 

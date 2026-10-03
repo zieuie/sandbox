@@ -10,74 +10,48 @@ Two GPU solvers are integrated:
   faster on production 4096-side tiles.
 
 Both are plain C binaries that load `libcuda.so.1` at run time; see
-[cuda/README.md](../cuda/README.md). Hosts without a usable GPU behave exactly as
+[cuda/README.md](../cuda/README.md). A host without a usable GPU behaves exactly as
 before.
 
-## Fleet (deployed 2026-10-02 11:13 CDT)
+## Fleet (probed 2026-10-02, evening)
 
-| Host | GPU | Registered | Notes |
+Every machine now has a working GPU. Each one passes `cuda/kh_cuda_probe`, the
+check an agent runs at start, and reports driver 580.178.04 with a
+Canonical-signed kernel module.
+
+| Host | GPU | Usable memory | Registered with the leader |
 | --- | --- | --- | --- |
-| merlin `.151` | RTX 3060 Laptop, 6 GiB (5.7 usable) | yes | driver 580.178 |
-| `.101`, `.102`, `.104`, `.105` | Quadro P600, 2 GiB (1.7 usable) | yes | running the old 580.126 module loaded before Sep 27; **will lose the GPU at next reboot** (see below) |
-| `.103`, `.106`, `.107`, `.108` | Quadro P600 | no | module cannot load under Secure Boot (see below) |
-| pellinore `.152` | GTX 1050 Ti Mobile, 4 GiB | no | no NVIDIA driver installed; `nouveau` bound |
+| merlin `.151` | RTX 3060 Laptop, 6 GiB | 5.7 GiB | yes, since the 11:13 deploy |
+| `.101`, `.102`, `.104`, `.105` | Quadro P600, 2 GiB | 1.7 GiB each | yes, since the 11:13 deploy |
+| `.103`, `.106`, `.107`, `.108` | Quadro P600, 2 GiB | 1.7 GiB each | **no: probes fine, but the agent must restart** |
+| pellinore `.152` | GTX 1050 Ti Max-Q, 4 GiB | about 3.9 GiB | **no: probes fine, but the agent must restart** |
 
-Re-probe any host with `cuda/kh_cuda_probe`. Agents run it at registration and
-advertise the result, and status shows each node's `gpus_json`. An agent
-detects GPUs only when it starts, so relaunch it after fixing a driver.
+An agent detects GPUs only when it starts, and the agents are stopped now, so the
+leader's last record still lists only the first five. All ten register when the
+agents are next launched (`upgrade-workers`); check afterwards with
+`kh.py status --verbose | grep -i gpu`.
 
-### Why the P600 workers lose their GPU (Secure Boot + DKMS)
+Re-probe any host with `cluster/ops/gpu_driver_fix.sh check HOST...` (read-only: it
+copies the probe to `/tmp`, runs it and removes it), or run `cuda/kh_cuda_probe` on the
+host. Status shows each node's `gpus_json`.
 
-`cluster/ops/gpu_driver_fix.sh` runs the fixes below interactively from merlin
-(`mok HOST...`, `pellinore`), and its `check HOST...` mode reports read-only whether each GPU
-is usable.
+### History: the driver problems, now resolved
 
-On 2026-09-27 between about 06:36 and 06:46 (the key files' timestamps), an automatic update upgraded `nvidia-driver-580`
-from 580.126 to 580.173 through `nvidia-dkms-580`. DKMS rebuilt the module and
-signed it with a new per-machine key (`/var/lib/shim-signed/mok/MOK.der`,
-"<host> Secure Boot Module Signature key"). Enrolling that key needs a console
-confirmation (the blue MOK manager) at the next boot, and that never happened.
-`mokutil --list-enrolled` still shows only Canonical's key on every worker.
-Because `modprobe` prefers `updates/dkms/nvidia.ko.zst`, a node rebooted since
-then cannot load any NVIDIA module under Secure Boot. Nodes not rebooted since
-(`.101`, `.102`, `.104`, `.105`) still run the old 580.126 module, which is why
-`.104`'s `nvidia-smi` reports an NVML/driver mismatch. They will fail the same
-way at their next reboot.
-
-The Canonical-signed module in `linux-modules-nvidia-580-6.17.0-20-generic` is
-580.126, which does not match the installed 580.173 userspace. So the fix is
-one of these, per worker (needs sudo; I don't have passwordless sudo on the
-workers):
-
-1. **Recommended: enroll the existing key, at the console.**
-   `sudo mokutil --import /var/lib/shim-signed/mok/MOK.der` (choose a
-   one-time password), reboot, choose *Enroll MOK* → *Continue* → enter the
-   password. Keeps DKMS; future driver updates just work.
-2. **Remote, no console (unverified):** drop DKMS and boot a kernel whose
-   Canonical-signed module matches the 580.173 userspace. The signed modules
-   for 6.17.0-20 and 6.17.0-22 are both still 580.126, so this works only if
-   the 7.0.0-34 build (`linux-modules-nvidia-580-generic-hwe-24.04` candidate)
-   carries 580.173. Check with `modinfo -F version` on the installed module
-   before removing `nvidia-dkms-580`. Without that match, `cuInit` may fail
-   with a driver/library mismatch.
-3. **Disable Secure Boot** in each machine's firmware setup (console).
-
-After any of these, relaunch the node's agent (or run `upgrade-workers`) so it
-re-registers its GPU.
-
-### Pellinore (no driver)
-
-Pellinore runs Ubuntu 26.04 with Secure Boot off. A dry run of this install is
-clean: Canonical-signed modules for its kernel (7.0.0-38), userspace
-580.178.04, no DKMS and no X driver, so the display stays on the Intel GPU.
-
-```sh
-sudo apt-get install --no-install-recommends linux-modules-nvidia-580-generic nvidia-headless-no-dkms-580 nvidia-utils-580
-sudo reboot   # nouveau is bound to the 1050 Ti, so a reboot is needed
-```
-
-After the reboot, `nvidia-smi` and `kh_cuda_probe` should list the GTX 1050 Ti
-(4 GiB, enough for fields up to ~110 M labels). Then relaunch its agent.
+- **P600 workers.** On 2026-09-27 an automatic update moved `nvidia-driver-580` from
+  580.126 to 580.173 through DKMS, which signed the new module with a per-machine
+  key that Secure Boot never enrolled (enrolling needs a console confirmation).
+  `.103` and `.106`–`.108`, rebooted since, could not load any NVIDIA module, and
+  `.101`, `.102`, `.104` and `.105` were running an old module that would have
+  failed the same way at their next reboot.
+- **Pellinore** had no NVIDIA driver, with `nouveau` bound to the 1050 Ti.
+- **Resolved on 2026-10-02:** drivers were installed on every machine. All ten
+  rebooted afterwards (uptimes of about 2 to 6 hours at probe time), so the fix
+  survives a reboot.
+- **If it recurs:** `modinfo -F signer nvidia` on the host should say
+  "Canonical Ltd. Kernel Module Signing". A per-machine "Module Signature key"
+  there means a DKMS build that Secure Boot will refuse after the next reboot.
+  `gpu_driver_fix.sh` (modes `mok` and `pellinore`) has the earlier repair
+  steps; it is kept for reference.
 
 ## Scheduling model
 
@@ -128,9 +102,10 @@ Pipeline settings (optional; defaults shown):
 | `gpu_matching_threads` | `4` | CPU threads for field construction |
 
 With today's fleet, Merlin's 3060 admits fields up to about 180 M labels,
-including the previously blocked 3^17 and 2^27. P600 nodes take fields up to
-about 55 M. 17^7, 19^7, 2^29, 7^11 and 11^9 still exceed every GPU and keep
-their CPU `field limit`. See
+including the previously blocked 3^17 and 2^27. The P600 nodes (now all eight)
+take fields up to about 55 M, and pellinore's 4 GiB 1050 Ti should take about
+110 M (an estimate from its memory; not yet run). 17^7, 19^7, 2^29, 7^11 and
+11^9 still exceed every GPU and keep their CPU `field limit`. See
 [gpu_match_solver/README.md](../gpu_match_solver/README.md) for the
 recommended CPU-side follow-up.
 

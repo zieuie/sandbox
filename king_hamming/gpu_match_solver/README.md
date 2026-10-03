@@ -34,7 +34,7 @@ The full independent Python KHM1 verifier accepted the certificates for 13^7
 (173 s), 2^25 (130 s), 3^17 (542 s) and 2^27 (753 s). Verification, not
 solving, is now the slowest step.
 
-### Quadro P600 (.101–.105, 2 GiB)
+### Quadro P600 (.101–.108, 2 GiB; measured on .101 and .104)
 
 5^11 took 34.2 s of wall time: 21.1 s CPU field construction on the i7-7700T,
 3.9 s greedy, 4.4 s augmentation and 4.7 s payload write. The 9-node cluster
@@ -122,7 +122,8 @@ also budgets about 24q + 512 MiB for the Python verifier, which needs about
 | GPU | Usable | Largest field |
 | --- | ---: | --- |
 | RTX 3060 Laptop (Merlin) | 5.6 GiB | ~180 M labels: 3^17, 2^27 |
-| Quadro P600 (.101–.105) | 1.7 GiB | ~55 M labels: 5^11 |
+| Quadro P600 (.101–.108) | 1.7 GiB | ~55 M labels: 5^11 |
+| GTX 1050 Ti Max-Q (pellinore) | 3.9 GiB | ~110 M labels (estimated, not yet run) |
 
 ## Build, run, test
 
