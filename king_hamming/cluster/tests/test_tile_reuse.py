@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 os.environ["KH_ENABLE_TEST_FIXTURES"] = "1"
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,16 @@ class TileReuseTests(unittest.TestCase):
                 "SELECT r.* FROM distributed_tiles t JOIN runs r ON r.run_id=t.child_run_id "
                 "WHERE t.parent_run_id=? AND t.row=0 AND t.column=0", (parent,),
             ).fetchone()
+
+    def test_blocked_frontier_does_not_build_tile_descriptors(self) -> None:
+        root = self.enqueue()
+        with leader.connect(self.database) as connection:
+            with patch.object(distributed, "tile", wraps=distributed.tile) as make_tile:
+                distributed.advance(connection, time.time())
+            self.assertEqual(make_tile.call_count, 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NULL",
+                (root,)).fetchone()[0], 15)
 
     def complete_old_tile(self, parent: str, replicas: int = 2) -> None:
         child = self.child(parent)

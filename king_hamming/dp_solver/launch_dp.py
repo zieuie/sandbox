@@ -671,6 +671,51 @@ def upgrade_leader(path: Path) -> None:
                       "workers_preserved": len(manifest.get("workers", []))}, indent=2))
 
 
+def upgrade_leader_live(path: Path) -> None:
+    """Restart only the owned leader while healthy active leases keep running.
+
+    Never use the stopped campaign state here: run-control treats that as a
+    request to stop every active solver. The short leader outage is tolerated
+    by agent renewal retries, provided every lease has sufficient slack.
+    """
+
+    manifest = json.loads(path.read_text())
+    database_path = path.parent / "leader.sqlite"
+    validate_owned_leader(manifest, database_path)
+    expected_nodes = {'dp-' + worker['host'].rsplit('.', 1)[1]
+                      for worker in manifest.get('workers', [])}
+    with sqlite3.connect(database_path, timeout=45) as database:
+        database.execute('BEGIN IMMEDIATE')
+        now = time.time()
+        settings = dict(database.execute(
+            "SELECT key,value FROM settings WHERE key IN ('campaign_state','lease_seconds')"))
+        lease_seconds = float(settings['lease_seconds'])
+        if settings['campaign_state'] != 'running' or lease_seconds < 45:
+            raise ValueError('live leader upgrade requires a running campaign with leases >=45 seconds')
+        active = database.execute(
+            "SELECT run_id,lease_expires FROM runs WHERE state IN ('running','stopping')").fetchall()
+        if any(expires is None or expires - now < 30 for _, expires in active):
+            raise ValueError('an active lease has less than 30 seconds remaining; retry shortly')
+        nodes = {name: heartbeat for name, heartbeat in database.execute(
+            "SELECT node_name,last_heartbeat FROM nodes")}
+        if not expected_nodes or any(now - nodes.get(name, 0) > lease_seconds / 2
+                                     for name in expected_nodes):
+            raise ValueError('a retained worker heartbeat is stale; refusing live leader upgrade')
+        database.commit()
+    started = time.monotonic()
+    restart_owned_leader(manifest, path)
+    outage = time.monotonic() - started
+    if outage >= 30:
+        raise RuntimeError(f'leader restart took {outage:.1f}s; inspect active lease health')
+    status = request(manifest['leader'], '/v1/status')
+    healthy = {node['node_name'] for node in status['nodes'] if node.get('state') == 'healthy'}
+    if status['campaign_state'] != 'running' or not expected_nodes <= healthy:
+        raise RuntimeError('leader restarted, but campaign or retained worker health is not restored')
+    print(json.dumps({'leader_restarted': True, 'campaign_state': 'running',
+                      'workers_healthy': len(expected_nodes), 'active_leases_before': len(active),
+                      'restart_seconds': round(outage, 2)}, indent=2))
+
+
 # Expand the table frontier while preserving previously submitted mathematical entries.
 def extend(arguments: argparse.Namespace, path: Path) -> None:
     """Submit up to limit new prime powers under max_visits, retaining old runs and settings."""
@@ -802,8 +847,10 @@ def main() -> int:
                                   help='record optional same-LAN blob addresses for retained agents')
     network.add_argument('--group', required=True)
     network.add_argument('assignments', nargs='+', metavar='HOST=IP')
-    commands.add_parser('upgrade-leader',
-                        help='restart the owned idle leader and leave dispatch stopped')
+    leader_upgrade = commands.add_parser('upgrade-leader',
+                        help='restart the owned leader (idle by default, or guarded live restart)')
+    leader_upgrade.add_argument('--live', action='store_true',
+                                help='preserve active leases and running dispatch; refuse stale workers/leases')
     expansion = commands.add_parser('extend', help='add new prime powers without repeating existing entries')
     expansion.add_argument('--max-visits', type=int, default=30_000_000_000_000)
     expansion.add_argument('--limit', type=int, default=100)
@@ -828,7 +875,10 @@ def main() -> int:
         elif arguments.action == 'set-storage-addresses':
             set_storage_addresses(path, arguments.group, arguments.assignments)
         elif arguments.action == 'upgrade-leader':
-            upgrade_leader(path)
+            if arguments.live:
+                upgrade_leader_live(path)
+            else:
+                upgrade_leader(path)
         elif arguments.action == 'extend':
             extend(arguments, path)
         elif arguments.action == 'ensure-feeder':

@@ -277,6 +277,14 @@ remains is checking space before admitting work.
       back to back while a large backlog clears), and each agent's garbage plan
       takes about 40 ms. Agents pause one second between full batches to keep
       this bounded, but it is worth watching after the first rollout.
+    - **Fix prepared (2026-10-03):** the DP scheduler was rebuilding about
+      193,000 tile descriptors and primality estimates on each pass just to
+      reject blocked tiles. It now checks predecessor coordinates first,
+      fetches durable replicas and retry metadata in bulk, and skips unchanged
+      progress writes. Against a private copy of the four-root campaign DB,
+      `dp_solver.distributed.advance()` fell from about 1.0 s to 0.17 s per
+      pass. Confirm the live leader log stays free of lock errors after its
+      next safe restart; this change does not require worker replacement.
 
 17. **`campaigns/result_table.py` once aborted on one uncollected artifact (may
     be moot).**

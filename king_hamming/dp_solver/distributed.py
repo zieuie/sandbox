@@ -8,6 +8,7 @@ else:
     from . import bootstrap
 
 import json
+import math
 import os
 import sqlite3
 import uuid
@@ -303,21 +304,34 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
             "SELECT t.row,t.column,t.child_run_id,r.* FROM distributed_tiles t LEFT JOIN runs r ON r.run_id=t.child_run_id "
             "WHERE t.parent_run_id=? ORDER BY t.row,t.column", (parent["run_id"],),
         ).fetchall()
-        lookup = {(row["row"], row["column"]): row for row in rows}
-        available = {key: artifact_record(connection, row, now) for key, row in lookup.items() if row["child_run_id"]}
-        durable = {key for key, record in available.items() if record and len(record["locations"]) >= 2}
-        done = sum((tile(p,r,side,*key).value_bytes//8) for key in durable)
-        connection.execute("UPDATE runs SET progress_done=?,progress_checkpoint_done=?,last_progress_at=CASE WHEN progress_done<? THEN ? ELSE last_progress_at END,progress_message=? WHERE run_id=?",
-                           (done, done, done, now, f"{len(durable)}/{len(rows)} replicated tiles", parent["run_id"]))
+        lease = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
+        durable = {(row[0], row[1]) for row in connection.execute(
+            "SELECT t.row,t.column FROM distributed_tiles t "
+            "JOIN runs child ON child.run_id=t.child_run_id "
+            "JOIN replicas replica ON replica.artifact_hash=child.artifact_hash "
+            "JOIN nodes node ON node.node_name=replica.node_name "
+            "WHERE t.parent_run_id=? AND child.state='complete' "
+            "AND node.last_heartbeat>? GROUP BY t.row,t.column HAVING COUNT(*)>=2",
+            (parent["run_id"], now - lease))}
+        budget = math.isqrt(parent["progress_total"])
+        done = sum(min(side, budget - row * side) * min(side, budget - column * side)
+                   for row, column in durable)
+        message = f"{len(durable)}/{len(rows)} replicated tiles"
+        if done != parent["progress_done"] or message != parent["progress_message"]:
+            connection.execute("UPDATE runs SET progress_done=?,progress_checkpoint_done=?,"
+                               "last_progress_at=CASE WHEN progress_done<? THEN ? ELSE last_progress_at END,"
+                               "progress_message=? WHERE run_id=?",
+                               (done, done, done, now, message, parent["run_id"]))
+        retries = {(retry["row"], retry["column"]): retry for retry in connection.execute(
+            "SELECT row,column,failures,next_retry FROM distributed_tile_retries WHERE parent_run_id=?",
+            (parent["run_id"],))}
         exhausted = None
         for row in rows:
             if row["state"] != "failed":
                 continue
             key = (parent["run_id"], row["row"], row["column"])
-            prior = connection.execute(
-                "SELECT failures FROM distributed_tile_retries WHERE parent_run_id=? AND row=? AND column=?",
-                key).fetchone()
-            failures = (prior[0] if prior else 0) + 1
+            prior = retries.get((row["row"], row["column"]))
+            failures = (prior["failures"] if prior else 0) + 1
             if failures > TILE_RETRY_LIMIT:
                 exhausted = row
                 break
@@ -327,6 +341,7 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
                 "VALUES(?,?,?,?,?) ON CONFLICT(parent_run_id,row,column) DO UPDATE SET "
                 "failures=excluded.failures,next_retry=excluded.next_retry",
                 (*key, failures, now + delay))
+            retries[(row["row"], row["column"])] = {"failures": failures, "next_retry": now + delay}
             connection.execute(
                 "UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? AND row=? AND column=? "
                 "AND child_run_id=?", (*key, row["child_run_id"]))
@@ -344,17 +359,24 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
         if len(durable) == len(rows):
             connection.execute("UPDATE runs SET state='queued',progress_phase='reconstructing' WHERE run_id=?", (parent["run_id"],))
             continue
+        halo = p * p
         for row in rows:
             if row["child_run_id"]:
                 continue
-            retry = connection.execute(
-                "SELECT next_retry FROM distributed_tile_retries WHERE parent_run_id=? AND row=? AND column=?",
-                (parent["run_id"], row["row"], row["column"])).fetchone()
-            if retry is not None and now < retry[0]:
+            retry = retries.get((row["row"], row["column"]))
+            if retry is not None and now < retry["next_retry"]:
                 continue
-            target = tile(p,r,side,row["row"],row["column"])
-            if any((item.row,item.column) not in durable for item in dependencies(p,r,side,target)):
+            target_row, target_column = row["row"], row["column"]
+            # dependencies() constructs full tile descriptors; only their grid
+            # coordinates matter until this child is actually ready to queue.
+            first_row = max(0, (target_row * side - halo) // side)
+            first_column = max(0, (target_column * side - halo) // side)
+            if any((predecessor_row, predecessor_column) not in durable
+                   for predecessor_row in range(first_row, target_row + 1)
+                   for predecessor_column in range(first_column, target_column + 1)
+                   if (predecessor_row, predecessor_column) != (target_row, target_column)):
                 continue
+            target = tile(p,r,side,target_row,target_column)
             child_specification_value = child_specification(parent, target.row, target.column)
             child = str(uuid.uuid4())
             connection.execute("INSERT INTO runs(run_id,calculation_id,specification,state,priority,from_scratch,created,estimated_seconds,parent_run_id) VALUES(?,?,?,'queued',?,0,?,?,?)",
