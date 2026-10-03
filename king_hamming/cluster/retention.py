@@ -187,21 +187,20 @@ def collect_plan(connection: sqlite3.Connection, node: str, now: float) -> dict[
         return {"blob_hashes": [], "retired": retired,
                 "checkpoint_keep": int(setting(connection, "checkpoint_keep")),
                 "deferred": "storage revalidation", "revalidation_pending": proving}
-    protected = {row[0] for row in connection.execute("SELECT artifact_hash FROM artifacts")}
-    pinned_members: set[str] = set()
-
-    for row in connection.execute("SELECT * FROM checkpoints WHERE retired_at IS NULL"):
-        pinned_members.update(members(row))
-    protected |= pinned_members
-
     deletable: list[str] = []
-
-    for row in connection.execute("SELECT blob_hash FROM checkpoint_garbage WHERE node_name=?", (node,)):
-        if row["blob_hash"] not in protected:
-            deletable.append(row["blob_hash"])
-
-        if len(deletable) == 128:
-            break
+    garbage = [row[0] for row in connection.execute(
+        "SELECT blob_hash FROM checkpoint_garbage WHERE node_name=?", (node,))]
+    pinned_members: set[str] = set()
+    if garbage:
+        protected = {row[0] for row in connection.execute("SELECT artifact_hash FROM artifacts")}
+        for row in connection.execute("SELECT * FROM checkpoints WHERE retired_at IS NULL"):
+            pinned_members.update(members(row))
+        protected |= pinned_members
+        for digest in garbage:
+            if digest not in protected:
+                deletable.append(digest)
+            if len(deletable) == 128:
+                break
 
     # Artifact copies the leader has already dropped from its index (finished fields, surplus
     # copies). Not in `protected`: that set keeps artifacts, which these still are, elsewhere.
@@ -217,6 +216,9 @@ def collect_plan(connection: sqlite3.Connection, node: str, now: float) -> dict[
         queued = [row["artifact_hash"] for row in connection.execute(
             "SELECT artifact_hash FROM artifact_trim WHERE node_name=? ORDER BY created,artifact_hash LIMIT ?",
             (node, TRIM_BATCH))]
+    if queued and not garbage:
+        for row in connection.execute("SELECT * FROM checkpoints WHERE retired_at IS NULL"):
+            pinned_members.update(members(row))
     # A blob that is also a retained checkpoint member must stay: cancel its deletion.
     kept = [digest for digest in queued if digest in pinned_members]
     connection.executemany("DELETE FROM artifact_trim WHERE node_name=? AND artifact_hash=?",

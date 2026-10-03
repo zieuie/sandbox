@@ -1586,7 +1586,10 @@ def scheduler_loop(
 ) -> None:
     """Expire leases and advance adapter queues until stop is set."""
 
-    interval = min(1.0, lease_seconds / 3)
+    # A full DAG pass may inspect tens of thousands of tiles. Ready children
+    # remain queued between passes; a three-second cadence frees substantial
+    # writer time for lease renewals without starving the frontier.
+    interval = min(3.0, lease_seconds / 3)
 
     while not stop.wait(interval):
         health.attempting()
