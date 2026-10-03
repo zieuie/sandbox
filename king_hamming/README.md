@@ -20,6 +20,13 @@ lives in `adapter_config.py`. [`matching_solver/`](./matching_solver/) now has a
 independent verification, hydration, and a registered cluster adapter for pinned
 field attempts with replicated phase checkpoints and final certificates.
 
+GPU acceleration ([`docs/GPU.md`](docs/GPU.md)): [`gpu_match_solver/`](./gpu_match_solver/)
+provides the exact single-GPU `match_gpu` program (seconds instead of hours, KHM1
+certificates verified as usual), and [`gpu_dp_solver/`](./gpu_dp_solver/) a
+byte-identical GPU drop-in for `kh_dp_tile` that tile leases use opportunistically.
+Both load the NVIDIA driver at run time through [`cuda/`](./cuda/); no CUDA toolkit
+is needed on workers.
+
 The design documents at the project root are:
 
 - [`docs/CLUSTER_INVENTORY.md`](docs/CLUSTER_INVENTORY.md): current hardware, OS,
@@ -48,6 +55,8 @@ To build and test the production implementations from the repository root:
 make -C king_hamming/dp_solver check
 make -C king_hamming/matching_solver check
 make -C king_hamming/cluster check
+make -C king_hamming/gpu_match_solver check   # needs a CUDA GPU
+make -C king_hamming/gpu_dp_solver check      # needs a CUDA GPU
 ```
 
 Replicated native DP checkpoints and cross-worker recovery are now implemented

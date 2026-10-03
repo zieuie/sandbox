@@ -25,6 +25,7 @@ from matching_solver.artifacts import load_dp, request_count, verify
 from matching_solver.adapter import distributed_memory_required
 from matching_solver.polynomials import first_primitive, next_primitive
 from matching_solver.submit import specification as matching_specification
+from campaigns import gpu_policy
 
 TERMINAL = {"complete", "failed", "cancelled"}
 DEFAULTS = {
@@ -180,6 +181,14 @@ def matching_admitted(dp: dict, settings: dict) -> tuple[bool, str]:
     return True, "admitted"
 
 
+def plan_matching(dp: dict, settings: dict, nodes, policy=None) -> dict | None:
+    """Prefer one fenced GPU when a live node can hold the field; else the configured policy."""
+    gpu = gpu_policy.plan(dp, settings, list(nodes))
+    if gpu is not None:
+        return gpu
+    return policy.plan(dp, settings, nodes) if policy is not None else None
+
+
 def matching_worker_count(dp: dict, settings: dict) -> int:
     """Choose a configured small, medium, or full group by retained request count."""
     count = request_count(dp)
@@ -203,10 +212,10 @@ def matchable_backlog(pipeline: dict, nodes=(), policy=None) -> int:
         if not record.get("dp_artifact") or record.get("matching_complete"):
             continue
         dp, _ = load_dp(Path(record["dp_artifact"]))
-        if policy is None:
+        plan = plan_matching(dp, settings, nodes, policy)
+        if plan is None:
             admitted, reason = matching_admitted(dp, settings)
         else:
-            plan = policy.plan(dp, settings, nodes)
             record["matching_plan"] = plan
             admitted, reason = plan["admitted"], plan["reason"]
         record["matching_admission"] = reason
@@ -234,9 +243,13 @@ def enqueue_attempt(manifest: dict, pipeline: dict, record: dict,
     settings = pipeline["settings"]
     dp, _ = load_dp(Path(record["dp_artifact"]))
     workers = matching_worker_count(dp, settings) if plan is None else plan["workers"]
-    if plan is not None and (not plan["admitted"] or plan["program"] not in {"match", "match_partitioned"}):
+    if plan is not None and (not plan["admitted"] or plan["program"] not in {"match", "match_partitioned", "match_gpu"}):
         raise ValueError("capacity policy cannot submit an inadmissible plan")
-    if plan is not None and plan["program"] == "match_partitioned":
+    if plan is not None and plan["program"] == "match_gpu":
+        from gpu_match_solver.submit import specification as gpu_specification
+        job = gpu_specification(Path(record["dp_artifact"]), ",".join(map(str, polynomial)),
+                                plan["threads"], plan["max_bytes"])
+    elif plan is not None and plan["program"] == "match_partitioned":
         from matching_solver_multi.submit import specification as partitioned_specification
         job = partitioned_specification(
             Path(record["dp_artifact"]), ",".join(map(str, polynomial)), workers=workers,
@@ -278,7 +291,7 @@ def recover_matching_attempts(pipeline: dict, runs: dict[str, dict]) -> None:
         specification = run.get("specification")
         if isinstance(specification, str):
             specification = json.loads(specification)
-        if not isinstance(specification, dict) or specification.get("program") not in {"match", "match_distributed", "match_partitioned"}:
+        if not isinstance(specification, dict) or specification.get("program") not in {"match", "match_distributed", "match_partitioned", "match_gpu"}:
             continue
         arguments = specification["arguments"]
         record = by_digest.get(arguments.get("dp_sha256"))
@@ -345,7 +358,7 @@ def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
                     record["candidate_exhausted"] = True
                     counts["exhausted"] += 1
                     continue
-        plan = policy.plan(dp, settings, nodes) if policy else None
+        plan = plan_matching(dp, settings, nodes, policy)
         if plan is None:
             admitted, reason = matching_admitted(dp, settings)
         else:

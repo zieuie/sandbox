@@ -1,0 +1,6 @@
+{"field": "13^9", "side": 512, "cpu_threads": 2, "cpu_seconds": 0.393, "gpu_seconds": 0.167, "speedup": 2.3, "identical": true}
+{"field": "23^7", "side": 512, "cpu_threads": 2, "cpu_seconds": 2.369, "gpu_seconds": 0.197, "speedup": 12.0, "identical": true}
+{"field": "13^9", "side": 512, "cpu_threads": 8, "cpu_seconds": 0.234, "gpu_seconds": 0.174, "speedup": 1.3, "identical": true}
+{"field": "23^7", "side": 512, "cpu_threads": 8, "cpu_seconds": 2.924, "gpu_seconds": 0.208, "speedup": 14.1, "identical": true}
+{"field": "13^9", "side": 4096, "cpu_threads": 2, "cpu_seconds": 59.869, "gpu_seconds": 0.921, "speedup": 65.0, "identical": true}
+{"field": "23^7", "side": 4096, "cpu_threads": 2, "cpu_seconds": 338.223, "gpu_seconds": 2.356, "speedup": 143.6, "identical": true}

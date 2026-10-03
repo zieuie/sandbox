@@ -1,12 +1,20 @@
 CC ?= cc
 CFLAGS ?= -O3 -std=c11 -Wall -Wextra -Wpedantic -Werror
-CPPFLAGS ?= -I../dp_solver/include
+CPPFLAGS ?= -Iinclude -I../cuda -I../dp_solver/include -I../matching_solver/include
 
-# Read-only reuse of the production field builder; nothing outside this folder is modified.
 SHARED = ../dp_solver/src/field.c ../dp_solver/src/threads.c ../dp_solver/src/common.c
+CUDA = ../cuda/kh_cuda.c ../cuda/kh_cuda.h
+EMBED = ../cuda/.venv/bin/python ../cuda/embed.py
 
-.PHONY: all venv check clean
-all: build/kh_field_export build/kh_cpu_reference
+.PHONY: all images venv check bench clean
+all: kh_gpu_match_kernel build/kh_field_export build/kh_cpu_reference
+
+kh_gpu_match_kernel: src/main.c src/kernels_images.c $(CUDA) $(SHARED) ../matching_solver/src/resource.c ../dp_solver/include/kh_field.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread src/main.c src/kernels_images.c ../cuda/kh_cuda.c ../matching_solver/src/resource.c $(SHARED) -ldl -o $@
+
+# Regenerate committed kernel images after editing src/kernels.cu (needs make -C ../cuda toolchain).
+images:
+	$(EMBED) src/kernels.cu kh_match_images -o src/kernels_images.c
 
 build/kh_field_export: src/field_export.c $(SHARED) ../dp_solver/include/kh_field.h
 	mkdir -p build
@@ -16,14 +24,14 @@ build/kh_cpu_reference: src/cpu_reference.c
 	mkdir -p build
 	$(CC) $(CFLAGS) src/cpu_reference.c -o $@
 
+# Optional CuPy prototype environment (gpu_match.py).
 venv:
 	python3 -m venv .venv
 	.venv/bin/pip install "cupy-cuda12x[ctk]" numpy
 
 check: all
-	.venv/bin/python gpu_match.py ../examples/5_3.khdp --poly 2,3,0,1 -o /tmp/gpu_5_3.khmatch --force
-	.venv/bin/python gpu_match.py ../examples/7_5.khdp -o /tmp/gpu_7_5.khmatch --force
-	.venv/bin/python gpu_match.py ../matching_solver/examples/13_5.khdp --poly 2,4,0,0,0,1 -o /tmp/gpu_13_5.khmatch --force
+	./kh_gpu_match_kernel >/dev/null
+	python3 tests/check.py --run
 
 clean:
-	rm -rf build
+	rm -rf build kh_gpu_match_kernel

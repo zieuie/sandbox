@@ -50,6 +50,7 @@ class ResourceRequest:
     worker_memory_bytes: int
     min_cpu_count: int
     require_known_capacity: bool = False
+    gpu_memory_bytes: int = 0
 
     @classmethod
     def from_adapter(cls, raw: Any) -> "ResourceRequest":
@@ -63,7 +64,11 @@ class ResourceRequest:
         strict = raw.get("require_known_capacity", False)
         if type(strict) is not bool:
             raise ValueError("adapter requested invalid capacity validation")
-        return cls(*(raw[key] for key in keys), require_known_capacity=strict)
+        gpu = raw.get("gpu_memory_bytes", 0)
+        if type(gpu) is not int or gpu < 0:
+            raise ValueError("adapter requested invalid GPU memory")
+        return cls(*(raw[key] for key in keys), require_known_capacity=strict,
+                   gpu_memory_bytes=gpu)
 
     def memory_for(self, role: str) -> int:
         """Return the host-memory request for coordinator or worker role."""

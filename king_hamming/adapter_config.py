@@ -12,3 +12,5 @@ def configure(register):
     register(MatchingAdapter())
     from matching_solver_multi.adapter import PartitionedAdapter
     register(PartitionedAdapter())
+    from gpu_match_solver.adapter import GPUMatchingAdapter
+    register(GPUMatchingAdapter())

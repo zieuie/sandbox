@@ -1,0 +1,3 @@
+{"bench": "match 5^11", "wall": 34.23, "rc": 0, "meta": {"p": 5, "r": 11, "candidate": 0, "polynomial": [2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], "status": 0, "required": 48828125, "matched": 48828125, "phases": 2, "scans": 2583621595, "memory_required": 491538296, "hall_left": 0, "hall_right": 0, "engine": "gpu", "device": "Quadro P600", "device_bytes": 1689140568, "seconds": {"setup": 0.0, "field": 21.101, "upload": 0.087, "greedy": 3.934, "augment": 4.355, "output": 4.731}}}
+{"bench": "dp tile 13^9 side 4096", "wall": 3.68, "rc": 0, "stderr": "kh_gpu_dp_tile: device=Quadro P600 transitions=1838 compute_seconds=3.223"}
+{"bench": "dp tile 23^7 side 4096", "wall": 20.02, "rc": 0, "stderr": "kh_gpu_dp_tile: device=Quadro P600 transitions=9969 compute_seconds=19.252"}

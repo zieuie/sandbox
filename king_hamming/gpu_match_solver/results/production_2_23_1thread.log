@@ -1,0 +1,9 @@
+phase=1 matched=8386139/8388608 scans=25768380521 parallel=0
+phase=2 matched=8388606/8388608 scans=33493827744 parallel=0
+phase=3 matched=8388608/8388608 scans=44341636695 parallel=0
+{"p":2,"r":23,"candidate":0,"polynomial":[1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],"status":0,"required":8388608,"matched":8388608,"phases":3,"scans":44341636695,"memory_required":344981576,"hall_left":0,"hall_right":0}
+{"event":"resource_usage","component":"solver","shard_index":0,"cpu_microseconds":1056946719,"peak_rss_bytes":236785664}
+
+real	18m5.350s
+user	17m36.818s
+sys	0m0.129s

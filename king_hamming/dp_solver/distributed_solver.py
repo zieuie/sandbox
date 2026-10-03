@@ -24,10 +24,12 @@ import time
 from agent import request_json
 from blob_store import fetch_blob
 from dependency_cache import checkout
+import gpus
 from dp_solver.scheduling import dp_estimate
 from dp_solver.tiles import build_halo, tile
 
 ROOT = Path(__file__).resolve().parent
+GPU_TILE = ROOT.parent / "gpu_dp_solver" / "kh_gpu_dp_tile"
 STOP = False
 REPORTER = None
 
@@ -177,22 +179,49 @@ def compute(arguments, specification: dict) -> None:
     output=arguments.output.parent/"tile-output"
     cpus=sorted(os.sched_getaffinity(0))
     threads=min(int(options.get("threads",1)),len(cpus))
-    command=[sys.executable,str(ROOT.parent/"cluster"/"affinity_exec.py"),"--parent-pid",str(os.getpid()),"--cpus",",".join(map(str,cpus)),"--",
-             str(ROOT.parent/"dp_solver"/"kh_dp_tile"),str(p),str(r),str(rectangle.first_u),str(rectangle.last_u),str(rectangle.first_v),str(rectangle.last_v),
-             str(halo),str(output),str(threads),str(options.get("max_tile_bytes",2*1024**3))]
-    process=subprocess.Popen(command)
-    try:
-        while process.poll() is None:
-            if STOP:
-                process.terminate()
-                raise InterruptedError("tile stopped")
-            time.sleep(0.1)
-        if process.returncode!=0:
-            raise RuntimeError(f"C tile kernel exited {process.returncode}")
-    finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait()
+    tail=[str(p),str(r),str(rectangle.first_u),str(rectangle.last_u),str(rectangle.first_v),str(rectangle.last_v),
+          str(halo),str(output),str(threads),str(options.get("max_tile_bytes",2*1024**3))]
+
+    def kernel(binary):
+        """Run one tile binary under the lease's CPU affinity; return its exit status."""
+        command=[sys.executable,str(ROOT.parent/"cluster"/"affinity_exec.py"),"--parent-pid",str(os.getpid()),
+                 "--cpus",",".join(map(str,cpus)),"--",str(binary),*tail]
+        process=subprocess.Popen(command)
+        try:
+            while process.poll() is None:
+                if STOP:
+                    process.terminate()
+                    raise InterruptedError("tile stopped")
+                time.sleep(0.1)
+            return process.returncode
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+    # The GPU kernel's output is byte-identical to kh_dp_tile, so it is an opportunistic
+    # accelerator: wait briefly for this host's GPU, otherwise compute on the leased CPUs.
+    computed=False
+    device=int(os.environ.get("KH_GPU_DEVICE","0"))
+    if (GPU_TILE.exists() and os.environ.get("KH_DISABLE_GPU_DP")!="1" and
+            not gpus.recently_unavailable(device)):
+        lock=gpus.DeviceLock(device)
+        if lock.acquire(float(os.environ.get("KH_GPU_DP_WAIT_SECONDS","120")),lambda: STOP):
+            try:
+                code=kernel(GPU_TILE)
+            finally:
+                lock.release()
+            computed=code==0
+            if code==3:
+                gpus.mark_unavailable(device)
+            if not computed and output.exists():
+                shutil.rmtree(output)
+        if STOP:
+            raise InterruptedError("tile stopped")
+    if not computed:
+        code=kernel(ROOT.parent/"dp_solver"/"kh_dp_tile")
+        if code!=0:
+            raise RuntimeError(f"C tile kernel exited {code}")
     with arguments.output.open("xb") as stream:
         with tarfile.open(fileobj=stream,mode="w|gz",format=tarfile.USTAR_FORMAT,compresslevel=1) as archive:
             for name in ("values.bin","choices.bin","tile.json"):
@@ -200,7 +229,8 @@ def compute(arguments, specification: dict) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     cells=rectangle.value_bytes//8
-    print(json.dumps({"done":cells,"total":cells,"checkpoint_done":cells,"units":"cells","phase":"complete","heartbeat":True}),flush=True)
+    print(json.dumps({"done":cells,"total":cells,"checkpoint_done":cells,"units":"cells","phase":"complete","heartbeat":True,
+                      "engine":"gpu" if computed else "cpu"}),flush=True)
 
 
 # Reconstruct through on-demand native choice shards without downloading a whole field table.

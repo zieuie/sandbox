@@ -24,6 +24,7 @@ from checkpoints import DEFAULT_MAX_BYTES
 import recovery
 import retention
 import adapters
+import gpus
 from resources import ResourceRequest, fits as resource_fits, normalized_slots
 
 SCHEMA_VERSION = 5
@@ -282,6 +283,7 @@ def initialize(
             "assigned_cpu_set": "TEXT",
             "reserved_memory_bytes": "INTEGER NOT NULL DEFAULT 0",
             "exclusive_host": "INTEGER NOT NULL DEFAULT 1",
+            "gpu_index": "INTEGER",
         }
 
         for name, definition in additions.items():
@@ -290,6 +292,8 @@ def initialize(
         node_columns = {row["name"] for row in connection.execute("PRAGMA table_info(nodes)")}
         if "storage_free_bytes" not in node_columns:
             connection.execute("ALTER TABLE nodes ADD COLUMN storage_free_bytes INTEGER NOT NULL DEFAULT 0")
+        if "gpus_json" not in node_columns:
+            connection.execute("ALTER TABLE nodes ADD COLUMN gpus_json TEXT NOT NULL DEFAULT '[]'")
         connection.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('campaign_state', 'running')"
         )
@@ -500,7 +504,8 @@ def make_handler(
                         "lease_seconds": lease_seconds,
                         "checkpoint_keep": checkpoint_keep,
                         "schema_version": schema_version,
-                        "capabilities": ["known-capacity-admission-v1", "partitioned-matching-v1"],
+                        "capabilities": ["known-capacity-admission-v1", "partitioned-matching-v1",
+                                         "gpu-leases-v1"],
                         "scheduler": scheduler.snapshot(),
                         "runs": runs,
                         "nodes": nodes,
@@ -689,20 +694,23 @@ def make_handler(
                             "SELECT 1 FROM node_revalidation WHERE node_name=? LIMIT 1",
                             (request["node_name"],)).fetchone() is None:
                         validation_mode = "verified"
+                    gpu_list = (gpus.normalized(request.get("gpus")) if route == "/v1/register"
+                                else gpus.from_record(existing) if existing is not None else [])
                     slots = normalized_slots(
                         request.get("slots") if route == "/v1/register" else
                         json.loads(existing["slots_json"] or "[]") if existing is not None else None,
                         request.get("cpu_set", existing["cpu_set"] if existing is not None else ""),
                     )
                     connection.execute(
-                        "INSERT INTO nodes(node_name,address,cpu_set,storage_root,last_heartbeat,state,session_id,compute_enabled,memory_bytes,runtime_version,physical_core_count,storage_generation,storage_validation_mode,slots_json,storage_free_bytes) "
-                        "VALUES(?,?,?,?,?,'healthy',?,?,?,?,?,?,?,?,?) ON CONFLICT(node_name) DO UPDATE SET "
+                        "INSERT INTO nodes(node_name,address,cpu_set,storage_root,last_heartbeat,state,session_id,compute_enabled,memory_bytes,runtime_version,physical_core_count,storage_generation,storage_validation_mode,slots_json,storage_free_bytes,gpus_json) "
+                        "VALUES(?,?,?,?,?,'healthy',?,?,?,?,?,?,?,?,?,?) ON CONFLICT(node_name) DO UPDATE SET "
                         "address=excluded.address,cpu_set=excluded.cpu_set,storage_root=excluded.storage_root, "
                         "last_heartbeat=excluded.last_heartbeat,state='healthy',session_id=excluded.session_id, "
                         "compute_enabled=excluded.compute_enabled,memory_bytes=excluded.memory_bytes,"
                         "runtime_version=excluded.runtime_version,physical_core_count=excluded.physical_core_count,"
                         "storage_generation=excluded.storage_generation,storage_validation_mode=excluded.storage_validation_mode,"
-                        "slots_json=excluded.slots_json,storage_free_bytes=excluded.storage_free_bytes",
+                        "slots_json=excluded.slots_json,storage_free_bytes=excluded.storage_free_bytes,"
+                        "gpus_json=excluded.gpus_json",
                         (request["node_name"], request.get("address", ""), request.get("cpu_set", ""),
                          request.get("storage_root", ""), now, session_id,
                          int(not request.get("storage_only", False)),
@@ -714,7 +722,8 @@ def make_handler(
                              "physical_core_count",
                              existing["physical_core_count"] if existing is not None else 0))),
                          storage_generation, validation_mode, json.dumps(slots, separators=(",", ":")),
-                         max(0, int(request.get("storage_free_bytes", 0)))),
+                         max(0, int(request.get("storage_free_bytes", 0))),
+                         json.dumps(gpu_list, separators=(",", ":"))),
                     )
                     return {"ok": True, "heartbeat_seconds": min(10.0, lease_seconds / 3),
                             "storage_validation_mode": validation_mode}
@@ -939,6 +948,16 @@ def make_handler(
                         if (not resource_fits(participant, resources, "coordinator") or
                                 (int(node["memory_bytes"]) and required_memory > available_memory)):
                             continue
+                        gpu_index = None
+                        if resources.gpu_memory_bytes:
+                            # One GPU lease per device; opportunistic DP tiles share it via a host lock.
+                            busy = {row[0] for row in connection.execute(
+                                "SELECT gpu_index FROM runs WHERE node_name=? AND state='running' "
+                                "AND gpu_index IS NOT NULL", (node["node_name"],))}
+                            gpu_index = gpus.choose(gpus.from_record(node), busy,
+                                                    resources.gpu_memory_bytes)
+                            if required != 1 or gpu_index is None:
+                                continue
                         available = connection.execute(
                             "SELECT n.node_name,n.address,n.cpu_set,n.memory_bytes FROM nodes n "
                             "WHERE n.compute_enabled=1 AND n.last_heartbeat>? AND n.node_name<>? "
@@ -970,11 +989,11 @@ def make_handler(
                         "last_progress_at=NULL, last_checkpoint_at=NULL, progress_done=0, "
                         "progress_checkpoint_done=0, lease_expires=?, lease_attempt=lease_attempt+1, "
                         "restored_hash=NULL, restored_done=0, error=NULL,slot_id=?,"
-                        "assigned_cpu_set=?,reserved_memory_bytes=?,exclusive_host=? "
+                        "assigned_cpu_set=?,reserved_memory_bytes=?,exclusive_host=?,gpu_index=? "
                         "WHERE run_id=? AND state='queued'",
                         (now, request["node_name"], token, now + lease_seconds,
                          requested_slot, participant["cpu_set"], required_memory,
-                         int(not sharing), row["run_id"]),
+                         int(not sharing), gpu_index, row["run_id"]),
                     )
                     connection.execute(
                         "INSERT INTO lease_history(lease_token,run_id,node_name,attempt,started) VALUES(?,?,?,?,?)",
@@ -996,6 +1015,7 @@ def make_handler(
                             "lease_token": token,
                             "slot_id": requested_slot,
                             "assigned_cpu_set": participant["cpu_set"],
+                            "gpu_index": gpu_index,
                             "reserved_workers": [dict(partner) for partner in selected],
                             "specification": json.loads(row["specification"]),
                             "from_scratch": bool(row["from_scratch"]),

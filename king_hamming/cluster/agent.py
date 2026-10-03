@@ -27,6 +27,7 @@ from urllib.request import Request, urlopen
 from common import calculation_id, canonical_json, store_blob
 from blob_store import blob_path, fetch_blob, file_digest, storage_transaction, sync_directory
 import adapters
+import gpus
 from outcomes import SolverOutcome, classify
 from checkpoints import DEFAULT_MAX_BYTES, capture_checkpoint, fetch_checkpoint, restore_checkpoint, validate_manifest
 
@@ -665,11 +666,13 @@ def supervise_solver(
     stop_grace_seconds: float,
     keeper: LeaseKeeper | None = None,
     snapshot: Callable[[int, threading.Event], None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run one child; return exit, intentional-stop, bounded diagnostics, and progress."""
 
     process = subprocess.Popen(
         command,
+        env=env,
         stdin=subprocess.PIPE if snapshot is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -984,9 +987,14 @@ def run_job(
         command = [sys.executable, str(Path(__file__).with_name("affinity_exec.py")),
                    "--parent-pid", str(os.getpid()), "--cpus", ",".join(str(cpu) for cpu in cpus), "--", *solver]
         restart_count = 0
+        environment = None
+        if job.get("gpu_index") is not None:
+            # The leader fenced this device for the lease; solvers read KH_GPU_DEVICE.
+            environment = dict(os.environ, KH_GPU_DEVICE=str(int(job["gpu_index"])))
 
         while True:
-            result = supervise_solver(command, leader, job, control_seconds, stop_grace_seconds, keeper, snapshot)
+            result = supervise_solver(command, leader, job, control_seconds, stop_grace_seconds, keeper,
+                                      snapshot, env=environment)
             return_code = result["return_code"]
             keeper.check()
             outcome = classify(return_code, result["stopped"], result["forced"],
@@ -1145,6 +1153,7 @@ def main() -> int:
         "storage_generation": storage_generation(arguments.storage_root),
         "slots": [{"slot_id": index, "cpu_set": ",".join(map(str, values))}
                   for index, values in enumerate(slot_cpus)],
+        "gpus": [] if arguments.storage_only else gpus.detect(),
     }
 
     storage_host, storage_port = arguments.storage_listen.rsplit(":", 1)

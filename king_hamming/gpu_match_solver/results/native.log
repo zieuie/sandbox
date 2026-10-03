@@ -1,0 +1,6 @@
+2^27 matched 134217728 / 134217728 phases 2 secs {'setup': 0.0, 'field': 2.842, 'upload': 0.203, 'greedy': 1.551, 'augment': 2.037, 'output': 4.244} dev_bytes 4613734466
+wall=10.95 rss=620976KB
+3^17 matched 129140163 / 129140163 phases 2 secs {'setup': 0.0, 'field': 18.591, 'upload': 0.186, 'greedy': 1.484, 'augment': 1.71, 'output': 3.593} dev_bytes 4439827874
+wall=25.63 rss=601292KB
+13^7 matched 62748517 / 62748517 phases 2 secs {'setup': 0.0, 'field': 6.243, 'upload': 0.069, 'greedy': 0.698, 'augment': 0.815, 'output': 1.602} dev_bytes 2165913978
+wall=9.46 rss=342084KB

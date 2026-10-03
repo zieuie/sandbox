@@ -52,6 +52,15 @@ def save(path: Path, manifest: dict) -> None:
 
 
 # Launch a detached agent with persistent storage and automatically selected CPU affinity.
+def build_runtime() -> None:
+    """Build every bundled native solver; GPU binaries need only cc (images are committed)."""
+
+    for directory, target in (('dp_solver', 'all'), ('matching_solver', 'all'),
+                              ('matching_solver_multi', 'all'), ('cuda', 'all'),
+                              ('gpu_match_solver', 'kh_gpu_match_kernel'), ('gpu_dp_solver', 'all')):
+        subprocess.run(['make', '-C', str(ROOT.parent/directory), target], check=True)
+
+
 def launch_worker(host: str, directory: str, leader: str, leader_node: bool = False,
                   runtime_version: str = "") -> dict:
     """Start one agent on host; return its exact command and process identity."""
@@ -107,9 +116,7 @@ def start(arguments: argparse.Namespace, path: Path) -> None:
         listener.bind(('0.0.0.0', arguments.port))
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(arguments.hosts)) as pool:
         facts = dict(zip(arguments.hosts, pool.map(preflight, arguments.hosts)))
-    subprocess.run(['make', '-C', str(ROOT.parent/'dp_solver'), 'all'], check=True)
-    subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver'), 'all'], check=True)
-    subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver_multi'), 'all'], check=True)
+    build_runtime()
     entries = list(scheduling.campaign(16*1024**3, arguments.max_visits, 4, 512))[:arguments.limit]
     if not entries:
         raise ValueError('no calculations fit the requested frontier')
@@ -182,8 +189,7 @@ def add_workers(arguments: argparse.Namespace, path: Path) -> None:
         return
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts)) as pool:
         facts = dict(zip(hosts, pool.map(preflight, hosts)))
-    subprocess.run(['make', '-C', str(ROOT.parent/'dp_solver'), 'all'], check=True)
-    subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver'), 'all'], check=True)
+    build_runtime()
     archive = bundle()
     runtime_version = hashlib.sha256(archive).hexdigest()
     for host in hosts:
@@ -436,9 +442,7 @@ def upgrade_workers(path: Path) -> None:
         stop_dispatch_if_idle(path.parent / 'leader.sqlite')
         report["stage"] = "building"
         save(report_path, report)
-        subprocess.run(['make', '-C', str(ROOT.parent/'dp_solver'), 'all'], check=True)
-        subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver'), 'all'], check=True)
-        subprocess.run(['make', '-C', str(ROOT.parent/'matching_solver_multi'), 'all'], check=True)
+        build_runtime()
         archive = bundle()
         runtime_version = hashlib.sha256(archive).hexdigest()
         report["runtime_version"] = runtime_version

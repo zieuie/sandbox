@@ -64,6 +64,11 @@ class DistributedTests(unittest.TestCase):
         count = min(4, len(os.sched_getaffinity(0)))
         if count < 2:
             self.skipTest("two allowed CPUs required")
+        # This checks the CPU pool width; the opportunistic GPU tile path reports one thread.
+        previous = os.environ.get("KH_DISABLE_GPU_DP")
+        os.environ["KH_DISABLE_GPU_DP"] = "1"
+        self.addCleanup(lambda: os.environ.__setitem__("KH_DISABLE_GPU_DP", previous)
+                        if previous is not None else os.environ.pop("KH_DISABLE_GPU_DP", None))
         with tempfile.TemporaryDirectory() as temporary:
             cluster = Cluster(Path(temporary))
             try:

@@ -1,0 +1,2 @@
+{"field": "13^9", "side": 4096, "cpu_threads": 2, "cpu_seconds": 59.869, "gpu_seconds": 0.921, "speedup": 65.0, "identical": true}
+{"field": "23^7", "side": 4096, "cpu_threads": 2, "cpu_seconds": 338.223, "gpu_seconds": 2.356, "speedup": 143.6, "identical": true}

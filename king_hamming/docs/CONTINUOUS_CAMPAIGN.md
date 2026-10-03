@@ -82,6 +82,11 @@ Workers prefer verified local predecessor packets and share a bounded 4 GiB
 per-node dependency cache. The remaining border-only and soft-row-locality
 optimizations are scoped in [DP_NETWORK_LOCALITY.md](DP_NETWORK_LOCALITY.md).
 
+Fields that fit an advertised GPU (Merlin's 3060: up to ~180 M labels; P600s:
+~55 M) are matched by the single-GPU `match_gpu` program instead, and DP tile
+leases use a free host GPU opportunistically with byte-identical results; see
+[GPU.md](GPU.md).
+
 The campaign admits up to a conservative 6 GiB native allocation,
 which includes `7^9` and `5^11` on the current hosts.
 It pauses DP expansion at four unmatched, currently matchable ready fields or
