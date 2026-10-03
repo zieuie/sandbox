@@ -111,7 +111,7 @@ class RolloutTests(unittest.TestCase):
             ])
             built = [Path(item.args[0][2]).name for item in build.call_args_list]
             self.assertEqual(built, ["dp_solver", "matching_solver", "matching_solver_multi",
-                                     "cuda", "gpu_match_solver", "gpu_dp_solver"])
+                                     "cuda", "gpu_match_solver", "gpu_block_match_solver", "gpu_dp_solver"])
             self.assertTrue(request.call_args_list)
             self.assertTrue(all(item.args[1] == "/v1/status"
                                 for item in request.call_args_list))

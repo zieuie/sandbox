@@ -57,7 +57,8 @@ def build_runtime() -> None:
 
     for directory, target in (('dp_solver', 'all'), ('matching_solver', 'all'),
                               ('matching_solver_multi', 'all'), ('cuda', 'all'),
-                              ('gpu_match_solver', 'kh_gpu_match_kernel'), ('gpu_dp_solver', 'all')):
+                              ('gpu_match_solver', 'kh_gpu_match_kernel'),
+                              ('gpu_block_match_solver', 'kh_gpu_block_kernel'), ('gpu_dp_solver', 'all')):
         subprocess.run(['make', '-C', str(ROOT.parent/directory), target], check=True)
 
 

@@ -243,12 +243,16 @@ def enqueue_attempt(manifest: dict, pipeline: dict, record: dict,
     settings = pipeline["settings"]
     dp, _ = load_dp(Path(record["dp_artifact"]))
     workers = matching_worker_count(dp, settings) if plan is None else plan["workers"]
-    if plan is not None and (not plan["admitted"] or plan["program"] not in {"match", "match_partitioned", "match_gpu"}):
+    if plan is not None and (not plan["admitted"] or plan["program"] not in {"match", "match_partitioned", "match_gpu", "match_gpu_blocks"}):
         raise ValueError("capacity policy cannot submit an inadmissible plan")
     if plan is not None and plan["program"] == "match_gpu":
         from gpu_match_solver.submit import specification as gpu_specification
         job = gpu_specification(Path(record["dp_artifact"]), ",".join(map(str, polynomial)),
                                 plan["threads"], plan["max_bytes"])
+    elif plan is not None and plan["program"] == "match_gpu_blocks":
+        from gpu_block_match_solver.submit import specification as block_specification
+        job = block_specification(Path(record["dp_artifact"]), ",".join(map(str, polynomial)),
+                                  plan["threads"], plan["max_bytes"], plan["gpu_memory_bytes"])
     elif plan is not None and plan["program"] == "match_partitioned":
         from matching_solver_multi.submit import specification as partitioned_specification
         job = partitioned_specification(
@@ -291,7 +295,7 @@ def recover_matching_attempts(pipeline: dict, runs: dict[str, dict]) -> None:
         specification = run.get("specification")
         if isinstance(specification, str):
             specification = json.loads(specification)
-        if not isinstance(specification, dict) or specification.get("program") not in {"match", "match_distributed", "match_partitioned", "match_gpu"}:
+        if not isinstance(specification, dict) or specification.get("program") not in {"match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks"}:
             continue
         arguments = specification["arguments"]
         record = by_digest.get(arguments.get("dp_sha256"))
@@ -327,7 +331,20 @@ def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
                 continue
             latest, run = selected
             latest["state"] = run["state"]
-            if run["state"] in {"failed", "cancelled"}:
+            if run["state"] == "failed" and "block matching incomplete" in (run.get("error") or ""):
+                # The block exchange can end short for one field and still succeed for another
+                # primitive polynomial, so move on rather than rerun the same deterministic attempt.
+                latest["incomplete"] = True
+                if sum(bool(item.get("incomplete")) for item in attempts) >= settings["max_matching_attempts"]:
+                    record["matching_failure"] = run.get("error") or run["state"]
+                    counts["failed_terminal"] += 1
+                    continue
+                polynomial = next_primitive(record["p"], record["r"], record["q"], latest["poly"])
+                if polynomial is None:
+                    record["candidate_exhausted"] = True
+                    counts["exhausted"] += 1
+                    continue
+            elif run["state"] in {"failed", "cancelled"}:
                 same_candidate_failures = sum(
                     item.get("poly") == latest["poly"] and
                     item.get("state") in {"failed", "cancelled"}
