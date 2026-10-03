@@ -78,6 +78,44 @@ class EstimateTests(unittest.TestCase):
             scheduling.dp_estimate(specification)["q"], scheduling.UINT32_MAX,
         )
 
+    def test_tile_plan_keeps_default_reservation_and_sizes_bigger_tiles(self) -> None:
+        """Fields that fit 2 GiB reserve exactly as before; bigger tiles reserve their own need."""
+
+        gib = 1024**3
+        plan = scheduling.plan_tiles(13, 9, 16, 2 * gib)
+        self.assertEqual((plan["side"], plan["reserve"]), (4096, 2 * gib))
+        self.assertIsNone(scheduling.plan_tiles(3, 25, 16, 2 * gib))
+        wide = scheduling.plan_tiles(3, 25, 16, 2 * gib, max_tiles=40_000)
+        self.assertEqual((wide["side"], wide["reserve"]), (8192, 2 * gib))
+        large = scheduling.plan_tiles(3, 25, 16, 4 * gib)
+        self.assertEqual(large["side"], 16384)
+        self.assertGreaterEqual(large["reserve"], large["tile_bytes"])
+        self.assertLess(large["reserve"], 4 * gib)
+        self.assertEqual(large["reserve"] % (256 * 1024**2), 0)
+        self.assertIsNone(scheduling.plan_tiles(127, 3, 16, 2 * gib))
+        self.assertEqual(scheduling.plan_tiles(127, 3, 16, 3 * gib)["side"], 512)
+
+    def test_regional_specifications_name_only_non_default_choices(self) -> None:
+        def field(entries, key):
+            return next(item for item in entries if (item["arguments"]["p"], item["arguments"]["r"]) == key)
+        plain = field(scheduling.regional_campaign(3, 21, 10**12, 8, 2 * 1024**3), (3, 21))
+        self.assertNotIn("tile_format", plain["arguments"])
+        self.assertNotIn("max_tiles", plain["arguments"])
+        chosen = field(scheduling.regional_campaign(3, 21, 10**12, 8, 2 * 1024**3, 40_000, 2), (3, 21))
+        self.assertEqual((chosen["arguments"]["tile_format"], chosen["arguments"]["max_tiles"]), (2, 40_000))
+        with self.assertRaises(ValueError):
+            list(scheduling.regional_campaign(3, 21, 10**12, 8, 2 * 1024**3, tile_format=3))
+
+    def test_format_two_storage_estimate_is_far_below_the_raw_state(self) -> None:
+        sys.path.insert(0, str(ROOT.parent))
+        from campaigns.king_hamming import replica_bytes
+        base = {"program": "dp_distributed", "arguments": {"p": 3, "r": 25, "tile_side": 16384}}
+        raw = replica_bytes(base)
+        self.assertEqual(raw, 3 * scheduling.dp_estimate(base)["state_bytes"])
+        compact = replica_bytes({**base, "arguments": {**base["arguments"], "tile_format": 2}})
+        self.assertLess(compact * 100, raw)
+        self.assertGreater(compact, 3 * 0.01 * scheduling.dp_estimate(base)["budget"] ** 2)
+
 
 # Exercise actual dispatch transactions rather than mirroring the SQL sort expression.
 class QueueTests(unittest.TestCase):

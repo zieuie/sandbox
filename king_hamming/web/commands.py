@@ -565,23 +565,12 @@ TILE_SIDES = (512, 1024, 2048, 4096, 8192, 16384)
 MAX_TILES = 10_000  # dp_solver/distributed.py create() default
 
 
-def tile_plan(p: int, r: int, threads: int, max_tile_bytes: int, sides=TILE_SIDES) -> dict | None:
+def tile_plan(p: int, r: int, threads: int, max_tile_bytes: int, sides=TILE_SIDES,
+              max_tiles: int = MAX_TILES) -> dict | None:
     """The smallest tile side the leader will accept: the same tile-count and
     per-tile memory checks as distributed.create(), so the root is not refused."""
-    import math
-    from dp_solver.scheduling import dp_estimate
-    from dp_solver.tiles import memory_bytes, tile
-    budget = dp_estimate({"arguments": {"p": p, "r": r}})["budget"]
-    for side in sides:
-        count = math.ceil(budget / side)
-        if count * count > MAX_TILES:
-            continue
-        corners = {max(0, count - 2), count - 1}
-        largest = max(memory_bytes(p, tile(p, r, side, row, column), threads)
-                      for row in corners for column in corners)
-        if largest <= max_tile_bytes:
-            return {"side": side, "per_side": count, "tiles": count * count, "tile_bytes": largest}
-    return None
+    from dp_solver.scheduling import plan_tiles
+    return plan_tiles(p, r, threads, max_tile_bytes, max_tiles, sides)
 
 
 def measured_rate(context: Context, now_value: float) -> float | None:
@@ -606,21 +595,25 @@ STORAGE_MARGIN = 1.25          # edge bands and cells compress a little differen
 FALLBACK_BYTES_PER_CELL = 1.0
 
 
-def storage_per_cell(connection) -> float:
-    """Bytes of stored tile packet per DP cell, from the fields finished so far (their sizes survive tile deletion)."""
-    from dp_solver.scheduling import dp_estimate
+def storage_per_cell(connection, tile_format: int = 1) -> float:
+    """Bytes of stored tile packet per DP cell, from the fields of this tile format finished so far
+    (their sizes survive tile deletion). With none finished yet, format 2 uses the planning figure."""
+    from dp_solver.scheduling import STORED_BYTES_PER_CELL, dp_estimate
     stored = cells = 0
     for encoded, size in connection.execute(
             "SELECT p.specification,SUM(a.size) FROM runs p JOIN runs c ON c.parent_run_id=p.run_id "
             "JOIN artifacts a ON a.artifact_hash=c.artifact_hash WHERE p.parent_run_id IS NULL "
             "AND p.state='complete' AND json_extract(p.specification,'$.program')='dp_distributed' "
-            "AND a.size IS NOT NULL GROUP BY p.run_id"):
+            "AND COALESCE(json_extract(p.specification,'$.arguments.tile_format'),1)=? "
+            "AND a.size IS NOT NULL GROUP BY p.run_id", (tile_format,)):
         try:
             cells += dp_estimate({"arguments": json.loads(encoded)["arguments"]})["state_bytes"] // 12
         except (ValueError, KeyError):
             continue
         stored += size or 0
-    return stored / cells if cells else FALLBACK_BYTES_PER_CELL
+    if cells:
+        return stored / cells
+    return FALLBACK_BYTES_PER_CELL if tile_format == 1 else STORED_BYTES_PER_CELL[tile_format]
 
 
 def usable_disk(context: Context, connection, now: float, floor: int) -> tuple[int, str] | None:
@@ -638,13 +631,14 @@ def usable_disk(context: Context, connection, now: float, floor: int) -> tuple[i
     return (sum(max(0, free - floor) for free in live), "reported by the leader's live machines") if live else None
 
 
-def check_disk(context: Context, plan: Plan, estimate: dict, now: float) -> None:
+def check_disk(context: Context, plan: Plan, estimate: dict, now: float, tile_format: int = 1) -> None:
     """Add the field's projected tile storage, and how it compares with the free disk, to plan."""
     from dp_solver.scheduling import dp_estimate
     gib = 1024**3
     copies = 3
     with context.database() as connection:
-        per_cell = storage_per_cell(connection)
+        rates = {fmt: storage_per_cell(connection, fmt) for fmt in (1, 2)}
+        per_cell = rates[tile_format]
         floor = int(float((connection.execute("SELECT value FROM settings WHERE key='disk_floor_bytes'").fetchone()
                            or [DISK_FLOOR_DEFAULT])[0]))
         reserved = 0.0
@@ -653,11 +647,13 @@ def check_disk(context: Context, plan: Plan, estimate: dict, now: float) -> None
                 "AND state IN ('waiting','queued','running','paused','stopping') "
                 "AND json_extract(specification,'$.program')='dp_distributed'"):
             try:
-                cells = dp_estimate({"arguments": json.loads(encoded)["arguments"]})["state_bytes"] // 12
+                arguments = json.loads(encoded)["arguments"]
+                cells = dp_estimate({"arguments": arguments})["state_bytes"] // 12
+                rate = rates[arguments.get("tile_format", 1)]
             except (ValueError, KeyError):
                 continue
             left = 1.0 - (min(done or 0, total) / total if total else 0.0)
-            reserved += cells * per_cell * STORAGE_MARGIN * copies * left
+            reserved += cells * rate * STORAGE_MARGIN * copies * left
         known = usable_disk(context, connection, now, floor)
     one_copy = estimate["state_bytes"] // 12 * per_cell * STORAGE_MARGIN
     need = one_copy * copies
@@ -699,9 +695,11 @@ def submit_field(context: Context, params: dict) -> Plan:
     settings = pipeline.get("settings", {})
     threads = settings.get("dp_threads", 16)
     max_tile_bytes = settings.get("max_tile_bytes", 2 * 1024**3)
+    max_tiles = settings.get("max_tiles", MAX_TILES)
+    tile_format = settings.get("tile_format", 1)
     side = params.get("tile_side")
     plan_tiles = tile_plan(p, r, threads, max_tile_bytes,
-                           (as_int(side, "tile_side"),) if side not in (None, "") else TILE_SIDES)
+                           (as_int(side, "tile_side"),) if side not in (None, "") else TILE_SIDES, max_tiles)
     existing = [entry for entry in manifest.get("entries", [])
                 if entry["specification"].get("arguments", {}).get("p") == p
                 and entry["specification"]["arguments"].get("r") == r]
@@ -719,7 +717,11 @@ def submit_field(context: Context, params: dict) -> Plan:
         "p": p, "r": r, "threads": threads, "tile_side": plan_tiles["side"] if plan_tiles else 512,
         "max_state_bytes": max(settings.get("max_state_bytes", 16 * 1024**3), estimate["state_bytes"]),
         "max_visits": max(settings.get("max_visits", 30_000_000_000_000), estimate["raw_visits"]),
-        "max_tile_bytes": max_tile_bytes, "artifact_format": "KHD1"}}
+        "max_tile_bytes": plan_tiles["reserve"] if plan_tiles else max_tile_bytes, "artifact_format": "KHD1"}}
+    if max_tiles != MAX_TILES:
+        specification["arguments"]["max_tiles"] = max_tiles
+    if tile_format != 1:
+        specification["arguments"]["tile_format"] = tile_format
 
     def submit():
         with PipelineLock(context.state):
@@ -758,9 +760,10 @@ def submit_field(context: Context, params: dict) -> Plan:
                              "Restart field on the DP tiles tab instead.")
     if not plan_tiles:
         plan.blockers.append(f"No tile side up to {TILE_SIDES[-1] if side in (None, '') else side} keeps both "
-                             f"the tile count ≤ {MAX_TILES:,} and each tile within max_tile_bytes "
+                             f"the tile count ≤ {max_tiles:,} and each tile within max_tile_bytes "
                              f"({max_tile_bytes / 1024**3:g} GiB). Large primes have large tile halos; raising "
-                             "max_tile_bytes in the feeder limits would allow bigger tiles.")
+                             "max_tile_bytes (or, for very large budgets, max_tiles) in the feeder limits "
+                             "would allow a layout. See docs/DP_STORAGE.md.")
     rate = measured_rate(context, time_module.time())
     if rate:
         plan.warnings.append(f"Recent large roots ran at about {rate:.2g} visits/s, which suggests "
@@ -769,9 +772,9 @@ def submit_field(context: Context, params: dict) -> Plan:
     if largest and estimate["state_bytes"] > 2 * largest:
         plan.warnings.append(
             f"Its DP state is {estimate['state_bytes'] / largest:,.0f}× the largest completed so far "
-            f"({largest / gib:,.1f} GiB). Tiles are kept in two copies: about "
-            f"{2 * estimate['state_bytes'] / gib:,.0f} GiB of worker disk in total while it runs.")
-    check_disk(context, plan, estimate, time_module.time())
+            f"({largest / gib:,.1f} GiB) before compression; the tile storage line below gives "
+            "the projected worker disk.")
+    check_disk(context, plan, estimate, time_module.time(), tile_format)
     if big:
         plan.warnings.append("It is beyond the feeder's own limits (max_visits / max_state_bytes); the feeder "
                              "would never have chosen it, but will still collect its result.")

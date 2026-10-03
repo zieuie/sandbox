@@ -36,6 +36,7 @@ DEFAULTS = {
     "frontier_max_prime": 19, "frontier_max_exponent": 11,
     "frontier_max_visits": 200_000_000_000_000,
     "dp_threads": 16, "tile_side": 512, "max_tile_bytes": 2 * 1024**3,
+    "max_tiles": 10_000, "tile_format": 1,
     "matching_workers": 9, "matching_threads": 16,
     "matching_small_workers": 2, "matching_medium_workers": 4,
     "matching_small_requests": 1_000_000,
@@ -45,6 +46,22 @@ DEFAULTS = {
     "max_field_elements": 100_000_000, "matching_priority": 100,
     "minimum_free_bytes": 20 * 1024**3,
 }
+
+
+def replica_bytes(specification: dict) -> int:
+    """Disk to set aside for a root's three tile copies.
+
+    Format 1 reserves the uncompressed state: its gzip ratio varies (0.3-1.9 bytes
+    per 12-byte cell) and an optimistic ratio is unsafe admission. Format 2 stores
+    0.0024-0.021 bytes per cell, so the uncompressed figure would block fields that
+    fit hundreds of times over; it uses scheduling.stored_bytes, which keeps
+    headroom over every measurement and counts the edge bands.
+    """
+    arguments = specification["arguments"]
+    if arguments.get("tile_format", 1) == 2:
+        return 3 * scheduling.stored_bytes(arguments["p"], arguments["r"],
+                                           int(arguments.get("tile_side", 4096)), 2)
+    return 3 * scheduling.dp_estimate(specification)["state_bytes"]
 
 
 def durable_work(run: dict | None) -> tuple[int, int, int, float]:
@@ -459,9 +476,8 @@ def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: d
         manifest["entries"].append({"specification": specification, **result})
         save(state / "manifest.json", manifest)
         added += 1
-    # Count only fresh, measured worker storage. Reserve the uncompressed
-    # remaining bytes of active roots at three replica copies; actual gzip blobs
-    # may be smaller, but an optimistic compression ratio is unsafe admission.
+    # Count only fresh, measured worker storage. Reserve the remaining share of
+    # each active root's three replica copies (replica_bytes explains the sizes).
     storage = [max(0, int(node.get("storage_free_bytes") or 0) - settings["minimum_free_bytes"])
                for node in healthy]
     projected = 0
@@ -469,10 +485,9 @@ def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: d
         run = runs.get(entry["run_id"])
         if run is None or run["state"] in TERMINAL:
             continue
-        estimate = scheduling.dp_estimate(entry["specification"])
         remaining = max(0, int(run.get("progress_total") or 0) - int(run.get("progress_done") or 0))
         total = max(1, int(run.get("progress_total") or 0))
-        projected += (3 * estimate["state_bytes"] * remaining + total - 1) // total
+        projected += (replica_bytes(entry["specification"]) * remaining + total - 1) // total
     if storage:
         per_host_reserved = (projected + len(storage) - 1) // len(storage)
         storage = [max(0, free - per_host_reserved) for free in storage]
@@ -481,14 +496,15 @@ def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: d
     disk_blocked = []
     for candidate in scheduling.regional_campaign(
             settings["frontier_max_prime"], settings["frontier_max_exponent"],
-            settings["frontier_max_visits"], settings["dp_threads"], settings["max_tile_bytes"]):
+            settings["frontier_max_visits"], settings["dp_threads"], settings["max_tile_bytes"],
+            settings["max_tiles"], settings["tile_format"]):
         if added >= needed:
             break
         arguments = candidate["arguments"]
         field = (arguments["p"], arguments["r"])
         if field in known:
             continue
-        disk_need = 3 * scheduling.dp_estimate(candidate)["state_bytes"]
+        disk_need = replica_bytes(candidate)
         balanced_need = (disk_need + len(storage) - 1) // len(storage) if storage else disk_need
         if (len(storage) < 3 or
                 min(storage) < max(settings["max_tile_bytes"], balanced_need) or
@@ -566,7 +582,7 @@ def validate_settings(settings: dict, policy_name="legacy") -> None:
                 "max_matching_attempts", "matching_retry_seconds",
                 "max_state_bytes", "max_visits", "frontier_max_prime",
                 "frontier_max_exponent", "frontier_max_visits",
-                "dp_threads", "tile_side", "max_tile_bytes", "matching_workers",
+                "dp_threads", "tile_side", "max_tile_bytes", "max_tiles", "matching_workers",
                 "matching_small_workers", "matching_medium_workers",
                 "matching_small_requests", "matching_medium_requests",
                 "matching_threads", "max_matching_bytes", "max_matching_edges",
@@ -575,6 +591,9 @@ def validate_settings(settings: dict, policy_name="legacy") -> None:
         raise ValueError("pipeline limits must be positive integers")
     if settings["target_dp_roots"] > settings["max_dp_roots"]:
         raise ValueError("target DP roots exceed the hard root cap")
+    # Format 2 needs every agent to run a runtime that reads it; see docs/DP_STORAGE.md.
+    if settings.get("tile_format", 1) not in (1, 2):
+        raise ValueError("tile_format must be 1 or 2")
     if not (2 <= settings["frontier_max_prime"] <= 1621 and
             3 <= settings["frontier_max_exponent"] <= 31 and
             settings["frontier_max_exponent"] % 2 == 1 and

@@ -81,14 +81,17 @@ def upcoming_fields(state: Path, settings: dict, limit: int = 8) -> list[dict]:
             settings.get("frontier_max_exponent", 11),
             settings.get("frontier_max_visits", 200_000_000_000_000),
             settings.get("dp_threads", 16),
-            settings.get("max_tile_bytes", 2 * 1024**3)):
+            settings.get("max_tile_bytes", 2 * 1024**3),
+            settings.get("max_tiles", scheduling.DEFAULT_MAX_TILES),
+            settings.get("tile_format", 1)):
         arguments = candidate["arguments"]
         key = (arguments["p"], arguments["r"])
         if key not in known:
+            from campaigns.king_hamming import replica_bytes
             estimate = scheduling.dp_estimate(candidate)
             upcoming.append({"field": list(key), "q": estimate["q"],
                              "tile_side": arguments["tile_side"],
-                             "projected_replica_bytes": 3 * estimate["state_bytes"]})
+                             "projected_replica_bytes": replica_bytes(candidate)})
             if len(upcoming) >= limit:
                 break
     return upcoming
