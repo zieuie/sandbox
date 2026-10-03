@@ -99,6 +99,33 @@ expanding the DP frontier and preserves that result for a future matching
 layout or larger cluster. The scheduler deliberately accumulates idle nodes for a
 high-priority nine-node matching instead of starving it behind DP tiles.
 
+## Disk reclamation
+
+The campaign keeps its own disks from filling, without operator action:
+
+- **Finished fields lose their tiles.** Once a field's result is complete and held
+  on two live machines for `tile_retention_seconds` (default 6 hours), its tile
+  packets and edge bands, and those of its failed attempts, are deleted on every
+  machine. Fields still being worked on keep all of theirs. To keep tiles longer,
+  or forever (`-1`), change the leader's setting:
+  `UPDATE settings SET value='-1' WHERE key='tile_retention_seconds'`.
+- **Surplus copies are trimmed.** Every artifact is kept on `target_replicas`
+  (three) healthy machines. Extra copies are dropped, least free disk first, never
+  below the target, and a machine that is silent for under `replica_grace_seconds`
+  (default 10 minutes) is not replaced, so brief Wi-Fi drops stop making extra copies.
+- **A full disk gets no new work.** A machine reporting less than
+  `disk_floor_bytes` (default 10 GiB; `0` turns it off) is given no new leases and
+  no new copies, and shows "low disk" in the status and the dashboard. Its running
+  work, its checks and its cleanup continue.
+- **Scratch is removed.** An agent deletes a run's work directory when the run's
+  result is stored, and sweeps leftover directories of finished runs hourly.
+  `KH_KEEP_SCRATCH=1` in an agent's environment keeps them for debugging.
+
+The dashboard's Fleet tab shows the effect. Details and measurements are in
+[CAMPAIGN_NOTES.md](../web/CAMPAIGN_NOTES.md), items 22–24. Both the leader and the
+agents need upgrading (`launch_dp.py upgrade-leader` and `upgrade-workers`) for
+these to take effect.
+
 ## Control
 
 ```sh

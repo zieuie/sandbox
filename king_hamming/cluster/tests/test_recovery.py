@@ -401,6 +401,13 @@ class LeaseTests(unittest.TestCase):
 class RecoveryTests(unittest.TestCase):
     """Run actual C computations across private local worker processes."""
 
+    def setUp(self) -> None:
+        """Keep finished runs' scratch: these tests compare the replacement worker's DP state to a reference."""
+
+        patcher = patch.dict(os.environ, {"KH_KEEP_SCRATCH": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_dp_worker_loss_recovers_on_smaller_worker(self) -> None:
         """Kill the originating agent and finish byte-identically from its replicated DP cursor."""
 

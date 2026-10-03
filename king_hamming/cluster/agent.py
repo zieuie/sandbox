@@ -589,6 +589,66 @@ def replicate_once(
         return True
 
 
+# How many objects the last collection pass handled; a full batch means more are waiting.
+GC_STATS = {"batch": 0}
+GC_FULL_BATCH = 64
+GC_SPIN_SECONDS = 1.0           # pause between full batches, so a purge never monopolizes the leader
+SWEEP_INTERVAL = 3600.0
+SWEEP_MIN_AGE = 3600.0         # a run directory must be this idle before it can be swept
+SWEEP_UNKNOWN_AGE = 86400.0    # ... and this old if the leader has never heard of the run
+SWEEP_BATCH = 200
+SWEEP_TERMINAL = {"complete", "failed", "cancelled"}
+
+
+# Remove one finished lease's scratch directory, and its run directory once no lease is left in it.
+def discard_run_directory(run_directory: Path) -> None:
+    """Delete run_directory (work/<run>/<lease>); never raises, since scratch is disposable."""
+
+    shutil.rmtree(run_directory, ignore_errors=True)
+    try:
+        run_directory.parent.rmdir()
+    except OSError:
+        pass
+
+
+# Scratch of runs the leader reports finished, left by crashes, failures and older agents.
+def sweep_work(leader: str, node_record: dict[str, Any], work_root: Path, limit: int = SWEEP_BATCH,
+               now: float | None = None) -> int:
+    """Delete up to limit idle run directories whose runs are finished; return how many were removed.
+
+    A directory is kept while its run is queued, running, paused or waiting anywhere, and
+    while it was touched within SWEEP_MIN_AGE. Directories of runs the leader does not know
+    (a reset database) go after SWEEP_UNKNOWN_AGE. The shared dependency cache is untouched.
+    """
+
+    now = time.time() if now is None else now
+    identity = {"node_name": node_record["node_name"], "session_id": node_record["session_id"]}
+    idle: list[tuple[Path, float]] = []
+    for path in sorted(work_root.iterdir()):
+        try:
+            uuid.UUID(path.name)
+            if path.is_symlink() or not path.is_dir():
+                continue
+            newest = max([path.stat().st_mtime] + [child.stat().st_mtime for child in path.iterdir()])
+        except (ValueError, OSError):
+            continue
+        if now - newest >= SWEEP_MIN_AGE:
+            idle.append((path, now - newest))
+    removed = 0
+    for start in range(0, len(idle), 256):
+        batch = idle[start:start + 256]
+        states = request_json(leader, "/v1/work-sweep",
+                              {**identity, "run_ids": [path.name for path, _ in batch]})["states"]
+        for path, age in batch:
+            state = states.get(path.name)
+            if state in SWEEP_TERMINAL or (state is None and age >= SWEEP_UNKNOWN_AGE):
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+                if removed >= limit:
+                    return removed
+    return removed
+
+
 # Delete only leader-authorized obsolete objects while publication on this worker is excluded.
 def collect_garbage(
     leader: str, node_record: dict[str, Any], storage_root: Path,
@@ -626,9 +686,11 @@ def collect_garbage_locked(
     for directory in directories:
         sync_directory(directory)
 
+    GC_STATS["batch"] = len(completed)
+
     if completed:
         request_json(leader, "/v1/gc-done", {**identity, "blob_hashes": completed})
-        print(f"retired {len(completed)} obsolete checkpoint objects ({removed} bytes)", flush=True)
+        print(f"retired {len(completed)} obsolete objects ({removed} bytes)", flush=True)
 
     return removed
 
@@ -636,17 +698,26 @@ def collect_garbage_locked(
 # Replication continues while every worker is occupied with mathematical work.
 def replication_loop(
     leader: str, node_record: dict[str, Any], storage_root: Path,
-    stop_event: threading.Event, interval: float,
+    stop_event: threading.Event, interval: float, work_root: Path | None = None,
 ) -> None:
     """Repair replicas in bounded serial transfers until stop_event is set."""
 
     next_collection = 0.0
+    next_sweep = 0.0
 
     while not stop_event.is_set():
         try:
             if time.monotonic() >= next_collection:
                 collect_garbage(leader, node_record, storage_root)
-                next_collection = time.monotonic() + 60.0
+                # A full batch means more is queued: keep going rather than wait a minute.
+                next_collection = time.monotonic() + (
+                    GC_SPIN_SECONDS if GC_STATS["batch"] >= GC_FULL_BATCH else 60.0)
+
+            if work_root is not None and time.monotonic() >= next_sweep:
+                swept = sweep_work(leader, node_record, work_root)
+                if swept:
+                    print(f"removed {swept} finished run directories", flush=True)
+                next_sweep = time.monotonic() + (GC_SPIN_SECONDS if swept >= SWEEP_BATCH else SWEEP_INTERVAL)
 
             worked = replicate_once(leader, node_record["node_name"], storage_root,
                                     node_record["address"], node_record["session_id"])
@@ -901,6 +972,9 @@ def run_job(
     maximum = int(job.get("max_checkpoint_bytes", DEFAULT_MAX_BYTES))
     keeper = LeaseKeeper(leader, job, control_seconds)
     failure_kind = SolverOutcome.ENGINE_FAILURE.value
+    # Nothing in the directory outlives a finished lease: a result is copied into the blob store
+    # before completion, and a tile that fails or stops is simply recomputed (no local restart).
+    discard = False
 
     # Acknowledge snapshot capture only while this attempt still owns the calculation.
     def snapshot(cursor: int, cancelled: threading.Event) -> None:
@@ -1035,6 +1109,7 @@ def run_job(
                 "artifact_location": f"{storage_url.rstrip('/')}/blobs/{digest}",
             })
         adapter.cleanup(specification, run_directory)
+        discard = True
 
     except LeaseLost as error:
         print(f"abandoned stale lease {run_id}: {error}", file=sys.stderr, flush=True)
@@ -1049,6 +1124,13 @@ def run_job(
             print(f"lease ended without a failure submission: {error}", file=sys.stderr, flush=True)
     finally:
         keeper.close()
+        try:
+            # KH_KEEP_SCRATCH=1 keeps every run directory, for debugging a solver's leftovers.
+            if os.environ.get("KH_KEEP_SCRATCH") != "1" and (
+                    discard or adapters.get(job["specification"]).retry_elsewhere(job["specification"])):
+                discard_run_directory(run_directory)
+        except Exception as error:  # scratch cleanup must never mask the lease's outcome
+            print(f"could not remove {run_directory}: {error}", file=sys.stderr, flush=True)
 
 
 # Build the long-running agent command interface.
@@ -1173,7 +1255,8 @@ def main() -> int:
     heartbeat.start()
     replication = threading.Thread(
         target=replication_loop,
-        args=(arguments.leader, node_record, arguments.storage_root, stop_event, arguments.poll_seconds),
+        args=(arguments.leader, node_record, arguments.storage_root, stop_event, arguments.poll_seconds,
+              None if arguments.storage_only else arguments.work_root),
         daemon=True,
     )
     replication.start()

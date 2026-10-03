@@ -18,7 +18,26 @@ CREATE TABLE IF NOT EXISTS checkpoint_garbage (
     blob_hash TEXT NOT NULL,
     PRIMARY KEY(node_name, blob_hash)
 );
+CREATE TABLE IF NOT EXISTS artifact_trim (
+    node_name TEXT NOT NULL REFERENCES nodes(node_name),
+    artifact_hash TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created REAL NOT NULL,
+    PRIMARY KEY(node_name, artifact_hash)
+);
 """
+
+# A node that has been silent this long (rather than the 60 s lease window) is presumed gone for
+# good, and only then are its copies replaced. Shorter outages end with the node's copies intact.
+DEFAULT_REPLICA_GRACE_SECONDS = 600.0
+# Finished fields keep their tiles this long, so the result can be collected and rechecked.
+DEFAULT_TILE_RETENTION_SECONDS = 6 * 3600.0
+# A copy younger than this is never trimmed, so replication and trimming cannot chase each other.
+MIN_TRIM_AGE_SECONDS = 600.0
+TRIM_SCAN_SECONDS = 300.0
+TRIM_BATCH = 128
+TRIM_SCAN_LIMIT = 2000
+_last_trim_scan: dict[str, float] = {}
 
 
 # Preserve historical manifests while migrating the lifetime state of their bulk data.
@@ -38,6 +57,20 @@ def initialize(connection: sqlite3.Connection, keep: int) -> None:
         "INSERT INTO settings(key,value) VALUES('checkpoint_keep',?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(keep),),
     )
+    # Operator-tunable (UPDATE settings SET value=... WHERE key=...); an existing value is kept.
+    for key, value in (("replica_grace_seconds", DEFAULT_REPLICA_GRACE_SECONDS),
+                       ("tile_retention_seconds", DEFAULT_TILE_RETENTION_SECONDS)):
+        connection.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, str(value)))
+
+
+def number(connection: sqlite3.Connection, key: str, default: float) -> float:
+    """Return numeric setting key, or default when it is missing or unreadable."""
+
+    row = connection.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    try:
+        return float(row[0]) if row is not None else default
+    except (TypeError, ValueError):
+        return default
 
 
 # Include the manifest object itself in the reference set of each snapshot.
@@ -102,6 +135,44 @@ def retire_old(connection: sqlite3.Connection, now: float) -> int:
     return retired
 
 
+# Surplus copies go first from the machines with the least free disk, never below the target.
+def excess_plan(connection: sqlite3.Connection, node: str, now: float, limit: int) -> list[str]:
+    """Choose up to limit artifacts for node to drop because enough healthy machines hold them.
+
+    A copy is surplus when more than target_replicas healthy nodes (heartbeat within
+    the lease window) hold it. Holders are ranked by free disk, least first, and the
+    first surplus-many are the ones to drop, so at least target copies always remain
+    on healthy machines. Each chosen replica is removed from the index immediately,
+    so no reader is sent to it, and queued in artifact_trim for the agent to delete.
+    """
+
+    healthy = now - setting(connection, "lease_seconds")
+    # Rank every healthy holder of each artifact this node holds by free disk, least first; this
+    # node drops its copy exactly when its rank is within the surplus. One query, so the limit
+    # applies to copies this node is actually chosen to drop, however far down the table they are.
+    chosen = [row[0] for row in connection.execute(
+        "WITH mine AS (SELECT artifact_hash FROM replicas WHERE node_name=? AND created<?), "
+        "ranked AS (SELECT x.artifact_hash,x.node_name,"
+        "ROW_NUMBER() OVER (PARTITION BY x.artifact_hash ORDER BY n.storage_free_bytes,n.node_name) AS place,"
+        "COUNT(*) OVER (PARTITION BY x.artifact_hash) AS holders "
+        "FROM replicas x JOIN nodes n ON n.node_name=x.node_name "
+        "WHERE n.last_heartbeat>? AND x.artifact_hash IN (SELECT artifact_hash FROM mine)) "
+        "SELECT ranked.artifact_hash FROM ranked JOIN artifacts a USING(artifact_hash) "
+        "WHERE ranked.node_name=? AND ranked.place<=ranked.holders-a.target_replicas LIMIT ?",
+        (node, now - MIN_TRIM_AGE_SECONDS, healthy, node, limit))]
+    for digest in chosen:
+        queue_trim(connection, node, digest, "excess", now)
+    return chosen
+
+
+def queue_trim(connection: sqlite3.Connection, node: str, digest: str, reason: str, now: float) -> None:
+    """Forget node's copy of digest and queue its blob for deletion on that node."""
+
+    connection.execute("DELETE FROM replicas WHERE artifact_hash=? AND node_name=?", (digest, node))
+    connection.execute("INSERT OR IGNORE INTO artifact_trim(node_name,artifact_hash,reason,created) VALUES(?,?,?,?)",
+                       (node, digest, reason, now))
+
+
 # Shared objects remain protected by any retained checkpoint or final artifact.
 def collect_plan(connection: sqlite3.Connection, node: str, now: float) -> dict[str, Any]:
     """Return bounded deletable hashes for node; caller holds that worker's storage transaction lock."""
@@ -117,9 +188,11 @@ def collect_plan(connection: sqlite3.Connection, node: str, now: float) -> dict[
                 "checkpoint_keep": int(setting(connection, "checkpoint_keep")),
                 "deferred": "storage revalidation", "revalidation_pending": proving}
     protected = {row[0] for row in connection.execute("SELECT artifact_hash FROM artifacts")}
+    pinned_members: set[str] = set()
 
     for row in connection.execute("SELECT * FROM checkpoints WHERE retired_at IS NULL"):
-        protected.update(members(row))
+        pinned_members.update(members(row))
+    protected |= pinned_members
 
     deletable: list[str] = []
 
@@ -129,5 +202,25 @@ def collect_plan(connection: sqlite3.Connection, node: str, now: float) -> dict[
 
         if len(deletable) == 128:
             break
+
+    # Artifact copies the leader has already dropped from its index (finished fields, surplus
+    # copies). Not in `protected`: that set keeps artifacts, which these still are, elsewhere.
+    room = TRIM_BATCH - len(deletable)
+    queued = [row["artifact_hash"] for row in connection.execute(
+        "SELECT artifact_hash FROM artifact_trim WHERE node_name=? ORDER BY created,artifact_hash LIMIT ?",
+        (node, TRIM_BATCH))]
+    # Scanning for surplus copies costs a pass over this node's replicas, so it queues a big batch
+    # at once and later plans just read the queue. It runs only when the queue has run dry.
+    if len(queued) < room and now - _last_trim_scan.get(node, 0.0) >= TRIM_SCAN_SECONDS:
+        found = excess_plan(connection, node, now, TRIM_SCAN_LIMIT)
+        _last_trim_scan[node] = 0.0 if len(found) >= TRIM_SCAN_LIMIT else now
+        queued = [row["artifact_hash"] for row in connection.execute(
+            "SELECT artifact_hash FROM artifact_trim WHERE node_name=? ORDER BY created,artifact_hash LIMIT ?",
+            (node, TRIM_BATCH))]
+    # A blob that is also a retained checkpoint member must stay: cancel its deletion.
+    kept = [digest for digest in queued if digest in pinned_members]
+    connection.executemany("DELETE FROM artifact_trim WHERE node_name=? AND artifact_hash=?",
+                           [(node, digest) for digest in kept])
+    deletable.extend([digest for digest in queued if digest not in pinned_members][:max(0, room)])
 
     return {"blob_hashes": deletable, "retired": retired, "checkpoint_keep": int(setting(connection, "checkpoint_keep"))}

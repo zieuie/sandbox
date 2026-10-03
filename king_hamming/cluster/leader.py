@@ -114,6 +114,22 @@ def connect(database: Path, timeout: float = 30.0) -> sqlite3.Connection:
     return connection
 
 
+DEFAULT_DISK_FLOOR_BYTES = 10 * 1024**3
+
+
+def disk_floor(connection) -> int:
+    """Return the free-space floor in bytes (setting disk_floor_bytes; 0 turns the rule off)."""
+
+    return int(retention.number(connection, "disk_floor_bytes", DEFAULT_DISK_FLOOR_BYTES))
+
+
+def low_disk(node, floor: int) -> bool:
+    """Whether node reported less free space than floor. A negative figure means it never reported."""
+
+    free = node["storage_free_bytes"]
+    return floor > 0 and free is not None and 0 <= free < floor
+
+
 def reconstruction_drain_target(connection, now, lease_seconds, resources):
     """Choose one suitable host to drain instead of idling the whole fleet."""
 
@@ -245,6 +261,8 @@ def annotate_idle_reasons(connection: sqlite3.Connection, nodes: list[dict[str, 
             node["idle_reason"] = "matching partner reservation"
         elif campaign != "running":
             node["idle_reason"] = "campaign dispatch stopped"
+        elif low_disk(node, disk_floor(connection)):
+            node["idle_reason"] = f"low disk ({node['storage_free_bytes'] / 1024**3:.1f} GiB free)"
         elif connection.execute(
                 "SELECT 1 FROM node_revalidation WHERE node_name=? LIMIT 1",
                 (node["node_name"],)).fetchone() is not None:
@@ -337,6 +355,8 @@ def initialize(
 
         recovery.initialize(connection, lease_seconds, max_checkpoint_bytes)
         retention.initialize(connection, checkpoint_keep)
+        connection.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('disk_floor_bytes',?)",
+                           (str(DEFAULT_DISK_FLOOR_BYTES),))
         adapters.initialize(connection)
         if not math.isfinite(visits_per_second) or visits_per_second <= 0:
             raise ValueError("visit rate must be finite and positive")
@@ -750,7 +770,8 @@ def make_handler(
                              "physical_core_count",
                              existing["physical_core_count"] if existing is not None else 0))),
                          storage_generation, validation_mode, json.dumps(slots, separators=(",", ":")),
-                         max(0, int(request.get("storage_free_bytes", 0))),
+                         # -1: this agent does not report free space (so no floor applies), unlike 0 = full.
+                         max(0, int(request["storage_free_bytes"])) if "storage_free_bytes" in request else -1,
                          json.dumps(gpu_list, separators=(",", ":"))),
                     )
                     return {"ok": True, "heartbeat_seconds": min(10.0, lease_seconds / 3),
@@ -801,6 +822,18 @@ def make_handler(
                     node = recovery.require_node(connection, request)
                     return retention.collect_plan(connection, node["node_name"], now)
 
+                if route == "/v1/work-sweep":
+                    recovery.require_node(connection, request)
+                    ids = request.get("run_ids", [])
+
+                    if not isinstance(ids, list) or len(ids) > 256 or not all(isinstance(item, str) and len(item) == 36 for item in ids):
+                        raise ValueError("invalid scratch sweep request")
+
+                    marks = ",".join("?" for _ in ids)
+                    found = dict(connection.execute(
+                        f"SELECT run_id,state FROM runs WHERE run_id IN ({marks})", ids).fetchall()) if ids else {}
+                    return {"states": {item: found.get(item) for item in ids}}
+
                 if route == "/v1/gc-done":
                     node = recovery.require_node(connection, request)
                     hashes = request.get("blob_hashes", [])
@@ -812,6 +845,10 @@ def make_handler(
                         "DELETE FROM checkpoint_garbage WHERE node_name=? AND blob_hash=?",
                         [(node["node_name"], digest) for digest in hashes],
                     )
+                    connection.executemany(
+                        "DELETE FROM artifact_trim WHERE node_name=? AND artifact_hash=?",
+                        [(node["node_name"], digest) for digest in hashes],
+                    )
                     return {"ok": True}
 
                 if route == "/v1/replication":
@@ -819,11 +856,18 @@ def make_handler(
                     inventory = recovery.revalidation(connection, node["node_name"], now)
                     if inventory is not None:
                         return {"replication": inventory}
+                    # Checking stored bytes is free, but new copies must not fill a nearly full disk.
+                    if low_disk(node, disk_floor(connection)):
+                        return {"replication": None}
                     checkpoint = recovery.replication(connection, node["node_name"], now)
 
                     if checkpoint is not None:
                         return {"replication": checkpoint}
 
+                    # Copies on a node silent for under the grace period still count: replacing
+                    # them after every Wi-Fi drop or restart is what piled up surplus copies.
+                    grace = max(lease_seconds, retention.number(
+                        connection, "replica_grace_seconds", retention.DEFAULT_REPLICA_GRACE_SECONDS))
                     row = connection.execute(
                         "SELECT a.artifact_hash,a.size FROM artifacts a WHERE NOT EXISTS "
                         "(SELECT 1 FROM replicas own WHERE own.artifact_hash=a.artifact_hash AND own.node_name=?) "
@@ -831,7 +875,7 @@ def make_handler(
                         "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?) < a.target_replicas "
                         "AND EXISTS (SELECT 1 FROM replicas r JOIN nodes n USING(node_name) "
                         "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?) "
-                        "ORDER BY a.created LIMIT 1", (node["node_name"], now - lease_seconds, now - lease_seconds),
+                        "ORDER BY a.created LIMIT 1", (node["node_name"], now - grace, now - lease_seconds),
                     ).fetchone()
 
                     if row is None:
@@ -909,6 +953,11 @@ def make_handler(
 
                     if campaign != "running":
                         return {"job": None, "campaign_state": campaign}
+
+                    # A full disk fails writes mid-run. Running work continues; new work waits for space
+                    # (the leader's garbage collection and trimming free it).
+                    if low_disk(node, disk_floor(connection)):
+                        return {"job": None, "campaign_state": campaign, "reason": "low disk"}
 
                     candidates = connection.execute(
                         "SELECT run_id, specification, priority, progress_phase, from_scratch, lease_attempt, engine_failures, "

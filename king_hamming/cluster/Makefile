@@ -27,6 +27,7 @@ check:
 	python3 tests/test_tiles.py --run
 	python3 tests/test_bands.py --run
 	python3 tests/test_affinity.py --run
+	python3 tests/test_reclaim.py --run
 	python3 tests/test_tile_driver.py --run
 	python3 tests/test_distributed.py --run
 	python3 tests/test_tile_reuse.py

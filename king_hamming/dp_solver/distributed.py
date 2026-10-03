@@ -14,6 +14,7 @@ import uuid
 from typing import Any
 
 from blob_store import valid_digest
+import retention as retention_module
 from common import calculation_id, canonical_json
 from dp_solver.scheduling import dp_estimate
 from dp_solver.tiles import BAND_KINDS, band_kind, dependencies, memory_bytes, tile
@@ -232,10 +233,64 @@ def reuse_tiles(connection: sqlite3.Connection, parent: sqlite3.Row, now: float)
     return imported
 
 
+RETIRE_SCAN_SECONDS = 120
+RETIRE_BATCH = 500
+_ACTIVE_ROOT = "('waiting','queued','running','stopping','paused')"
+
+
+# Tile packets are only scaffolding for the final split: once a field's result is safely stored,
+# they and their bands are dead weight, and each is held by several machines.
+def retire_finished_tiles(connection: sqlite3.Connection, now: float, force: bool = False) -> int:
+    """Queue deletion of the tiles of finished fields on every holder; return how many packets were retired.
+
+    A packet is retired when every root that references it (attempts share packets through
+    reuse_tiles) is either itself complete or is a failed or cancelled attempt of a field that
+    has a complete root, and the completing root finished at least tile_retention_seconds ago
+    with its result held on two live nodes. Any waiting, queued, running or paused root keeps
+    its packets. Retired replicas leave the index at once, so nothing is sent to them, and the
+    holders delete the blobs when they next collect garbage. tile_retention_seconds of -1
+    keeps tiles forever.
+    """
+
+    retention = retention_module.number(connection, "tile_retention_seconds", retention_module.DEFAULT_TILE_RETENTION_SECONDS)
+    if retention < 0:
+        return 0
+    last = retention_module.number(connection, "tile_retire_scanned", 0.0)
+    if not force and now - last < RETIRE_SCAN_SECONDS:
+        return 0
+    connection.execute("INSERT INTO settings(key,value) VALUES('tile_retire_scanned',?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(now),))
+    lease = retention_module.setting(connection, "lease_seconds")
+    packets = [row[0] for row in connection.execute(
+        "WITH done AS (SELECT p.calculation_id AS calc FROM runs p WHERE p.parent_run_id IS NULL "
+        "AND p.state='complete' AND p.artifact_hash IS NOT NULL AND p.finished<=? "
+        "AND (SELECT COUNT(*) FROM replicas x JOIN nodes n USING(node_name) "
+        "WHERE x.artifact_hash=p.artifact_hash AND n.last_heartbeat>?)>=2) "
+        "SELECT c.artifact_hash FROM runs c JOIN runs p ON p.run_id=c.parent_run_id "
+        "WHERE c.artifact_hash IS NOT NULL AND c.state='complete' "
+        "AND json_extract(c.specification,'$.program')='dp_tile' "
+        "AND EXISTS (SELECT 1 FROM replicas h WHERE h.artifact_hash=c.artifact_hash) "
+        "GROUP BY c.artifact_hash "
+        f"HAVING SUM(p.state IN {_ACTIVE_ROOT})=0 "
+        "AND SUM(p.calculation_id IN (SELECT calc FROM done))=COUNT(*) LIMIT ?",
+        (now - retention, now - lease, RETIRE_BATCH))]
+    for packet in packets:
+        hashes = [packet] + [row[0] for row in connection.execute(
+            "SELECT band_hash FROM tile_bands WHERE packet_hash=?", (packet,))]
+        for digest in hashes:
+            for (node,) in connection.execute("SELECT node_name FROM replicas WHERE artifact_hash=?", (digest,)).fetchall():
+                retention_module.queue_trim(connection, node, digest, "finished field", now)
+    if len(packets) >= RETIRE_BATCH:  # more are waiting: scan again on the next pass
+        connection.execute("UPDATE settings SET value='0' WHERE key='tile_retire_scanned'")
+    return len(packets)
+
+
 # Dispatch roots by creating only ready child leases; parent state contains no bulk arrays.
 def advance(connection: sqlite3.Connection, now: float) -> None:
     """Advance waiting DAGs inside the caller's transaction and queue reconstruction when durable."""
 
+    # Reclaiming dead tiles schedules nothing, so it continues while dispatch is stopped.
+    retire_finished_tiles(connection, now)
     campaign = connection.execute("SELECT value FROM settings WHERE key='campaign_state'").fetchone()[0]
     if campaign != "running":
         return
