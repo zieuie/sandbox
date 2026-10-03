@@ -1,6 +1,25 @@
 # Leader contention and completed-DP reconstruction
 
-Planning snapshot: 2026-10-03. This is a plan, not a live-campaign change.
+Planning snapshot: 2026-10-03. Implementation and rollout completed later that day.
+
+## Implemented outcome
+
+- The leader records per-route writer wait/hold times and lock errors. Read-only
+  tile-input descriptors and replica-candidate searches no longer hold the
+  SQLite writer lock. Large DP scans are less frequent, and empty GC plans skip
+  the costly protection-set build.
+- Worker lease renewals use a five-second cadence for 60-second leases; agents
+  retry transient leader congestion during input fetches and result submission.
+  The feeder retries a timed-out reconstruction from the original complete,
+  durable grid before consuming a fresh field attempt.
+- A guarded, per-node drain allowed all 11 worker agents to be upgraded without
+  stopping the campaign. The leader was upgraded with lease-slack checks.
+- 13^9 completed by reconstructing from its preserved 8,281 tiles. 23^7 also
+  completed; its newer attempt reused most old tile artifacts, though that extra
+  attempt predated the feeder fix. The campaign stayed running throughout.
+- The focused recovery/replication tests passed. Full integration results and
+  live lock metrics should be checked after each future modification; a brief
+  zero-error health snapshot is not a guarantee under every load pattern.
 
 ## Current state and what changed
 
