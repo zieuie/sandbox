@@ -25,6 +25,7 @@ import time
 import uuid
 from urllib.request import Request, urlopen
 from urllib.parse import urlparse
+from urllib.error import HTTPError
 
 from deployment import ROOT, bundle, deploy, remote, wait
 from dp_solver import scheduling
@@ -728,7 +729,22 @@ def upgrade_worker_rolling(path: Path, host: str, wait_seconds: float) -> None:
     build_runtime()
     archive = bundle()
     version = hashlib.sha256(archive).hexdigest()
-    request(manifest['leader'], '/v1/node-control', {'node_name': node_name, 'action': 'drain'})
+
+    def node_control(action: str) -> None:
+        deadline = time.monotonic() + 45
+        while True:
+            try:
+                request(manifest['leader'], '/v1/node-control',
+                        {'node_name': node_name, 'action': action})
+                return
+            except (OSError, HTTPError) as error:
+                if isinstance(error, HTTPError) and error.code < 500:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(1)
+
+    node_control('drain')
 
     def idle() -> bool:
         with sqlite3.connect(f"file:{path.parent / 'leader.sqlite'}?mode=ro", uri=True) as database:
@@ -742,7 +758,7 @@ def upgrade_worker_rolling(path: Path, host: str, wait_seconds: float) -> None:
     try:
         wait(idle, f'{node_name} to finish its existing leases', wait_seconds)
     except Exception:
-        request(manifest['leader'], '/v1/node-control', {'node_name': node_name, 'action': 'resume'})
+        node_control('resume')
         raise
 
     # Leave this node drained on any replacement failure: a future retry can
@@ -757,12 +773,19 @@ def upgrade_worker_rolling(path: Path, host: str, wait_seconds: float) -> None:
     save(path, manifest)
 
     def healthy() -> bool:
-        status = request(manifest['leader'], '/v1/status')
+        try:
+            status = request(manifest['leader'], '/v1/status')
+        except HTTPError as error:
+            if error.code < 500:
+                raise
+            return False
+        except OSError:
+            return False
         return any(node['node_name'] == node_name and node.get('state') == 'healthy' and
                    node.get('runtime_version') == version for node in status['nodes'])
 
     wait(healthy, f'{node_name} upgraded registration', 60)
-    request(manifest['leader'], '/v1/node-control', {'node_name': node_name, 'action': 'resume'})
+    node_control('resume')
     if all(item.get('runtime_version') == version or
            item.get('command', '').split('--runtime-version ', 1)[-1].split()[0] == version
            for item in manifest['workers']):

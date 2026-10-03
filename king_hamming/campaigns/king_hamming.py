@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import sys
 import time
+from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -466,8 +467,31 @@ def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: d
         selected = preferred_attempt(entries, runs)
         latest_entry, latest = selected if selected is not None else (entries[-1], None)
         record = pipeline["fields"].get(f"{field[0]}^{field[1]}", {})
-        if (record.get("dp_artifact") or latest is None or latest["state"] != "failed" or
-                len(entries) >= settings["max_dp_attempts"]):
+        if record.get("dp_artifact") or latest is None or latest["state"] != "failed":
+            continue
+        error = (latest.get("error") or "").lower()
+        retryable_transport = any(marker in error for marker in
+                                  ("timed out", "http error 503", "database is locked"))
+        reconstruction_retries = record.setdefault("dp_reconstruction_retries", {})
+        used = reconstruction_retries.get(latest_entry["run_id"], 0)
+        if retryable_transport and used < settings["max_dp_attempts"]:
+            try:
+                result = request(manifest["leader"], "/v1/run-command", {
+                    "run_id": latest_entry["run_id"], "action": "retry-reconstruction",
+                })
+            except HTTPError as failure:
+                # An incomplete or no-longer-durable grid is not a reconstruction
+                # retry; ordinary bounded attempt reuse remains the fallback.
+                if failure.code != 400:
+                    raise
+            else:
+                if result.get("state") != "queued":
+                    raise RuntimeError("leader did not queue preserved reconstruction")
+                reconstruction_retries[latest_entry["run_id"]] = used + 1
+                latest["state"] = "queued"
+                added += 1
+                continue
+        if len(entries) >= settings["max_dp_attempts"]:
             continue
         specification = json.loads(json.dumps(latest_entry["specification"]))
         result = request(manifest["leader"], "/v1/enqueue", {

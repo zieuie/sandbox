@@ -308,6 +308,29 @@ class ContinuousCampaignTests(unittest.TestCase):
         self.assertEqual(added, 0)
         submitted.assert_not_called()
 
+    def test_feeder_retries_timed_out_reconstruction_without_new_attempt(self) -> None:
+        settings = dict(campaign.DEFAULTS)
+        settings.update(target_dp_roots=1, max_dp_roots=1, minimum_free_bytes=1)
+        specification = {"program": "dp_distributed", "arguments": {
+            "p": 3, "r": 3, "threads": 1, "tile_side": 4,
+        }}
+        manifest = {"leader": "http://private", "entries": [
+            {"run_id": "failed-root", "specification": specification},
+        ]}
+        runs = {"failed-root": {"run_id": "failed-root", "state": "failed",
+                                "error": "distributed_solver.py: timed out"}}
+        pipeline = {"settings": settings, "fields": {"3^3": {"p": 3, "r": 3}}}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(campaign, "request", return_value={"state": "queued"}) as sent:
+            added = campaign.replenish_dp(Path(directory), manifest, runs, pipeline)
+        self.assertEqual(added, 1)
+        self.assertEqual(len(manifest["entries"]), 1)
+        self.assertEqual(pipeline["fields"]["3^3"]["dp_reconstruction_retries"],
+                         {"failed-root": 1})
+        sent.assert_called_once_with("http://private", "/v1/run-command", {
+            "run_id": "failed-root", "action": "retry-reconstruction",
+        })
+
     def test_retry_filling_root_budget_does_not_add_a_new_field(self) -> None:
         """A failed-root retry and a new candidate share one exact capacity budget."""
 
