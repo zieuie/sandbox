@@ -21,5 +21,9 @@ pellinore-network-watchdog.timer` on Pellinore. The check is deliberately tied
 to its current interface and LAN addresses; update those constants if its
 network setup changes.
 
+The 2026-10-02 outage that took five *other* workers offline for 4.5 hours has the
+same failure mode this watchdog recovers from; see
+[NETWORK_OUTAGE_2026-10-02.md](../../docs/NETWORK_OUTAGE_2026-10-02.md).
+
 `gpu_driver_fix.sh` repairs NVIDIA drivers on fleet nodes (Secure Boot key enrollment on the
 P600 workers, a fresh driver install on pellinore); see [GPU.md](../../docs/GPU.md).

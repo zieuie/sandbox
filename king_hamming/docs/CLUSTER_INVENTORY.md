@@ -16,6 +16,10 @@ Intel i7-8750H with 12 logical CPUs and 14.8 GiB RAM. Its section was collected
 with `inventory_cluster.sh --run 192.168.4.152` and appended; the other
 machines' data is still from the generation date above.
 
+All machines currently connect over Wi-Fi only. A Wi-Fi roaming failure took
+five workers offline on 2026-10-02; see
+[NETWORK_OUTAGE_2026-10-02.md](NETWORK_OUTAGE_2026-10-02.md).
+
 ## Initial design implications
 
 - All nine machines responded successfully over SSH.
