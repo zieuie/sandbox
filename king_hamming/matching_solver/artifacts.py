@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from array import array
 import hashlib
+import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 
 from dp_solver.artifacts import dimensions, varint
+
+NATIVE_VERIFIER = Path(__file__).resolve().parent / "kh_verify_khm1"
+NATIVE_MIN_LABELS = 1 << 24  # below this the Python verifier is fast enough
 
 
 # Derive the request count without expanding compressed DP runs.
@@ -232,9 +237,34 @@ def field_cells(p, r, polynomial):
     return cells
 
 
+# Large full matchings: the native verifier checks every edge in a streaming pass.
+def native_memory(dp, q, f):
+    """Bytes the native verifier needs: cell rows of used prefixes, endpoint bitmap, and slack."""
+    amax = max(run["a"] for run in dp["runs"])
+    return 4 * f * amax * f + (q + 7) // 8 + 4 * dimensions(dp["p"], dp["r"])[2] + 64 * 1024 * 1024
+
+
+def native_assigned(path, dp, polynomial, payload_start):
+    """Run kh_verify_khm1 over path's packed choices; return the number of distinct endpoints it checked."""
+    with tempfile.TemporaryDirectory(prefix=".kh-verify-") as directory:
+        blocks = Path(directory) / "blocks.txt"
+        blocks.write_text(f"{len(dp['runs'])}\n" + "".join(
+            f"{run['a']} {run['t'] * run['repeat']}\n" for run in dp["runs"]))
+        done = subprocess.run(
+            [str(NATIVE_VERIFIER), str(dp["p"]), str(dp["r"]), ",".join(map(str, polynomial)),
+             str(blocks), str(path), str(payload_start)], capture_output=True, text=True)
+    if done.returncode:
+        raise ValueError(done.stderr.strip().removeprefix("kh_verify_khm1: ") or "native verification failed")
+    return int(json.loads(done.stdout)["assigned"])
+
+
 # Check an entire certificate without searching for a matching or storing all endpoints.
-def verify(path, dp, dp_digest, max_bytes=2**31, hydrate=None):
-    """Verify input path against dp/hash under max_bytes; optionally write TSV rows to hydrate stream; return summary."""
+def verify(path, dp, dp_digest, max_bytes=2**31, hydrate=None, native=None):
+    """Verify input path against dp/hash under max_bytes; optionally write TSV rows to hydrate stream; return summary.
+
+    Full matchings with q >= NATIVE_MIN_LABELS use kh_verify_khm1 when it is built (native=None);
+    native=True requires it and native=False forces this Python path. Hydration is Python-only.
+    """
     path = Path(path)
     size = path.stat().st_size
     if size < 36:
@@ -268,49 +298,56 @@ def verify(path, dp, dp_digest, max_bytes=2**31, hydrate=None):
         hall_size = (n + 7) // 8 if status else 0
         if payload_start + choices_size + hall_size != size - 32:
             raise ValueError("invalid matching payload length")
-        memory = 4 * q + 4 * budget + 2 * ((q + 7) // 8) + 64 * 1024 * 1024
+        use_native = (status == 0 and hydrate is None and native is not False and
+                      (native is True or (q >= NATIVE_MIN_LABELS and NATIVE_VERIFIER.exists())))
+        if use_native and not NATIVE_VERIFIER.exists():
+            raise ValueError("native verifier is not built")
+        memory = native_memory(dp, q, f) if use_native else 4 * q + 4 * budget + 2 * ((q + 7) // 8) + 64 * 1024 * 1024
         if memory > max_bytes:
             raise ValueError(f"verification requires at least {memory} bytes; limit={max_bytes}")
         if not primitive(p, r, polynomial):
             raise ValueError("polynomial is not primitive with generator X")
-        cells = field_cells(p, r, polynomial)
-        occupied = bytearray((q + 7) // 8)
-        neighborhood = bytearray((q + 7) // 8) if status else None
         assigned = hall_left = hall_right = 0
-        if hydrate is not None:
-            hydrate.write("left\tcoset\tprefix\tsuffix\tright\n")
-        with path.open("rb") as hall_stream:
-            hall_stream.seek(payload_start + choices_size)
-            hall_iterator = packed(hall_stream, n, 1) if status else iter(())
-            choice_iterator = packed(source, n, bits)
-            for u, ((coset, prefix, suffix), choice) in enumerate(zip(requests(dp), choice_iterator)):
-                if choice >= f + status:
-                    raise ValueError("neighbor index out of range")
-                cell_start = (prefix * f + suffix) * f
-                right = None
-                if not status or choice:
-                    label = cells[cell_start + choice - status]
-                    right = 0 if label == 0 else 1 + (label - 1 - coset) % (q - 1)
-                    mask = 1 << (right % 8)
-                    if occupied[right // 8] & mask:
-                        raise ValueError("matching repeats a right endpoint")
-                    occupied[right // 8] |= mask
-                    assigned += 1
-                if hydrate is not None:
-                    hydrate.write(f"{u}\t{coset}\t{prefix}\t{suffix}\t{right if right is not None else '-'}\n")
-                if status and next(hall_iterator):
-                    hall_left += 1
-                    for k in range(f):
-                        label = cells[cell_start + k]
-                        neighbor = 0 if label == 0 else 1 + (label - 1 - coset) % (q - 1)
-                        mask = 1 << (neighbor % 8)
-                        if not neighborhood[neighbor // 8] & mask:
-                            neighborhood[neighbor // 8] |= mask
-                            hall_right += 1
+        if use_native:
+            assigned = native_assigned(path, dp, polynomial, payload_start)
+        else:
+            cells = field_cells(p, r, polynomial)
+            occupied = bytearray((q + 7) // 8)
+            neighborhood = bytearray((q + 7) // 8) if status else None
+            if hydrate is not None:
+                hydrate.write("left\tcoset\tprefix\tsuffix\tright\n")
+            with path.open("rb") as hall_stream:
+                hall_stream.seek(payload_start + choices_size)
+                hall_iterator = packed(hall_stream, n, 1) if status else iter(())
+                choice_iterator = packed(source, n, bits)
+                for u, ((coset, prefix, suffix), choice) in enumerate(zip(requests(dp), choice_iterator)):
+                    if choice >= f + status:
+                        raise ValueError("neighbor index out of range")
+                    cell_start = (prefix * f + suffix) * f
+                    right = None
+                    if not status or choice:
+                        label = cells[cell_start + choice - status]
+                        right = 0 if label == 0 else 1 + (label - 1 - coset) % (q - 1)
+                        mask = 1 << (right % 8)
+                        if occupied[right // 8] & mask:
+                            raise ValueError("matching repeats a right endpoint")
+                        occupied[right // 8] |= mask
+                        assigned += 1
+                    if hydrate is not None:
+                        hydrate.write(f"{u}\t{coset}\t{prefix}\t{suffix}\t{right if right is not None else '-'}\n")
+                    if status and next(hall_iterator):
+                        hall_left += 1
+                        for k in range(f):
+                            label = cells[cell_start + k]
+                            neighbor = 0 if label == 0 else 1 + (label - 1 - coset) % (q - 1)
+                            mask = 1 << (neighbor % 8)
+                            if not neighborhood[neighbor // 8] & mask:
+                                neighborhood[neighbor // 8] |= mask
+                                hall_right += 1
 
-            # Exhaustion executes each decoder's final padding check after its last yielded value.
-            if next(choice_iterator, None) is not None or (status and next(hall_iterator, None) is not None):
-                raise ValueError("unexpected packed values")
+                # Exhaustion executes each decoder's final padding check after its last yielded value.
+                if next(choice_iterator, None) is not None or (status and next(hall_iterator, None) is not None):
+                    raise ValueError("unexpected packed values")
         if assigned != matched:
             raise ValueError("matching cardinality disagrees with certificate")
         if status and (hall_left <= hall_right or hall_left - hall_right != n - matched):

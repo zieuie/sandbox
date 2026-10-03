@@ -10,6 +10,7 @@
 /dp_solver/kh_field
 /matching_solver/kh_match_distributed
 /matching_solver/kh_match_kernel
+/matching_solver/kh_verify_khm1
 /matching_solver/kh_match_worker
 /matching_solver/tests/matching_unit
 /matching_solver/tests/parallel_unit

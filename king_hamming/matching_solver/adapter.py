@@ -295,6 +295,7 @@ class MatchingAdapter(SolverAdapter):
             (ROOT / "matching_solver/kh_match_kernel", "matching_solver/kh_match_kernel"),
             (ROOT / "matching_solver/kh_match_worker", "matching_solver/kh_match_worker"),
             (ROOT / "matching_solver/kh_match_distributed", "matching_solver/kh_match_distributed"),
+            (ROOT / "matching_solver/kh_verify_khm1", "matching_solver/kh_verify_khm1"),
         ]
 
     def validate_result(self, specification, output):
