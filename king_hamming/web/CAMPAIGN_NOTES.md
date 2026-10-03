@@ -7,14 +7,15 @@ them; the workarounds are listed so they can be removed once the library
 changes. None of these have been made: the dashboard leaves campaign code
 untouched.
 
-Status as of 2026-10-01.
+Status as of 2026-10-02.
 
 ## First priority
 
 Suggested order of work: **1** (feeder backlog), then **3** (a failed root
 stops its tiles), **4** (tile timeouts), **6** (reconstruction starvation),
-**15** (worker disk) and, before the leader faces anything beyond the home
-network, **18** (leader authentication).
+**15** and **19–23** (disk space; see below, since the disks filled on
+2026-10-02) and, before the leader faces anything beyond the home network,
+**18** (leader authentication).
 
 1. **The feeder should own an ordered backlog of fields.**
    - **Today:**
@@ -188,15 +189,22 @@ network, **18** (leader authentication).
       especially in the scheduler loop and in `advance()`, which works through
       every waiting root inside a single transaction.
 
-15. **The leader cannot see free disk on the workers.**
-    - **Effect:** a large field such as 11⁹ (about 290 GiB of DP state, kept in
-      two tile copies) could fill worker disks partway through. Nothing
-      reports or prevents that in advance.
-    - **Possible change:** agents report free and used space on their
-      storage roots in heartbeats. Admission of a new root then checks its
-      projected tile storage.
+15. **Nothing acts on worker free disk.**
+    - **Today:** agents report `storage_free_bytes` in every heartbeat
+      (`agent.py`, `heartbeat_loop`), but nothing reads it. Neither the leader nor
+      the feeder checks it before admitting work, and nothing reports the
+      disk's total size or what is using it.
+    - **Observed:** at the last heartbeats on 2026-10-02, dp-102, dp-104,
+      dp-105 and dp-151 reported 0 bytes free, with 13⁹ (about 1 TB of stored
+      tiles) partway through.
+    - **Possible change:** agents also report the filesystem's total size and
+      the bytes under their deployment directory. Admission of a new root, and
+      the feeder's release of one, check its projected tile storage (see item
+      23) against the free space, and dispatch pauses tile work below a
+      watermark instead of failing writes.
     - **Dashboard workaround:** the submit preview states the disk the field
-      will need, but cannot compare it with what is free.
+      will need, but cannot compare it with what is free. DESIGN.md plans a
+      disk view on the Fleet tab.
 
 16. **The tile layout limits are fixed or implicit.**
     - **Cause:** `distributed.create()` caps a root at `max_tiles` (default
@@ -223,3 +231,91 @@ network, **18** (leader authentication).
     - **Possible change:** bind it to the LAN interface only, and require a
       shared token on mutating routes, which the agents, feeder and dashboard
       would carry.
+
+## Disk space
+
+Measured on 2026-10-02, from the leader's database (as of the last
+heartbeats) and `du` on each machine. Almost all campaign disk is DP tile
+packets in each agent's `…/dp-<deployment>/blobs/`:
+
+- **Unique tile data:** 235 GB, about one byte per DP cell, roughly
+  (p^(⌊r/2⌋+1))² bytes per field.
+- **Stored:** 1.66 TB, because each tile sits on 5–10 machines (7 on average)
+  against a target of 3.
+- **Finished fields** account for 553 GB of it; **unfinished ones** (13⁹,
+  23⁷) for 1.1 TB.
+- Final results are tiny: a KHD1 split is kilobytes, and all 62 matching
+  results come to 816 MB.
+
+Items 19 and 20 together would bring today's 1.66 TB down to about 470 GB.
+
+19. **Tile packets are never deleted, even after their field is finished.**
+    - **Cause:** garbage collection (`cluster/retention.py`, `collect_plan`)
+      protects every row of `artifacts`. Only retired checkpoint objects are
+      ever deletable.
+    - **Effect:** 11⁹ (finished and matched) still holds 193 GB, 7¹¹ 128 GB,
+      19⁷ 123 GB and 17⁷ 63 GB. The tiles of failed attempts stay as well,
+      even once a later attempt has finished.
+    - **Possible change:**
+      - When a root is complete and its KHD1 result is safely stored (in the
+        feeder's manifest and `results/`, and ideally checked by
+        `verify_dp.py`), mark its tiles' artifacts as retired. Then queue their
+        blobs in `checkpoint_garbage` on each holder, so the existing
+        `/v1/gc-plan` path deletes them.
+      - Keep the tiles of failed, paused and cancelled roots, since
+        `reuse_tiles` needs them, until a later attempt of the same field
+        completes.
+      - A `tile_retention` setting (`delete`, or keep for N days) leaves room
+        to recompute the final reconstruction.
+    - **Savings:** about 550 GB today, and each future field's whole tile set
+      once it finishes.
+
+20. **Copies pile up beyond `target_replicas`.**
+    - **Cause:** the leader's replication query (`leader.py`, route
+      `/v1/replication`) counts only copies on nodes whose last heartbeat is
+      under `lease_seconds` (60 s) old. Whenever an agent misses heartbeats
+      for a minute (a Wi-Fi drop, an agent restart, a rolling upgrade), each of
+      its tiles looks short of copies, and another machine makes a new one.
+      When the agent returns, its copy counts again, and nothing removes the
+      surplus.
+    - **Effect:** every tile is at target 3, but they have 5–10 copies. 13⁹'s
+      139 GB of tiles occupy 1 TB.
+    - **Possible change:**
+      - Wait longer before re-replicating: use a separate grace period of
+        several minutes, rather than the lease timeout.
+      - Have garbage collection trim copies above the target, removing them
+        first from the machines with the least free disk. Never trim to below
+        the target among currently healthy machines.
+    - **Savings:** trimming alone takes 1.66 TB to about 680 GB.
+
+21. **Run scratch directories are left behind.**
+    - **Cause:** agents delete a run's work directory contents only through
+      the adapter's `cleanup` hook, after durable completion. The DP adapter
+      removes only `tile-output`, `tile-inputs`, `reconstruction` and
+      `halo.bin`. Failed, cancelled and stopped runs keep everything, and the
+      matching adapter's `phase-state/` and `result.bin` (up to several GB
+      each) are never removed.
+    - **Observed:** 10,294 run folders and 67 GB under merlin's `…/work/`,
+      and 3–28 GB on each worker.
+    - **Possible change:** remove a run's directory once its result is
+      durable (two verified copies) or its run is terminal. Sweep, when an
+      agent starts, any directory whose run is not leased to that agent.
+
+22. **Retired deployments keep their storage.**
+    - **Observed:** `dp-65de…`, `match-577e…` and `dp-b78f…` under
+      `~/.local/share/king_hamming/`, from earlier deployments, hold about
+      2–5 GB on each machine.
+    - **Possible change:** a `launch_dp.py retire DEPLOYMENT` command that
+      confirms the deployment's results are collected, stops its agents, and
+      removes its storage on every host.
+
+23. **Admission does not account for disk.**
+    - **Effect:** a root's tiles need about (p^(⌊r/2⌋+1))² bytes per copy.
+      Finishing 13⁹ needs about 50 GB more of unique tile data, and finishing
+      23⁷ about 70–85 GB. At three copies, 23⁷ needs 210–255 GB, and the whole
+      cluster had about 360 GB free.
+    - **Possible change:** estimate a root's tile storage at submission
+      (`tile_plan()` already knows the layout) and refuse or hold the root
+      while the cluster's free disk, less a reserve, can't hold
+      `target_replicas` copies. Pair this with item 15's watermark, and with
+      item 1's disk check on backlog release.

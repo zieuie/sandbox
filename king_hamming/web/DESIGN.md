@@ -31,8 +31,8 @@ Built, all read-only:
 Also built: operator commands (`commands.py`) and detached process jobs
 (`jobs.py`, `jobrunner.py`).
 
-Planned later: a verifier row viewer, per-root ETAs, and the library changes in
-CAMPAIGN_NOTES.md.
+Planned later: disk usage on the Fleet tab (see "Planned: disk usage" below),
+a verifier row viewer, and the library changes in CAMPAIGN_NOTES.md.
 
 ## Architecture
 
@@ -236,6 +236,114 @@ The views:
 
 The layout works at phone width. Colours come from CSS variables, with a dark
 theme.
+
+## Planned: disk usage on the Fleet tab
+
+**Goal:** show, for each machine and for the whole cluster, how its disk
+divides into four categories:
+
+| Category | Meaning |
+| --- | --- |
+| **Tiles** | DP tile packets in the agent's blob store |
+| **Other king_hamming** | everything else the campaign keeps: other blobs (matching inputs, checkpoints), run scratch in `work/`, earlier deployments, and on merlin the deployment directory and backups |
+| **Unrelated** | everything on the filesystem not owned by king_hamming, including the root-reserved blocks |
+| **Free** | space the campaign's user can still write |
+
+### Where the numbers come from
+
+The leader's database has only part of this: each node's
+`storage_free_bytes` as of its last heartbeat, and which tiles it holds
+(`replicas` joined to `artifacts.size`). It has no disk size, nothing about
+non-blob files, and it goes stale as soon as the agents stop. That was the case
+on 2026-10-02, when the disks had filled and the campaign was stopped.
+
+**Recommended: a separate disk collector.** A background thread in the
+dashboard, independent of snapshot builds, measures each machine directly:
+
+- **Hosts:** a fixed list in the dashboard's configuration (`.101`–`.108`,
+  `.151`, `.152`), never addresses read from the database. Each host runs one
+  fixed command over `ssh -o BatchMode=yes -o ConnectTimeout=5`, with no
+  operator input in it. Merlin is measured locally.
+- **The command:** returns JSON with:
+  - `statvfs` of the storage root's filesystem: size, free, and available
+    to the user
+  - `du -s --block-size=1` of `~/.local/share/king_hamming`; one `du`
+    invocation, so hard links between `blobs/` and the dependency cache are
+    counted once
+  - a listing of `blobs/` with each file's name, allocated bytes and inode
+- **Classification:** the dashboard classifies blobs itself, against the
+  leader's database:
+  - a hash whose artifact belongs to a `dp_tile` run counts as **tiles**
+  - matching artifacts, checkpoint members and unknown hashes count as
+    **other**
+  - unknown hashes are also counted separately as *unregistered*
+  - each inode is counted once
+- **Arithmetic:**
+  - `free` = available bytes
+  - `tiles` = classified tile bytes
+  - `other` = king_hamming `du` total, plus merlin's repository data, minus
+    tiles
+  - `unrelated` = size − free − tiles − other
+
+  The root reservation (about 5%, 11 GB per worker) falls in unrelated, and
+  the tooltip names it.
+- **Cadence:** every 30 minutes, plus an operator-only **Measure disks now**
+  button (rate-limited to once per minute). The page's Refresh doesn't trigger
+  it, so polling never causes SSH storms. A `du` over about 40,000 blobs takes
+  a few seconds per machine, and machines are measured one at a time.
+- **Persistence and failures:**
+  - the last result for each machine is kept in
+    `~/.local/share/king_hamming/web/disk.json`, so a dashboard restart shows
+    data at once, labelled with its age
+  - an unreachable machine keeps its last numbers, greyed, with the error
+- **Leader comparison:** where a fresh heartbeat exists, the leader's
+  `storage_free_bytes` is shown beside the measured value in the tooltip.
+
+**Later, once CAMPAIGN_NOTES item 15 lands:** agents would report disk size
+and deployment bytes in heartbeats. The collector then only fills the gaps
+while agents are down.
+
+### Display
+
+- **Machine cards:** a stacked horizontal bar under the memory bar, ordered
+  tiles | other king_hamming | unrelated | free, with free as the empty track.
+  The caption reads `Disk 233 GB · 43 GB free · measured 12 m ago`. Hovering
+  shows:
+  - the four values in GB and percent
+  - tiles split into *finished fields*, *unfinished fields* and *failed or
+    cancelled attempts*, with the largest fields, for example
+    `13⁹ 112 GB · 11⁹ 21 GB …`
+  - average copies per tile, against the target of 3
+  - other king_hamming split into blobs, `work/` and earlier deployments
+- **Cluster summary:** at the top of the Fleet tab, the same bar summed over
+  all machines, with the one legend for the page, and then two lines:
+  - the reclaimable figures from CAMPAIGN_NOTES items 19–21: finished
+    fields' tiles, copies above target, and run scratch
+  - the projected need of paused or queued roots, against the total free
+- **Colours:** tiles in the strong accent; other king_hamming in a lighter
+  tint of the same hue, so the campaign reads as one block; unrelated in
+  neutral grey; free as the bar track. Labels never rely on colour alone. The
+  tooltip and legend name each segment, and the palette is checked with the
+  dataviz validator in light and dark.
+- **Problems tab:** an alert when a machine's available space drops below
+  `max(20 GB, 10%)`, or below the largest tile packet of an active root. A
+  critical alert when it reaches zero, since agents then fail writes.
+- **Phone width:** the bar keeps its four segments, and the caption wraps.
+
+### Code
+
+- `disk.py`: the collector thread, the remote command, classification, and
+  `disk.json`.
+- `snapshot.py`: merges the latest disk results into `fleet`. It runs no SSH
+  during a build.
+- `server.py`: starts the collector, adds `--disk-hosts` and
+  `--disk-interval`, and `POST /api/disk/measure` (operators, CSRF).
+- `static/fleet.js` and `style.css`: the bar, the summary and the tooltips.
+- `problems.py`: the low-disk alerts.
+- **Tests:** classification against fixture databases, including hard-linked
+  and unregistered blobs; the arithmetic, including the root reservation;
+  stale and unreachable hosts; and the measure command's rate limit. None of
+  them run SSH.
 
 ## Files
 
