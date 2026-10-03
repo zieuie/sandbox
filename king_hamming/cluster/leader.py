@@ -23,6 +23,7 @@ from blob_store import valid_digest
 from checkpoints import DEFAULT_MAX_BYTES
 import recovery
 import retention
+import replication
 import adapters
 import gpus
 from resources import ResourceRequest, fits as resource_fits, normalized_slots
@@ -363,6 +364,7 @@ def initialize(
 
         recovery.initialize(connection, lease_seconds, max_checkpoint_bytes)
         retention.initialize(connection, checkpoint_keep)
+        replication.initialize(connection)
         connection.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('disk_floor_bytes',?)",
                            (str(DEFAULT_DISK_FLOOR_BYTES),))
         adapters.initialize(connection)
@@ -884,26 +886,19 @@ def make_handler(
                     # them after every Wi-Fi drop or restart is what piled up surplus copies.
                     grace = max(lease_seconds, retention.number(
                         connection, "replica_grace_seconds", retention.DEFAULT_REPLICA_GRACE_SECONDS))
-                    row = connection.execute(
-                        "SELECT a.artifact_hash,a.size FROM artifacts a WHERE NOT EXISTS "
-                        "(SELECT 1 FROM replicas own WHERE own.artifact_hash=a.artifact_hash AND own.node_name=?) "
-                        "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
-                        "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?) < a.target_replicas "
-                        "AND EXISTS (SELECT 1 FROM replicas r JOIN nodes n USING(node_name) "
-                        "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?) "
-                        "ORDER BY a.created LIMIT 1", (node["node_name"], now - grace, now - lease_seconds),
-                    ).fetchone()
+                    return {"replication": replication.assign(connection, node, now,
+                                                               lease_seconds, grace)}
 
-                    if row is None:
-                        return {"replication": None}
-
-                    locations = [record[0] for record in connection.execute(
-                        "SELECT r.location FROM replicas r JOIN nodes n USING(node_name) "
-                        "WHERE r.artifact_hash=? AND n.last_heartbeat>? ORDER BY n.node_name",
-                        (row["artifact_hash"], now - lease_seconds),
-                    )]
-                    return {"replication": {**dict(row), "kind": "artifact", "locations": locations,
-                                             "location": locations[0]}}
+                if route in {"/v1/replication-renew", "/v1/replication-release"}:
+                    node = recovery.require_node(connection, request)
+                    digest, token = request["artifact_hash"], request["transfer_token"]
+                    if not valid_digest(digest) or not isinstance(token, str) or len(token) != 36:
+                        raise ValueError("invalid replication assignment")
+                    if route == "/v1/replication-renew":
+                        replication.renew(connection, node, digest, token, now)
+                    else:
+                        replication.release(connection, node, digest, token)
+                    return {"ok": True}
 
                 if route == "/v1/revalidate-done":
                     node = recovery.require_node(connection, request)
@@ -934,10 +929,20 @@ def make_handler(
                     ).fetchone() is None:
                         raise ValueError("unknown artifact")
 
+                    token = request.get("transfer_token")
+                    if token is not None:
+                        replication.renew(connection, node, request["artifact_hash"], token, now)
+
                     connection.execute(
                         "INSERT OR REPLACE INTO replicas(artifact_hash,node_name,location,created) VALUES(?,?,?,?)",
                         (request["artifact_hash"], node["node_name"], request["location"], now),
                     )
+                    connection.execute(
+                        "DELETE FROM artifact_trim WHERE artifact_hash=? AND node_name=?",
+                        (request["artifact_hash"], node["node_name"]),
+                    )
+                    if token is not None:
+                        replication.release(connection, node, request["artifact_hash"], token)
                     return {"ok": True}
 
                 if route == "/v1/lease":

@@ -518,11 +518,11 @@ def replicate_once(
 ) -> bool:
     """Verify one replica before acknowledging it; return whether work was performed."""
 
-    with storage_transaction(storage_root):
-        identity = {"node_name": node_name, "session_id": session_id}
-        batch = request_json(leader, "/v1/revalidation-batch", identity)
-        records = batch.get("records", [])
-        if records:
+    identity = {"node_name": node_name, "session_id": session_id}
+    batch = request_json(leader, "/v1/revalidation-batch", identity)
+    records = batch.get("records", [])
+    if records:
+        with storage_transaction(storage_root):
             mode = batch.get("mode")
             if mode not in {"metadata", "hash"}:
                 raise ValueError("leader returned invalid storage validation mode")
@@ -543,17 +543,17 @@ def replicate_once(
                                 "valid": valid})
             request_json(leader, "/v1/revalidation-batch-done",
                          {**identity, "records": results})
-            return True
-        response = request_json(leader, "/v1/replication", identity)
-        task = response.get("replication")
+        return True
+    response = request_json(leader, "/v1/replication", identity)
+    task = response.get("replication")
+    if task is None:
+        return False
 
-        if task is None:
-            return False
-
-        if task.get("kind") in {"revalidate_checkpoint", "revalidate_artifact"}:
-            checkpoint_inventory = task["kind"] == "revalidate_checkpoint"
-            digest = task["manifest_hash"] if checkpoint_inventory else task["artifact_hash"]
-            try:
+    if task.get("kind") in {"revalidate_checkpoint", "revalidate_artifact"}:
+        checkpoint_inventory = task["kind"] == "revalidate_checkpoint"
+        digest = task["manifest_hash"] if checkpoint_inventory else task["artifact_hash"]
+        try:
+            with storage_transaction(storage_root):
                 if checkpoint_inventory:
                     manifest = task["manifest"]
                     validate_manifest(manifest, task["specification"], manifest["run_id"], int(task["max_checkpoint_bytes"]))
@@ -564,32 +564,61 @@ def replicate_once(
                     if not path.exists() or (task.get("size") is not None and path.stat().st_size != task["size"]) or file_digest(path) != digest:
                         raise ValueError("retained artifact is missing or damaged")
                     request_json(leader, "/v1/replica", {**identity, "artifact_hash": digest, "location": f"{storage_url.rstrip('/')}/blobs/{digest}"})
-            except (OSError, ValueError) as error:
-                print(f"retained replica not acknowledged: {error}", file=sys.stderr, flush=True)
-            request_json(leader, "/v1/revalidate-done", {**identity, "kind": "checkpoint" if checkpoint_inventory else "artifact", "digest": digest})
-            return True
+        except (OSError, ValueError) as error:
+            print(f"retained replica not acknowledged: {error}", file=sys.stderr, flush=True)
+        request_json(leader, "/v1/revalidate-done", {**identity, "kind": "checkpoint" if checkpoint_inventory else "artifact", "digest": digest})
+        return True
 
-        if task.get("kind") == "checkpoint":
+    if task.get("kind") == "checkpoint":
+        with storage_transaction(storage_root):
             manifest = task["manifest"]
             validate_manifest(manifest, task["specification"], manifest["run_id"],
                               int(task.get("max_checkpoint_bytes", DEFAULT_MAX_BYTES)))
             reporter = bad_blob_reporter(leader, identity, task["sources"])
             fetch_checkpoint(task, storage_root, bad_source=reporter)
             request_json(leader, "/v1/checkpoint-replica", {**identity, "manifest_hash": task["manifest_hash"]})
-        else:
-            digest = str(task["artifact_hash"])
-            size = task.get("size")
-
-            # Older databases did not record artifact sizes; learn that bounded transfer size once.
-            if size is None:
-                with urlopen(task["location"], timeout=5) as response:
-                    size = int(response.headers["Content-Length"])
-
-            fetch_blob(storage_root, digest, int(size), task.get("locations", [task["location"]]))
-            location = f"{storage_url.rstrip('/')}/blobs/{digest}"
-            request_json(leader, "/v1/replica", {**identity, "artifact_hash": digest, "location": location})
-
         return True
+
+    digest = str(task["artifact_hash"])
+    token = task.get("transfer_token")
+    last_renew = 0.0
+
+    def keep_assignment() -> None:
+        """Renew while downloading and hashing; an abandoned copy expires quickly."""
+        nonlocal last_renew
+        if token and time.monotonic() - last_renew >= 15.0:
+            request_json(leader, "/v1/replication-renew",
+                         {**identity, "artifact_hash": digest, "transfer_token": token})
+            last_renew = time.monotonic()
+
+    try:
+        size = task.get("size")
+        if size is None:
+            with urlopen(task["location"], timeout=5) as response:
+                size = int(response.headers["Content-Length"])
+        keep_assignment()
+        # The blob is named atomically only after its hash matches. A lengthy network
+        # fetch does not hold the storage-wide lock needed by tile publication.
+        fetch_blob(storage_root, digest, int(size), task.get("locations", [task["location"]]),
+                   check=keep_assignment)
+        keep_assignment()
+        location = f"{storage_url.rstrip('/')}/blobs/{digest}"
+        # Close the small gap between a finished download and its acknowledgment:
+        # local GC must not remove an older, unindexed copy while we publish it.
+        with storage_transaction(storage_root, keep_assignment):
+            path = blob_path(storage_root, digest)
+            if not path.is_file() or path.stat().st_size != int(size):
+                raise OSError("replica disappeared before acknowledgment")
+            request_json(leader, "/v1/replica", {**identity, "artifact_hash": digest,
+                                                 "location": location, "transfer_token": token})
+    finally:
+        if token:
+            try:
+                request_json(leader, "/v1/replication-release",
+                             {**identity, "artifact_hash": digest, "transfer_token": token})
+            except OSError:
+                pass  # the reservation also expires if the leader is unreachable
+    return True
 
 
 # How many objects the last collection pass handled; a full batch means more are waiting.

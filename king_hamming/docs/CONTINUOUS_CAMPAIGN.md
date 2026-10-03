@@ -113,6 +113,13 @@ The campaign keeps its own disks from filling, without operator action:
   (three) healthy machines. Extra copies are dropped, least free disk first, never
   below the target, and a machine that is silent for under `replica_grace_seconds`
   (default 10 minutes) is not replaced, so brief Wi-Fi drops stop making extra copies.
+- **Replication assignments are exclusive.** The leader gives one agent an
+  expiring, renewable claim on each artifact transfer. A failed transfer releases
+  its claim; a crashed or disconnected agent loses it automatically. The second
+  live copy of a finished tile in an active DP root is served before background
+  third copies, because that second copy unlocks dependent tiles. Transfers do
+  not hold the agent's storage-wide lock, so tile publication can proceed beside
+  a download. The two-live-copy rule for dependent tiles is unchanged.
 - **A full disk gets no new work.** A machine reporting less than
   `disk_floor_bytes` (default 10 GiB; `0` turns it off) is given no new leases and
   no new copies, and shows "low disk" in the status and the dashboard. Its running

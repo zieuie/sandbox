@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 import tempfile
@@ -185,6 +186,154 @@ class ReplicationGraceTests(LeaderCase):
         with self.db() as connection:
             connection.execute("UPDATE nodes SET last_heartbeat=? WHERE node_name='a'", (self.now - HOURS,))
         self.assertIsNone(self.wanted("c"))
+
+
+class ReplicationSchedulerTests(LeaderCase):
+    """One fenced transfer at a time, with frontier-blocking second copies first."""
+
+    def wanted(self, node: str):
+        return self.handler.dispatch_post(
+            "/v1/replication", {"node_name": node, "session_id": ""})["replication"]
+
+    def test_exclusive_transfer_and_release(self) -> None:
+        with self.db() as connection:
+            value = self.artifact(connection, "1", "a")
+        task = self.wanted("b")
+        self.assertEqual(task["artifact_hash"], value)
+        self.assertIsNone(self.wanted("c"))
+        self.handler.dispatch_post("/v1/replication-release", {
+            "node_name": "b", "session_id": "", "artifact_hash": value,
+            "transfer_token": task["transfer_token"]})
+        self.assertEqual(self.wanted("c")["artifact_hash"], value)
+
+    def test_fenced_ack_and_expiry(self) -> None:
+        with self.db() as connection:
+            value = self.artifact(connection, "2", "a", target=2)
+        task = self.wanted("b")
+        with self.assertRaises(PermissionError):
+            self.handler.dispatch_post("/v1/replica", {
+                "node_name": "b", "session_id": "", "artifact_hash": value,
+                "transfer_token": "0" * 36, "location": "http://b/blobs/" + value})
+        self.handler.dispatch_post("/v1/replication-renew", {
+            "node_name": "b", "session_id": "", "artifact_hash": value,
+            "transfer_token": task["transfer_token"]})
+        with self.db() as connection:
+            connection.execute(
+                "INSERT INTO artifact_trim(node_name,artifact_hash,reason,created) VALUES(?,?,?,?)",
+                ("b", value, "obsolete claim", self.now))
+        self.handler.dispatch_post("/v1/replica", {
+            "node_name": "b", "session_id": "", "artifact_hash": value,
+            "transfer_token": task["transfer_token"], "location": "http://b/blobs/" + value})
+        with self.db() as connection:
+            self.assertEqual(self.holders(connection, value), {"a", "b"})
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM replica_transfers").fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM artifact_trim WHERE node_name='b' AND artifact_hash=?",
+                (value,)).fetchone()[0], 0)
+
+        with self.db() as connection:
+            another = self.artifact(connection, "3", "a", target=2)
+        old = self.wanted("b")
+        with self.db() as connection:
+            connection.execute("UPDATE replica_transfers SET expires=? WHERE artifact_hash=?",
+                               (self.now - 1, another))
+        new = self.wanted("c")
+        self.assertEqual(new["artifact_hash"], another)
+        with self.assertRaises(PermissionError):
+            self.handler.dispatch_post("/v1/replica", {
+                "node_name": "b", "session_id": "", "artifact_hash": another,
+                "transfer_token": old["transfer_token"], "location": "http://b/blobs/" + another})
+
+    def test_active_tile_second_copy_precedes_older_background_work(self) -> None:
+        with self.db() as connection:
+            older = self.artifact(connection, "4", "a", age=2 * HOURS)
+            urgent = self.artifact(connection, "5", "a", age=HOURS)
+            parent = "frontier-root"
+            connection.execute(
+                "INSERT INTO runs(run_id,calculation_id,specification,state,priority,from_scratch,created) "
+                "VALUES(?,?,?,'waiting',0,0,?)",
+                (parent, parent, '{"program":"dp_distributed","arguments":{"p":5,"r":3}}', self.now))
+            connection.execute(
+                "INSERT INTO runs(run_id,calculation_id,specification,state,priority,from_scratch,created,parent_run_id,artifact_hash) "
+                "VALUES(?,?,?,'complete',0,0,?,?,?)",
+                ("frontier-tile", "frontier-tile", '{"program":"dp_tile","arguments":{}}',
+                 self.now, parent, urgent))
+        self.assertEqual(self.wanted("b")["artifact_hash"], urgent)
+        self.assertEqual(self.wanted("c")["artifact_hash"], older)
+
+
+class AgentReplicationTests(unittest.TestCase):
+    """Artifact transfers renew their claim without blocking tile publication."""
+
+    def test_download_renews_and_releases_without_storage_wide_lock(self) -> None:
+        digest_value = digest("a")
+        task = {"kind": "artifact", "artifact_hash": digest_value, "size": 100,
+                "location": "http://source/blobs/" + digest_value,
+                "locations": ["http://source/blobs/" + digest_value],
+                "transfer_token": "1" * 36}
+        routes = []
+        locked = False
+
+        @contextmanager
+        def transaction(_root, check=None):
+            nonlocal locked
+            self.assertFalse(locked)
+            if check is not None:
+                check()
+            locked = True
+            try:
+                yield
+            finally:
+                locked = False
+
+        def request(_leader, route, _value):
+            routes.append(route)
+            if route == "/v1/revalidation-batch":
+                return {"records": []}
+            if route == "/v1/replication":
+                return {"replication": task}
+            return {"ok": True}
+
+        def fetch(root, _digest, _size, _locations, check=None):
+            self.assertFalse(locked)
+            self.assertIsNotNone(check)
+            check()
+            path = agent.blob_path(root, _digest)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * _size)
+            return path
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(agent, "request_json", side_effect=request), \
+                mock.patch.object(agent, "fetch_blob", side_effect=fetch), \
+                mock.patch.object(agent, "storage_transaction", side_effect=transaction):
+            self.assertTrue(agent.replicate_once("http://leader", "b", Path(directory), "http://b"))
+        self.assertEqual(routes, ["/v1/revalidation-batch", "/v1/replication",
+                                  "/v1/replication-renew", "/v1/replica",
+                                  "/v1/replication-release"])
+
+    def test_failed_download_releases_assignment(self) -> None:
+        digest_value = digest("b")
+        task = {"kind": "artifact", "artifact_hash": digest_value, "size": 100,
+                "location": "http://source/blobs/" + digest_value,
+                "transfer_token": "2" * 36}
+        routes = []
+
+        def request(_leader, route, _value):
+            routes.append(route)
+            if route == "/v1/revalidation-batch":
+                return {"records": []}
+            if route == "/v1/replication":
+                return {"replication": task}
+            return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(agent, "request_json", side_effect=request), \
+                mock.patch.object(agent, "fetch_blob", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                agent.replicate_once("http://leader", "b", Path(directory), "http://b")
+        self.assertEqual(routes[-1], "/v1/replication-release")
 
 
 class DiskFloorTests(LeaderCase):
