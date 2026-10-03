@@ -22,9 +22,13 @@ agents and feeder):
 | Edge bands: a tile fetches about 1.5 MiB of inputs instead of about 65 MiB | 20 | leader and agents |
 | Soft row affinity in lease choice | 21 | leader |
 | Free-disk floor on new leases and copies; disk checks in the Submit preview | 7, 8 | leader (and the dashboard) |
+| New program `match_gpu_blocks`: fields too big for one GPU are matched block by block on any machine with the RAM (all five large fields qualify); the feeder plans it, the Matching tab shows it. Also: a finished run keeps its JSON summary instead of the word "complete" | none (new) | leader, agents (new binary), feeder, dashboard |
+| Native KHM1 verifier `kh_verify_khm1` (0.2 s instead of 31 s on 2^23); block runs need about a quarter of the host RAM | none (new) | agents, feeder |
+| GPU use graph on the Fleet tab (agents sample `nvidia-smi`; leader table `gpu_usage_samples`) | none (new) | leader, agents, dashboard |
 
 To deploy: `launch_dp.py upgrade-leader`, then `upgrade-workers`, then restart the
-dashboard (`web/restart_dashboard.sh`). Then compare the first tiles' `input_mode`
+dashboard (`web/restart_dashboard.sh`). After deploying, watch the first `match_gpu_blocks`
+run: it holds its GPU for minutes (verification is native and takes seconds to minutes). Then compare the first tiles' `input_mode`
 and `input_bytes` (see item 20) with the old ones.
 
 Already done by hand on 2026-10-02, while everything was stopped: the equivalent

@@ -1,10 +1,14 @@
 # GPUs in the cluster
 
-Two GPU solvers are integrated:
+Three GPU solvers are integrated:
 
 - `match_gpu` ([gpu_match_solver](../gpu_match_solver/README.md)) is an exact
   matching program. It runs on one fenced GPU and replaces 9-node
   `match_distributed` runs of 1–2 hours with seconds of GPU work.
+- `match_gpu_blocks` ([gpu_block_match_solver](../gpu_block_match_solver/README.md)) matches
+  fields that are too big for any one GPU, block by block on the largest GPU. See
+  [GPU_BLOCK_MATCHING.md](GPU_BLOCK_MATCHING.md). It never proves that no perfect
+  matching exists, so `match_gpu` stays the first choice for anything that fits.
 - `kh_gpu_dp_tile` ([gpu_dp_solver](../gpu_dp_solver/README.md)) is a
   byte-identical accelerator for DP tiles. It is 16× (P600) to 143× (RTX 3060)
   faster on production 4096-side tiles.
@@ -100,22 +104,52 @@ Pipeline settings (optional; defaults shown):
 | --- | --- | --- |
 | `gpu_matching` | `true` | route GPU-sized fields to `match_gpu` |
 | `gpu_matching_threads` | `4` | CPU threads for field construction |
+| `gpu_block_matching` | `true` | when no GPU holds the whole field, plan `match_gpu_blocks` on the largest GPU |
 
 With today's fleet, Merlin's 3060 admits fields up to about 180 M labels,
 including the previously blocked 3^17 and 2^27. The P600 nodes (now all eight)
 take fields up to about 55 M, and pellinore's 4 GiB 1050 Ti should take about
-110 M (an estimate from its memory; not yet run). 17^7, 19^7, 2^29, 7^11 and
-11^9 still exceed every GPU and keep their CPU `field limit`. See
-[gpu_match_solver/README.md](../gpu_match_solver/README.md) for the
-recommended CPU-side follow-up.
+110 M (an estimate from its memory; not yet run).
+
+Fields larger than that get the plan `{"program": "match_gpu_blocks", ...}` (second tier
+in `gpu_policy.py`) when `gpu_block_matching` is on and some healthy host has the RAM
+(`gpu_block_match_solver/adapter.py:host_bytes`: the full field table plus choices,
+about 6 bytes per label). **Every host with a usable GPU and that much RAM may take the
+run**, so several fields match at once; the lease asks for the smallest eligible device, and
+the kernel sizes its blocks from the device it actually gets (merlin's 3060 needs 3 blocks
+for 17^7, a P600 needs 9). On today's fleet all five large fields are admitted:
+17^7, 2^29 and 19^7 (about 2.4, 3.1 and 5.1 GiB of host RAM) on all ten machines, 7^11
+(11.1 GiB) on all ten, and 11^9 (13.3 GiB) on merlin and the P600 machines. The leader only
+places a job where its memory fits beside the DP tiles already reserved on that host, so the
+big ones in practice land on merlin.
+
+Results are verified by `matching_solver/kh_verify_khm1`, a native streaming verifier
+(about 150x faster than the Python one: 0.2 s against 31 s on 2^23). It is written
+independently of the solvers and checked against the Python verifier by a differential test
+(`matching_solver/tests/check_native_verify.py`). `artifacts.verify` uses it for full matchings
+with at least 2^24 labels when the binary is built, and falls back to Python otherwise.
+
+A block run ends "incomplete" (`block matching incomplete: N requests unmatched ...`) if
+the exchange does not finish. The feeder then moves to the next primitive polynomial,
+and gives up after `max_matching_attempts` such runs. It is never recorded as an
+obstruction. A block run holds the device lock for its whole duration (minutes), so DP
+tiles on that host fall back to CPU after their 120 s wait.
 
 ## Web dashboard
 
 - **Fleet:** each card shows the node's GPUs ("not reported" while the leader
-  predates GPU support), marked *busy* while a fenced lease or a GPU tile runs.
+  predates GPU support), marked *busy* while a fenced lease or a GPU tile runs, and a
+  24-hour **GPU use** graph beside the CPU one (real utilisation and memory from
+  `nvidia-smi`, sampled by the agent on every heartbeat and kept 7 days in the leader's
+  `gpu_usage_samples`; it appears once agents and leader run this version).
   Work items carry `GPU n` (fenced lease) or `GPU` (opportunistic tile).
 - **Matching:** history has an Engine column (`GPU n` or `CPU · k machines`).
-  `match_gpu` runs show the device, the augmenting-phase count and per-stage
+  Finished GPU runs also get the same burndown chart as CPU runs (requests still
+  unmatched, log scale), drawn from a `trace` the kernels report: after greedy and each
+  augmenting phase for `match_gpu`, after each block and exchange round for
+  `match_gpu_blocks`.
+  `match_gpu_blocks` runs also show the block count, exchange rounds and requests left
+  after block matching. `match_gpu` runs show the device, the augmenting-phase count and per-stage
   seconds instead of the phase-checkpoint chart they don't have. The waiting
   table explains GPU admission ("GPU on merlin"), or how much GPU memory a field
   needs compared with the largest live GPU.
