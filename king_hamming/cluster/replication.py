@@ -29,21 +29,10 @@ def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
 
 
-def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
-           lease_seconds: float, grace_seconds: float,
-           disk_floor_bytes: int = 0) -> dict | None:
-    """Reserve one needed transfer; unblock active DP tiles before background copies.
-
-    At most one node may fetch an artifact at a time. The leader's surrounding
-    BEGIN IMMEDIATE transaction makes selection and reservation atomic.
-    """
-
-    connection.execute(
-        "DELETE FROM replica_transfers WHERE expires<=? OR NOT EXISTS "
-        "(SELECT 1 FROM nodes n WHERE n.node_name=replica_transfers.node_name "
-        "AND n.session_id=replica_transfers.session_id AND n.last_heartbeat>?)",
-        (now, now - lease_seconds),
-    )
+def select_candidate(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
+                     lease_seconds: float, grace_seconds: float,
+                     disk_floor_bytes: int = 0) -> dict | None:
+    """Find a useful copy using a reader; no global writer lock is required."""
     # Only the two waiting DP roots need urgent second copies. Starting from
     # their children avoids evaluating JSON and replica counts for every old,
     # retired artifact in the database on each worker poll.
@@ -55,13 +44,14 @@ def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
         "AND json_extract(parent.specification,'$.program')='dp_distributed' "
         "AND NOT EXISTS (SELECT 1 FROM replicas own WHERE own.artifact_hash=a.artifact_hash "
         "AND own.node_name=?) "
-        "AND NOT EXISTS (SELECT 1 FROM replica_transfers t WHERE t.artifact_hash=a.artifact_hash) "
+        "AND NOT EXISTS (SELECT 1 FROM replica_transfers t WHERE t.artifact_hash=a.artifact_hash "
+        "AND t.expires>?) "
         "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
         "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)=1 "
         "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
         "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)<a.target_replicas "
         "ORDER BY a.created,a.artifact_hash LIMIT 1",
-        (node["node_name"], now - lease_seconds, now - grace_seconds),
+        (node["node_name"], now, now - lease_seconds, now - grace_seconds),
     ).fetchone()
     if row is None:
         # Background work starts from indexed replicas, never from the many
@@ -73,13 +63,14 @@ def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
             "WHERE sender.last_heartbeat>? "
             "AND NOT EXISTS (SELECT 1 FROM replicas own WHERE own.artifact_hash=a.artifact_hash "
             "AND own.node_name=?) "
-            "AND NOT EXISTS (SELECT 1 FROM replica_transfers t WHERE t.artifact_hash=a.artifact_hash) "
+            "AND NOT EXISTS (SELECT 1 FROM replica_transfers t WHERE t.artifact_hash=a.artifact_hash "
+            "AND t.expires>?) "
             "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
             "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)<a.target_replicas "
             "GROUP BY a.artifact_hash "
             "ORDER BY (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
             "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?),a.created LIMIT 1",
-            (now - lease_seconds, node["node_name"], now - grace_seconds,
+            (now - lease_seconds, node["node_name"], now, now - grace_seconds,
              now - lease_seconds),
         ).fetchone()
     if row is None:
@@ -105,16 +96,70 @@ def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
                                    node["node_name"], now - lease_seconds)
     if not locations:
         return None
+    return {"artifact_hash": row["artifact_hash"], "size": row["size"]}
+
+
+def reserve_candidate(connection: sqlite3.Connection, node: sqlite3.Row,
+                      candidate: dict, now: float, lease_seconds: float,
+                      grace_seconds: float, disk_floor_bytes: int = 0) -> dict | None:
+    """Recheck a reader's suggestion and atomically claim only that one artifact."""
+
+    digest = candidate["artifact_hash"]
+    connection.execute(
+        "DELETE FROM replica_transfers WHERE artifact_hash=? AND (expires<=? OR NOT EXISTS "
+        "(SELECT 1 FROM nodes n WHERE n.node_name=replica_transfers.node_name "
+        "AND n.session_id=replica_transfers.session_id AND n.last_heartbeat>?))",
+        (digest, now, now - lease_seconds),
+    )
+    row = connection.execute(
+        "SELECT a.size,a.target_replicas FROM artifacts a WHERE a.artifact_hash=? "
+        "AND NOT EXISTS (SELECT 1 FROM replicas own WHERE own.artifact_hash=a.artifact_hash "
+        "AND own.node_name=?) "
+        "AND NOT EXISTS (SELECT 1 FROM replica_transfers t WHERE t.artifact_hash=a.artifact_hash) "
+        "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
+        "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)<a.target_replicas",
+        (digest, node["node_name"], now - grace_seconds),
+    ).fetchone()
+    if row is None:
+        return None
+    source_groups = [record[0] for record in connection.execute(
+        "SELECT DISTINCT n.private_group FROM replicas r JOIN nodes n USING(node_name) "
+        "WHERE r.artifact_hash=? AND n.private_group<>'' AND n.last_heartbeat>?",
+        (digest, now - lease_seconds),
+    )]
+    if source_groups and node["private_group"] not in source_groups:
+        for group in source_groups:
+            available = connection.execute(
+                "SELECT COUNT(*) FROM nodes WHERE private_group=? AND last_heartbeat>? "
+                "AND (storage_free_bytes<0 OR storage_free_bytes>=?)",
+                (group, now - lease_seconds, disk_floor_bytes),
+            ).fetchone()[0]
+            if available >= row["target_replicas"]:
+                return None
+    locations = topology.locations(connection, digest, node["node_name"], now - lease_seconds)
+    if not locations:
+        return None
     token = str(uuid.uuid4())
     connection.execute(
         "INSERT INTO replica_transfers(artifact_hash,node_name,session_id,token,created,expires) "
         "VALUES(?,?,?,?,?,?)",
-        (row["artifact_hash"], node["node_name"], node["session_id"], token,
-         now, now + TRANSFER_SECONDS),
+        (digest, node["node_name"], node["session_id"], token, now, now + TRANSFER_SECONDS),
     )
-    return {"artifact_hash": row["artifact_hash"], "size": row["size"],
-            "kind": "artifact", "locations": locations, "location": locations[0],
-            "transfer_token": token}
+    return {"artifact_hash": digest, "size": row["size"], "kind": "artifact",
+            "locations": locations, "location": locations[0], "transfer_token": token}
+
+
+def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
+           lease_seconds: float, grace_seconds: float,
+           disk_floor_bytes: int = 0) -> dict | None:
+    """Compatibility helper for callers already in one writer transaction."""
+
+    candidate = select_candidate(connection, node, now, lease_seconds,
+                                 grace_seconds, disk_floor_bytes)
+    if candidate is None:
+        return None
+    return reserve_candidate(connection, node, candidate, now, lease_seconds,
+                             grace_seconds, disk_floor_bytes)
 
 
 def renew(connection: sqlite3.Connection, node: sqlite3.Row, digest: str,

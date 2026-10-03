@@ -686,6 +686,40 @@ def make_handler(
                         raise ValueError("solver has no tile inputs")
                     return adapter.inputs(connection, row, request, now)
 
+            if route == "/v1/replication":
+                # Searching tens of thousands of tile artifacts must not hold
+                # the one SQLite writer lock needed by leases and heartbeats.
+                with session(database) as connection:
+                    now = time.time()
+                    node = recovery.require_node(connection, request)
+                    inventory = recovery.revalidation(connection, node["node_name"], now)
+                    if inventory is not None:
+                        return {"replication": inventory}
+                    floor = disk_floor(connection)
+                    if low_disk(node, floor):
+                        return {"replication": None}
+                    checkpoint = recovery.replication(connection, node["node_name"], now)
+                    if checkpoint is not None:
+                        return {"replication": checkpoint}
+                    grace = max(recovery.setting(connection, "lease_seconds"), retention.number(
+                        connection, "replica_grace_seconds", retention.DEFAULT_REPLICA_GRACE_SECONDS))
+                    candidate = replication.select_candidate(
+                        connection, node, now, recovery.setting(connection, "lease_seconds"),
+                        grace, floor)
+                if candidate is None:
+                    return {"replication": None}
+                with writer_session(database, route, scheduler) as connection:
+                    now = time.time()
+                    node = recovery.require_node(connection, request)
+                    floor = disk_floor(connection)
+                    if low_disk(node, floor):
+                        return {"replication": None}
+                    lease = recovery.setting(connection, "lease_seconds")
+                    grace = max(lease, retention.number(
+                        connection, "replica_grace_seconds", retention.DEFAULT_REPLICA_GRACE_SECONDS))
+                    return {"replication": replication.reserve_candidate(
+                        connection, node, candidate, now, lease, grace, floor)}
+
             with writer_session(database, route, scheduler) as connection:
                 # Serialize lease validation and mutation to fence racing stale submissions.
                 now = time.time()
@@ -985,27 +1019,6 @@ def make_handler(
                         [(node["node_name"], digest) for digest in hashes],
                     )
                     return {"ok": True}
-
-                if route == "/v1/replication":
-                    node = recovery.require_node(connection, request)
-                    inventory = recovery.revalidation(connection, node["node_name"], now)
-                    if inventory is not None:
-                        return {"replication": inventory}
-                    # Checking stored bytes is free, but new copies must not fill a nearly full disk.
-                    if low_disk(node, disk_floor(connection)):
-                        return {"replication": None}
-                    checkpoint = recovery.replication(connection, node["node_name"], now)
-
-                    if checkpoint is not None:
-                        return {"replication": checkpoint}
-
-                    # Copies on a node silent for under the grace period still count: replacing
-                    # them after every Wi-Fi drop or restart is what piled up surplus copies.
-                    grace = max(lease_seconds, retention.number(
-                        connection, "replica_grace_seconds", retention.DEFAULT_REPLICA_GRACE_SECONDS))
-                    return {"replication": replication.assign(connection, node, now,
-                                                               lease_seconds, grace,
-                                                               disk_floor(connection))}
 
                 if route in {"/v1/replication-renew", "/v1/replication-release"}:
                     node = recovery.require_node(connection, request)

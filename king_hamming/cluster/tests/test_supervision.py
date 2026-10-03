@@ -97,6 +97,23 @@ class SupervisionTests(unittest.TestCase):
                 self.assertEqual(connection.execute(
                     "SELECT COUNT(*) FROM node_dispatch_pauses WHERE node_name='worker'").fetchone()[0], 0)
 
+    def test_idle_replication_poll_does_not_wait_for_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            handler.dispatch_post("/v1/register", {"node_name": "worker"})
+            blocker = sqlite3.connect(database)
+            try:
+                blocker.execute("BEGIN IMMEDIATE")
+                blocker.execute("UPDATE settings SET value=value WHERE key='campaign_state'")
+                self.assertIsNone(handler.dispatch_post("/v1/replication", {
+                    "node_name": "worker",
+                })["replication"])
+            finally:
+                blocker.rollback()
+                blocker.close()
+
     def test_scheduler_retries_database_lock(self) -> None:
         """A transient writer lock must not permanently stop queue advancement."""
 
