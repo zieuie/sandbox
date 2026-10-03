@@ -45,7 +45,7 @@ HOST_NAMES = {
 ACTIVE = {"queued", "waiting", "running", "stopping", "paused"}
 TERMINAL = {"complete", "failed", "cancelled"}
 DP_PROGRAMS = {"dp", "dp_distributed"}
-MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned", "match_gpu"}
+MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks"}
 WINDOW_SECONDS = 24 * 3600
 BUCKET_SECONDS = 15 * 60
 LONG_WINDOW_SECONDS = 7 * 24 * 3600
@@ -333,6 +333,7 @@ class Snapshots:
             "SELECT run_id,state FROM runs WHERE run_id IN (SELECT DISTINCT parent_run_id FROM runs "
             "WHERE state='running' AND parent_run_id IS NOT NULL)").fetchall())
         series, busy = self.utilization(connection, nodes, now)
+        gpu_series, gpu_now = self.gpu_utilization(connection, nodes, now)
 
         cards = []
         for node in nodes:
@@ -376,6 +377,8 @@ class Snapshots:
                 "cpus": cpus,
                 "work": work,
                 "utilization": series.get(name, []),
+                "gpu_utilization": gpu_series.get(name),
+                "gpu_now": gpu_now.get(name),
                 "busy_fraction": busy.get(name, 0.0),
             })
         order = sorted(HOST_NAMES)
@@ -412,6 +415,37 @@ class Snapshots:
             "started": run.get("started"), "health": solver_health(run, now),
             "root_state": root_state, "orphaned": root_state in TERMINAL,
         }
+
+    def gpu_utilization(self, connection: sqlite3.Connection, nodes: list[dict], now: float,
+                        window: int = WINDOW_SECONDS, bucket: int = BUCKET_SECONDS,
+                        ) -> tuple[dict[str, list[float]], dict[str, dict]]:
+        """Return per-node GPU utilisation buckets (0..1, averaged over devices) and the latest sample.
+
+        Empty when the leader has no gpu_usage_samples yet (an older leader database).
+        """
+        start = now - window
+        buckets = window // bucket
+        totals = {node["node_name"]: [[0, 0] for _ in range(buckets)] for node in nodes}
+        latest: dict[str, dict] = {}
+        try:
+            rows = connection.execute(
+                "SELECT node_name,gpu_index,util_percent,memory_used_bytes,recorded FROM gpu_usage_samples "
+                "WHERE recorded>? ORDER BY recorded", (start,)).fetchall()
+        except sqlite3.OperationalError:
+            return {}, {}
+        for name, index, util, memory, recorded in rows:
+            if name not in totals:
+                continue
+            slot = totals[name][min(buckets - 1, int((recorded - start) // bucket))]
+            slot[0] += util
+            slot[1] += 1
+            if now - recorded <= 120:
+                latest.setdefault(name, {})[index] = {"util": util, "memory_used_bytes": memory}
+        series = {name: [round(total / count / 100, 4) if count else 0.0 for total, count in slots]
+                  for name, slots in totals.items() if any(count for _, count in slots)}
+        return series, {name: {"util": round(sum(d["util"] for d in devices.values()) / len(devices)),
+                               "memory_used_bytes": sum(d["memory_used_bytes"] for d in devices.values())}
+                        for name, devices in latest.items()}
 
     def utilization(self, connection: sqlite3.Connection, nodes: list[dict], now: float,
                     window: int = WINDOW_SECONDS, bucket: int = BUCKET_SECONDS,

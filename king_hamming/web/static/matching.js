@@ -65,7 +65,7 @@ function convergence(run, index) {
     <line class="grid zero" x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}"></line>
     <text class="axis" x="${L - 6}" y="${H - B + 4}" text-anchor="end">0</text>
     ${xTicks.map((p) => html`<text class="axis" x="${x(p)}" y="${H - B + 18}" text-anchor="middle">${p}</text>`)}
-    <text class="axis" x="${(L + W - R) / 2}" y="${H - 2}" text-anchor="middle">phase</text>
+    <text class="axis" x="${(L + W - R) / 2}" y="${H - 2}" text-anchor="middle">${run.step_label || 'phase'}</text>
     <path class="conv-line" d="${path}"></path>
     ${live ? html`<path class="conv-line live" d="M${x(end[0])},${y(end[1])} L${x(live[0])},${y(live[1])}"></path>` : ''}
     ${data.map((d, i) => html`<circle class="conv-dot ${d[1] <= 0 ? 'done' : ''} ${d[2] ? 'live' : ''}"
@@ -80,14 +80,14 @@ function convergence(run, index) {
 function phaseTable(run) {
   const data = points(run);
   return html`<details class="phase-table"><summary>Phase table</summary>
-    <table class="mini"><thead><tr><th>Phase</th><th>Matched</th><th>Unmatched</th><th>Committed</th></tr></thead>
+    <table class="mini"><thead><tr><th>${run.step_label ? 'Step' : 'Phase'}</th><th>Matched</th><th>Unmatched</th><th>Committed</th></tr></thead>
     <tbody>${data.map(([phase, unmatched], i) => html`<tr><td>${phase || 'start'}</td>
       <td>${matchedPct(run.total - unmatched, run.total)}</td><td>${fmtInt(unmatched)}</td>
       <td>${i ? fmtTime(run.phases[i - 1][2]) : fmtTime(run.started)}</td></tr>`)}</tbody></table></details>`;
 }
 
 const GPU_STAGES = [['field', 'field build (CPU)'], ['upload', 'upload'], ['greedy', 'greedy'],
-  ['augment', 'augmenting'], ['output', 'payload write']];
+  ['augment', 'augmenting'], ['blocks', 'block matching'], ['exchange', 'exchange rounds'], ['output', 'payload write']];
 
 // GPU runs finish in seconds and keep no phase checkpoints; show the stage timings instead.
 function gpuSummary(run) {
@@ -96,6 +96,7 @@ function gpuSummary(run) {
   const stages = GPU_STAGES.filter(([key]) => typeof seconds[key] === 'number');
   return html`<div class="gpu-summary">
     <p>${gpu.device ? html`<span class="gpu-tag">${gpuName(gpu.device)}</span>` : html`<span class="gpu-tag">GPU</span>`}
+      ${gpu.blocks ? html` · ${gpu.blocks} blocks, ${gpu.rounds} round${gpu.rounds === 1 ? '' : 's'}${gpu.residual_round1 ? html`, ${fmtInt(gpu.residual_round1)} left after block matching` : ''}` : ''}
       ${gpu.phases !== null && gpu.phases !== undefined ? html` · ${gpu.phases} augmenting phase${gpu.phases === 1 ? '' : 's'} after greedy` : ''}
       ${gpu.scans ? html` · ${fmtCompact(gpu.scans)} edge scans` : ''}</p>
     ${stages.length ? html`<table class="mini"><thead><tr><th>Stage</th><th>Seconds</th></tr></thead>
@@ -135,7 +136,9 @@ function liveCard(run, index, generatedAt) {
         ${run.started ? `running ${fmtDuration(generatedAt - run.started)}` : `queued ${ago(run.created)}`}
         ${run.last_progress_at ? ` · progress ${ago(run.last_progress_at)}` : ''}</div>
     </div>
-    ${run.engine === 'gpu' ? gpuSummary(run) : html`<h4>Unmatched requests after each phase (log scale)</h4>
+    ${run.engine === 'gpu' ? html`${run.phases.length ? html`<h4>Unmatched requests after each ${run.step_label || 'step'} (log scale)</h4>
+      ${convergence(run, index)}` : ''}${gpuSummary(run)}${run.phases.length ? phaseTable(run) : ''}`
+      : html`<h4>Unmatched requests after each phase (log scale)</h4>
     ${convergence(run, index)}
     ${phaseTable(run)}`}
     ${resources(run)}
@@ -173,6 +176,7 @@ function waiting(snapshot) {
   if (!rows.length) return html`<p class="hint">Every completed DP has been matched or is matching now.</p>`;
   const why = (f) => {
     if (f.admission === 'admitted: single GPU') return `admitted · ${f.engine || 'single GPU'} (match_gpu)`;
+    if (f.admission === 'admitted: GPU blocks') return `admitted · ${f.engine || 'GPU blocks'} (match_gpu_blocks); too big for one GPU, matched block by block`;
     if (f.admission === 'field limit') return `q = ${fmtInt(f.q)} exceeds the CPU field limit of ${fmtInt(settings.max_field_elements)}${gpuNote(f)}`;
     if (f.admission === 'edge limit') return `${fmtCompact(f.edges)} edges exceed the limit of ${fmtCompact(settings.max_matching_edges)}`;
     if (f.admission === 'memory limit') return `needs more than ${fmtBytes(settings.max_matching_bytes)} per machine`;
@@ -183,7 +187,8 @@ function waiting(snapshot) {
     <thead><tr><th>Field</th><th>Requests</th><th>Edges</th><th>Status</th></tr></thead>
     <tbody>${rows.map((f) => html`<tr><td><a href="#results/${f.field[0]},${f.field[1]}">${field(f.field[0], f.field[1])}</a></td>
       <td>${fmtCompact(f.requests)}</td><td>${fmtCompact(f.edges)}</td><td>${why(f)}</td></tr>`)}</tbody></table></div>
-    <p class="hint">Fields that fit an advertised GPU are matched there (<span class="mono">match_gpu</span>);
+    <p class="hint">Fields that fit an advertised GPU are matched there (<span class="mono">match_gpu</span>), larger ones
+      block by block on the largest GPU (<span class="mono">match_gpu_blocks</span>);
       the CPU limits are feeder settings (Feeder tab). Matching memory grows with the field size,
       so raising them can exceed what one machine holds.</p>`;
 }
@@ -203,7 +208,8 @@ function historyRow(run, index) {
     ${open ? html`<tr class="history-detail"><td colspan="8">
       <div class="root-sub">polynomial <span class="mono">${fmtPoly(run.poly)}</span> · machines ${run.machines.join(', ')}</div>
       ${run.error ? html`<p class="error-text">${run.error}</p>` : ''}
-      ${run.engine === 'gpu' ? gpuSummary(run) : html`${convergence(run, index)}${phaseTable(run)}`}${resources(run)}</td></tr>` : ''}`;
+      ${run.engine === 'gpu' ? html`${run.phases.length ? convergence(run, index) : ''}${gpuSummary(run)}${run.phases.length ? phaseTable(run) : ''}`
+        : html`${convergence(run, index)}${phaseTable(run)}`}${resources(run)}</td></tr>` : ''}`;
 }
 
 export function render(container, snapshot, detail) {

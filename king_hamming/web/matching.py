@@ -11,7 +11,7 @@ import json
 import sqlite3
 from typing import Callable
 
-MATCH_PROGRAMS = ("match", "match_distributed", "match_partitioned", "match_gpu")
+MATCH_PROGRAMS = ("match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks")
 
 
 def build_matching(connection: sqlite3.Connection, names: dict[str, str],
@@ -62,15 +62,26 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
             if machine and machine not in machines:
                 machines.append(machine)
         gpu = None
-        if description.get("program") == "match_gpu":
+        phase_rows = None
+        if description.get("program") in {"match_gpu", "match_gpu_blocks"}:
             gpu = {"index": run.get("gpu_index"), "device": None, "phases": None, "seconds": None}
             try:
                 summary = json.loads(run["progress_message"] or "{}")
             except ValueError:
                 summary = {}
             if isinstance(summary, dict):
+                trace = summary.get("trace")
+                if isinstance(trace, list) and run["state"] == "complete":
+                    # The chart reads checkpoint-like rows: [step, matched, time]. A GPU run has no
+                    # checkpoints, so rebuild them from the kernel's own record of unmatched counts.
+                    when = run["finished"] or run["started"] or 0
+                    phase_rows = [[item[0], (total or 0) - item[1], when] for item in trace[1:]
+                                  if isinstance(item, list) and len(item) == 2 and
+                                  all(type(value) is int for value in item)]
                 gpu.update(device=summary.get("device"), phases=summary.get("phases"),
-                           seconds=summary.get("seconds"), scans=summary.get("scans"))
+                           seconds=summary.get("seconds"), scans=summary.get("scans"),
+                           blocks=summary.get("blocks"), rounds=summary.get("rounds"),
+                           residual_round1=summary.get("residual_round1"))
         result.append({
             "run_id": run["run_id"], "field": description.get("field"), "program": description.get("program"),
             "engine": "gpu" if gpu else "cpu", "gpu": gpu,
@@ -80,7 +91,9 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
             "done": done, "total": total or None, "phase_label": run["progress_phase"],
             "last_progress_at": run["last_progress_at"], "attempt": run.get("lease_attempt"),
             "error": (run["error"] or "")[:300] or None, "outcome": outcome,
-            "machines": machines, "phases": phases[run["run_id"]], "resources": usage[run["run_id"]],
+            "machines": machines, "phases": phase_rows if phase_rows is not None else phases[run["run_id"]],
+            "step_label": ("block, then round" if description.get("program") == "match_gpu_blocks"
+                           else "greedy, then phase" if gpu else "phase"), "resources": usage[run["run_id"]],
         })
     rank = {"running": 0, "stopping": 0, "queued": 1, "waiting": 1, "paused": 2}
     result.sort(key=lambda item: (rank.get(item["state"], 3), -(item["finished"] or item["created"] or 0)))

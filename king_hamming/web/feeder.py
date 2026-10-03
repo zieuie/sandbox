@@ -16,17 +16,20 @@ def engine_label(plan: dict) -> str | None:
     """Human label for a feeder matching plan."""
     if not plan.get("program"):
         return None
-    if plan["program"] == "match_gpu":
+    if plan["program"] in {"match_gpu", "match_gpu_blocks"}:
         from snapshot import HOST_NAMES  # lazy: snapshot imports this module
         hosts = [HOST_NAMES.get("192.168.4." + name.rsplit("-", 1)[-1], name)
                  for name in plan.get("hosts") or []]
-        return "GPU on " + ", ".join(hosts) if hosts else "single GPU"
+        label = "GPU on " + ", ".join(hosts) if hosts else "single GPU"
+        if plan["program"] == "match_gpu_blocks":
+            label += f" · {plan['blocks']} blocks" if plan.get("blocks") else " · in blocks"
+        return label
     workers = plan.get("workers") or 1
     return f"{plan['program']} · {workers} machine{'s' if workers != 1 else ''}"
 
 
 def gpu_bytes(q, requests) -> int | None:
-    """Device memory match_gpu would need (gpu_match_solver/adapter.py:device_bytes, blocks ignored)."""
+    """Device memory match_gpu would need for the whole field (gpu_match_solver/adapter.py:device_bytes)."""
     if not q or not requests:
         return None
     return 8 * q + 24 * requests + 18 * (requests // 8 + 1) + 16 * 1024**2
@@ -141,7 +144,7 @@ def build_feeder(state: Path, watcher: LogWatcher, roots: list[dict] | None, now
     matchable = sum(1 for record in fields.values()
                     if record.get("dp_artifact") and not record.get("matching_complete") and
                     record.get("matching_admission") in {"admitted", "waiting for nodes",
-                                                          "admitted: single GPU"})
+                                                          "admitted: single GPU", "admitted: GPU blocks"})
     demand = pipeline.get("demand", {})
     free = shutil.disk_usage(state).free
 

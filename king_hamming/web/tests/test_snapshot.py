@@ -94,6 +94,46 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(run["outcome"], "matched")
         self.assertIsNone(snapshot.node_gpus({"node_name": "old-leader-row"}))
 
+    def test_gpu_utilization_series(self) -> None:
+        connection = sqlite3.connect(self.deployments / "live" / "leader.sqlite")
+        connection.execute("UPDATE nodes SET gpus_json=? WHERE node_name='dp-151'",
+                           ('[{"index":0,"name":"RTX 3060","arch":86,"total_bytes":6000000000}]',))
+        connection.execute("CREATE TABLE IF NOT EXISTS gpu_usage_samples (node_name TEXT, gpu_index INTEGER, "
+                           "util_percent INTEGER, memory_used_bytes INTEGER, recorded REAL)")
+        for age, util in ((3600, 20), (3590, 40), (30, 90)):
+            connection.execute("INSERT INTO gpu_usage_samples VALUES('dp-151',0,?,?,?)", (util, 1000 + util, NOW - age))
+        connection.commit()
+        connection.close()
+        nodes = {card["hostname"]: card for card in self.build()["fleet"]["nodes"]}
+        merlin, other = nodes["merlin"], nodes["fearless"]
+        self.assertEqual(len(merlin["gpu_utilization"]), len(merlin["utilization"]))
+        self.assertAlmostEqual(max(merlin["gpu_utilization"]), 0.9, places=2)
+        self.assertEqual(merlin["gpu_now"], {"util": 90, "memory_used_bytes": 1090})
+        self.assertIsNone(other["gpu_utilization"])  # a node that reports no samples shows no graph
+        self.assertIsNone(other["gpu_now"])
+
+    def test_gpu_block_run(self) -> None:
+        import base64, hashlib
+        connection = sqlite3.connect(self.deployments / "live" / "leader.sqlite")
+        dp = (fixture.ROOT / "examples" / "5_3.khdp").read_bytes()
+        fixture.run(connection, "block-match", {"program": "match_gpu_blocks", "arguments": {
+            "dp_b64": base64.b64encode(dp).decode(), "dp_sha256": hashlib.sha256(dp).hexdigest(),
+            "poly": [2, 3, 0, 1], "threads": 4, "max_bytes": 2**31, "gpu_memory_bytes": 2**30}}, "complete",
+            node_name="dp-151", gpu_index=0, started=NOW - 100, finished=NOW - 90,
+            progress_done=125, progress_total=125,
+            progress_message='{"matched":125,"required":125,"phases":3,"scans":900,"engine":"gpu-blocks",'
+                             '"device":"RTX 3060","blocks":4,"rounds":2,"residual_round1":7,'
+                             '"trace":[[0,125],[1,40],[2,9],[3,0]],'
+                             '"seconds":{"field":0.01,"blocks":0.2,"exchange":0.1}}')
+        connection.commit()
+        connection.close()
+        run = next(item for item in self.build()["matching"]["runs"] if item["run_id"] == "block-match")
+        self.assertEqual((run["program"], run["engine"], run["outcome"]), ("match_gpu_blocks", "gpu", "matched"))
+        self.assertEqual((run["gpu"]["blocks"], run["gpu"]["rounds"], run["gpu"]["residual_round1"]), (4, 2, 7))
+        # The kernel's trace becomes the burndown chart's rows: [step, matched, time].
+        self.assertEqual([row[:2] for row in run["phases"]], [[1, 85], [2, 116], [3, 125]])
+        self.assertEqual(run["step_label"], "block, then round")
+
     def test_utilization_and_busy_fraction(self) -> None:
         fearless = next(card for card in self.build()["fleet"]["nodes"] if card["name"] == "dp-101")
         cpu_seconds = sum(fearless["utilization"]) * snapshot.BUCKET_SECONDS * 4

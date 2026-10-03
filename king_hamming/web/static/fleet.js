@@ -163,6 +163,18 @@ function gpuLine(node) {
     <span title="${devices.map((d) => d.name).join(', ')}">${devices.map((d) => `${gpuName(d.name)} · ${fmtBytes(d.total_bytes)}`).join(', ')}</span></div>`;
 }
 
+// Real GPU utilisation sampled by the agent (nvidia-smi); absent until agents and leader report it.
+function gpuUtil(node) {
+  if (!node.gpu_utilization) return '';
+  const series = node.gpu_utilization;
+  const average = series.length ? series.reduce((a, b) => a + b, 0) / series.length : 0;
+  const now = node.gpu_now;
+  return html`<div class="util gpu-util">
+    <div class="util-head"><span>GPU use, 24 h</span><span>${now ? html`now ${now.util}% · ${fmtBytes(now.memory_used_bytes)} · ` : ''}avg ${pct(average)}</span></div>
+    ${sparkline(series)}
+  </div>`;
+}
+
 function card(node, generatedAt, fleetDisk) {
   const alive = node.state !== 'unavailable';
   const average = node.utilization.length
@@ -190,6 +202,7 @@ function card(node, generatedAt, fleetDisk) {
       <div class="util-head"><span>CPU use, 24 h</span><span>avg ${pct(average)} · leased ${pct(node.busy_fraction)}</span></div>
       ${sparkline(node.utilization)}
     </div>
+    ${gpuUtil(node)}
     <footer class="node-foot">${node.cpus.length} logical / ${node.physical_cores || '?'} cores ·
       runtime ${node.runtime_version || '?'} · storage ${node.storage_validation || '?'}</footer>
   </article>`;

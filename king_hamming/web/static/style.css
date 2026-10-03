@@ -636,5 +636,7 @@ nav.tabs a.active { background: none; box-shadow: none; color: var(--ink); font-
 .gpu-tag { display: inline-block; padding: 0 0.35em; border-radius: 0.3em; font-size: 0.8em;
   background: color-mix(in srgb, #76b900 22%, transparent); color: inherit; }
 .gpuline { margin-top: 0.25rem; }
+.gpu-util .spark-area { fill: color-mix(in srgb, #76b900 22%, transparent); }
+.gpu-util .spark-line { stroke: #76b900; }
 .gpu-summary p { margin: 0.4rem 0; }
 .gpu-summary table { max-width: 22rem; }
