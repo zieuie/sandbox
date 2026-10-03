@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Check kh_gpu_block_kernel against the KHM1 verifier and brute-force matching oracles."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import random
+import re
+import subprocess
+import sys
+import tempfile
+
+HERE = Path(__file__).resolve().parent.parent
+ROOT = HERE.parent
+sys.path.insert(0, str(ROOT))
+from matching_solver.artifacts import header, load_dp, publish, verify  # noqa: E402
+
+KERNEL = HERE / "kh_gpu_block_kernel"
+
+
+def field_parameters(p: int, r: int) -> dict:
+    """q = p^r, F = p^floor(r/2), B = pF (see dp_solver/DESIGN.md)."""
+    f = p ** (r // 2)
+    return {"q": p ** r, "f": f, "budget": p * f}
+
+
+def write_blocks(path: Path, runs: list[tuple[int, int]]) -> None:
+    path.write_text(f"{len(runs)}\n" + "".join(f"{a} {copies}\n" for a, copies in runs))
+
+
+def run_kernel(kernel: Path, p: int, r: int, blocks: Path, payload: Path, *extra: str) -> tuple[int, dict]:
+    completed = subprocess.run([str(kernel), str(p), str(r), str(blocks), str(payload), *extra],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    metadata = None
+    for line in completed.stdout.splitlines():
+        record = json.loads(line)
+        if "polynomial" in record and "status" in record:
+            metadata = record
+    if completed.returncode not in (0, 2, 4) or metadata is None:
+        raise AssertionError(f"{kernel.name} failed ({completed.returncode}): {completed.stderr[-2000:]}")
+    metadata["stderr"] = completed.stderr
+    return completed.returncode, metadata
+
+
+def neighbors(cells: list[int], q: int, f: int, coset: int, cell: int) -> list[int]:
+    result = []
+    for k in range(f):
+        label = cells[cell * f + k]
+        result.append(0 if label == 0 else 1 + (label - 1 + q - 1 - coset) % (q - 1))
+    return result
+
+
+def requests(runs: list[tuple[int, int]], f: int):
+    coset = 0
+    for a, copies in runs:
+        for _ in range(copies):
+            for cell in range(a * f):
+                yield coset, cell
+            coset += 1
+
+
+def maximum_matching(adjacency: list[list[int]]) -> int:
+    """Kuhn's augmenting-path algorithm; tiny graphs only."""
+    owner: dict[int, int] = {}
+
+    def augment(u: int, seen: set[int]) -> bool:
+        for v in adjacency[u]:
+            if v in seen:
+                continue
+            seen.add(v)
+            if v not in owner or augment(owner[v], seen):
+                owner[v] = u
+                return True
+        return False
+
+    sys.setrecursionlimit(100000)
+    return sum(augment(u, set()) for u in range(len(adjacency)))
+
+
+def unpack(data: bytes, count: int, bits: int, offset_bits: int = 0) -> list[int]:
+    value = int.from_bytes(data, "little")
+    mask = (1 << bits) - 1
+    return [(value >> (offset_bits + index * bits)) & mask for index in range(count)]
+
+
+
+def blocks_fixture(path: Path, poly: str | None, directory: Path, requests: int, minimum_blocks: int) -> None:
+    """Forced block mode on a real KHD1: a full matching must verify, with several blocks."""
+    dp, digest = load_dp(path)
+    blocks = directory / f"{path.stem}.blocks"
+    write_blocks(blocks, [(run["a"], run["t"] * run["repeat"]) for run in dp["runs"]])
+    extra = ["--poly", poly] if poly else []
+    payload = directory / f"{path.stem}.{requests}.bin"
+    code, metadata = run_kernel(KERNEL, dp["p"], dp["r"], blocks, payload, "--threads", "2",
+                                "--block-requests", str(requests), *extra)
+    assert code == 0 and metadata["engine"] == "gpu-blocks" and metadata["blocks"] >= minimum_blocks, metadata
+    trace = metadata["trace"]  # unmatched after: start, each block, each exchange round (dashboard burndown)
+    assert [step for step, _ in trace] == list(range(len(trace))), trace
+    assert len(trace) == 1 + metadata["blocks"] + metadata["rounds"] - 1 and trace[0][1] == metadata["required"], trace
+    assert trace[-1][1] == metadata["required"] - metadata["matched"] == 0, trace
+    assert all(a[1] >= b[1] for a, b in zip(trace, trace[1:])), "unmatched count rose"
+    output = directory / f"{path.stem}.{requests}.khmatch"
+    publish(output, header(dp, digest, metadata), payload)
+    summary = verify(output, dp, digest)
+    assert summary["verified"] and summary["status"] == "full_matching", summary
+    print(f"ok block fixture {path.name}: {metadata['blocks']} blocks, {metadata['rounds']} rounds, "
+          f"round-1 residual {metadata['residual_round1']}")
+
+
+def block_synthetic(rng: random.Random, p: int, r: int, directory: Path, index: int, one_round: bool) -> None:
+    """Random cell tables with ascending rows. With one round, every block must match exactly the
+    maximum matching of its own requests against its own right window (this tests the window);
+    otherwise a full matching must be valid and an impossible one must exit 4, never 0 or 2."""
+    params = field_parameters(p, r)
+    q, f, budget = params["q"], params["f"], params["budget"]
+    runs, stripes, cosets = [], 0, 0
+    while stripes < budget and rng.random() < 0.85:
+        a = rng.randint(1, p)
+        copies = rng.randint(1, 3)
+        if stripes + a * copies > budget or cosets + copies + 1 > q - 1:
+            break
+        runs.append((a, copies))
+        stripes += a * copies
+        cosets += copies
+    if not runs:
+        runs = [(1, 1)]
+    alphabet = rng.choice([q, max(2, q // 2), max(2, q // 4)])
+    cells = []
+    for _ in range(q // f):
+        cells.extend(sorted(rng.randrange(alphabet) for _ in range(f)))
+    cells.extend(rng.randrange(alphabet) for _ in range(q - len(cells)))  # unused tail of the table
+    table = directory / f"bcells{index}.bin"
+    table.write_bytes(b"".join(value.to_bytes(4, "little") for value in cells))
+    blocks = directory / f"bblocks{index}.txt"
+    write_blocks(blocks, runs)
+    reqs = list(requests(runs, f))
+    n = len(reqs)
+    adjacency = [neighbors(cells, q, f, coset, cell) for coset, cell in reqs]
+    payload = directory / f"bsynthetic{index}.bin"
+    cap = max(1, n // rng.choice([2, 3, 4, 6]))
+    options = ["--test-cells", str(table), "--block-requests", str(cap), "--max-residual", str(n)]
+    if one_round:
+        options += ["--max-rounds", "1"]
+    code, metadata = run_kernel(KERNEL, p, r, blocks, payload, *options)
+    assert metadata["engine"] == "gpu-blocks" and metadata["required"] == n, metadata
+    if one_round:
+        spans = [(int(a), int(b), int(m), int(k)) for a, b, m, k in re.findall(
+            r"block \d+/\d+ cells=\[(\d+),(\d+)\) requests=(\d+) matched=(\d+)", metadata["stderr"])]
+        assert len(spans) == metadata["blocks"] and sum(span[2] for span in spans) == n, (spans, metadata)
+        window_start = 0
+        for index_block, (lo, hi, m, matched) in enumerate(spans):
+            window_end = q if index_block + 1 == len(spans) else window_start + m
+            members = [u for u, (coset, cell) in enumerate(reqs) if lo <= cell < hi]
+            assert len(members) == m, (len(members), m)
+            restricted = [[v for v in adjacency[u] if window_start <= v < window_end] for u in members]
+            expected = maximum_matching(restricted)
+            assert matched == expected, f"block {index_block}: kernel {matched} != oracle {expected}"
+            window_start += m
+        return metadata
+    expected = maximum_matching(adjacency)
+    if expected < n:
+        assert code == 4 and metadata["incomplete"], (code, metadata)
+        assert payload.exists() is False
+    elif code == 0:
+        bits = (f - 1).bit_length()
+        choices = unpack(payload.read_bytes(), n, bits)
+        used = {adjacency[u][k] for u, k in enumerate(choices)}
+        assert len(used) == n, "right vertex used twice"
+    else:
+        assert code == 4 and metadata["matched"] < n, (code, metadata)
+    return metadata
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Example: python3 tests/check.py --run")
+    parser.add_argument("--run", action="store_true")
+    parser.add_argument("--seed", type=int, default=20261002)
+    parser.add_argument("--cases", type=int, default=60)
+    arguments = parser.parse_args()
+    if not arguments.run:
+        parser.print_help()
+        return 0
+    with tempfile.TemporaryDirectory(prefix="gpu-match-check-") as temporary:
+        directory = Path(temporary)
+        blocks_fixture(ROOT / "examples/7_5.khdp", None, directory, 5000, 3)
+        blocks_fixture(ROOT / "matching_solver/examples/13_5.khdp", "2,4,0,0,0,1", directory, 100000, 3)
+        rng = random.Random(arguments.seed)
+        shapes = [(2, 3), (2, 5), (3, 3), (5, 3), (2, 7), (3, 5)]
+        seen = []
+        for index in range(arguments.cases):
+            p, r = shapes[index % len(shapes)]
+            seen.append((index % 2 == 0, block_synthetic(rng, p, r, directory, index, one_round=index % 2 == 0)))
+        interior = sum(1 for oracle, m in seen if oracle and m["blocks"] >= 3)
+        exchanged = sum(1 for oracle, m in seen if not oracle and m["rounds"] > 1)
+        completed = sum(1 for oracle, m in seen if not oracle and not m["incomplete"] and m["rounds"] > 1)
+        assert interior > 0 and exchanged > 0, "block synthetic cases never exercised interior windows or exchange"
+        print(f"ok block synthetic: {arguments.cases} graphs; {sum(1 for o, _ in seen if o)} window-oracle cases "
+              f"({interior} with 3+ blocks), {exchanged} used exchange rounds ({completed} completed by them)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
