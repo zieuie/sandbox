@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import sqlite3
 import sys
@@ -79,6 +80,38 @@ class SupervisionTests(unittest.TestCase):
 
             self.assertFalse(thread.is_alive())
             self.assertEqual(health.snapshot()["status"], "healthy")
+
+    @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "needs /proc/self/fd")
+    def test_failed_sessions_close_their_connections(self) -> None:
+        """Lock failures must release descriptors without waiting for garbage collection."""
+
+        with tempfile.TemporaryDirectory(prefix="kh-session-test-") as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800, lease_seconds=60)
+            blocker = sqlite3.connect(database)
+            blocker.execute("BEGIN EXCLUSIVE")
+            gc.disable()
+            try:
+                with self.assertRaises(sqlite3.OperationalError):
+                    with leader.session(database, timeout=0) as connection:
+                        connection.execute("BEGIN IMMEDIATE")
+                before = len(os.listdir("/proc/self/fd"))
+                for _ in range(50):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        with leader.session(database, timeout=0) as connection:
+                            connection.execute("BEGIN IMMEDIATE")
+                self.assertLessEqual(len(os.listdir("/proc/self/fd")), before)
+            finally:
+                gc.enable()
+                blocker.rollback()
+                blocker.close()
+            with leader.session(database) as connection:
+                connection.execute("UPDATE settings SET value='running' WHERE key='campaign_state'")
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+            with leader.session(database) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT value FROM settings WHERE key='campaign_state'").fetchone()[0], "running")
 
     # Drain a noisy stderr pipe while the solver remains completely quiet on stdout.
     def test_quiet_solver_stop_and_stderr_drain(self) -> None:

@@ -7,11 +7,13 @@ import argparse
 import json
 import math
 import os
+import resource
 import sqlite3
 import threading
 import time
 import traceback
 import uuid
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -121,6 +123,20 @@ def connect(database: Path, timeout: float = 30.0) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
+
+
+# sqlite3's own context manager only commits or rolls back; closing here keeps
+# failed requests from holding file descriptors until garbage collection.
+@contextmanager
+def session(database: Path, timeout: float = 30.0):
+    """Yield a connection whose transaction commits or rolls back, then close it."""
+
+    connection = connect(database, timeout)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 DEFAULT_DISK_FLOOR_BYTES = 10 * 1024**3
@@ -317,7 +333,7 @@ def initialize(
 
     database.parent.mkdir(parents=True, exist_ok=True)
 
-    with connect(database) as connection:
+    with session(database) as connection:
         connection.executescript(SCHEMA)
 
         # Add supervision fields without replacing existing runs or artifacts.
@@ -447,7 +463,7 @@ def make_handler(
                 return
 
             if route == "/v1/status":
-                with connect(database) as connection:
+                with session(database) as connection:
                     campaign = connection.execute(
                         "SELECT value FROM settings WHERE key='campaign_state'"
                     ).fetchone()[0]
@@ -597,7 +613,7 @@ def make_handler(
         def dispatch_post(self, route: str, request: dict[str, Any]) -> dict[str, Any]:
             """Apply route using request and return its response object."""
 
-            with connect(database) as connection:
+            with session(database) as connection:
                 # Serialize lease validation and mutation to fence racing stale submissions.
                 connection.execute("BEGIN IMMEDIATE")
                 now = time.time()
@@ -1462,7 +1478,7 @@ def scheduler_loop(
         health.attempting()
 
         try:
-            with connect(database, timeout=connect_timeout) as connection:
+            with session(database, timeout=connect_timeout) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 now = time.time()
                 recovery.expire(connection, now)
@@ -1485,6 +1501,13 @@ def main() -> int:
     if arguments.command is None:
         parser.print_help()
         return 0
+
+    # Each in-flight request holds a socket and a database connection; the
+    # common 1024 soft limit leaves too little headroom for a busy fleet.
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = 65536 if hard == resource.RLIM_INFINITY else min(hard, 65536)
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
 
     if arguments.pin_leader_core:
         leader_cpus = reserved_leader_cpus()
