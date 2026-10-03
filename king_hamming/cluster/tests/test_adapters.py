@@ -152,12 +152,16 @@ class AdapterTests(unittest.TestCase):
             base = f'http://127.0.0.1:{free_port()}'
             processes = []
             logs = []
+            # The bundle has no test fixtures, though other test modules set this flag at import;
+            # and the GPU lock is shared with any live agent on this host.
+            environment = {key: value for key, value in os.environ.items() if key != 'KH_ENABLE_TEST_FIXTURES'}
+            environment['KH_DISABLE_GPU_DP'] = os.environ.get('KH_DISABLE_GPU_DP', '1')
             try:
                 def start(name, arguments):
                     """Start only a private copied service and retain its diagnostic log."""
                     stream = (root/(name+'.log')).open('wb')
                     logs.append(stream)
-                    process = subprocess.Popen([sys.executable,*arguments],stdout=stream,stderr=stream)
+                    process = subprocess.Popen([sys.executable,*arguments],stdout=stream,stderr=stream,env=environment)
                     processes.append(process)
                     return process
 
@@ -196,7 +200,7 @@ class AdapterTests(unittest.TestCase):
                         output.write_bytes(response.read())
                     spec=root/(specification['program']+'.json')
                     spec.write_text(json.dumps(specification))
-                    result=subprocess.run([sys.executable,str(root/'cluster/verify_artifact.py'),str(spec),str(output)],capture_output=True,text=True,timeout=10)
+                    result=subprocess.run([sys.executable,str(root/'cluster/verify_artifact.py'),str(spec),str(output)],capture_output=True,text=True,timeout=10,env=environment)
                     self.assertEqual(result.returncode,0,result.stderr)
             finally:
                 for process in reversed(processes):

@@ -64,7 +64,10 @@ class Cluster:
 
         log = (self.root / f"{name}.log").open("ab")
         self.logs.append(log)
-        process = subprocess.Popen([sys.executable, *arguments], stdout=log, stderr=log)
+        # The GPU lock is host-wide (/tmp), shared with any live agent on this machine:
+        # test tiles would wait up to 120 s for it and take the card from real work.
+        environment = {**os.environ, "KH_DISABLE_GPU_DP": os.environ.get("KH_DISABLE_GPU_DP", "1")}
+        process = subprocess.Popen([sys.executable, *arguments], stdout=log, stderr=log, env=environment)
         self.processes.append(process)
         return process
 

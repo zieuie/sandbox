@@ -237,6 +237,12 @@ remains is checking space before admitting work.
     - **Possible change:** choose the tile side per field when submitting, as
       the dashboard's submit command does, and make `max_tiles` a feeder
       setting.
+    - **Implemented (2026-10-03, not deployed):** `max_tiles` and `tile_format`
+      are feeder settings; the feeder and dashboard share
+      `scheduling.plan_tiles()`, which reserves a bigger tile's own need rather
+      than the whole `max_tile_bytes` cap. Roots above 10,000 tiles are rescanned
+      at a bounded rate so the leader's lock stays free. Details and the fields
+      each setting unlocks: `docs/DP_STORAGE.md`.
 
 ## Observability
 
@@ -457,3 +463,17 @@ the campaign was stopped, and **freed 1.23 TB** (merlin went from 11 GiB to
         once a day old, 200 at a time. Queued, running and paused runs are kept,
         and so is the shared `.dependency-cache`.
       - This supersedes `cluster/ops/cleanup_redundant_work.py`.
+
+25. **Tile packets were stored about 100× larger than necessary.**
+    - **Cause:** packets and bands are gzip-1 of the raw uint64 values and
+      uint32 choices (0.3–1.9 bytes per 12-byte cell). DP values never decrease
+      with either budget and move in small steps, and a tile has few distinct
+      choices.
+    - **Effect:** the dashboard refused large fields on disk (3²⁵ needed 85 TB
+      at three copies) and replication carried the same excess over the network.
+    - **Implemented (2026-10-03, not deployed):** tile format 2
+      (`dp_solver/tile_codec.py`): row-delta byte planes and xz, exact for any
+      data, 0.0024–0.021 bytes per cell on live 13⁹, 23⁷, 37⁵ and 5¹³ tiles. A
+      root opts in with `tile_format: 2`; every agent must be upgraded first.
+      Rollout steps, measurements, and the band-only ("frontier") design for
+      still larger fields are in `docs/DP_STORAGE.md`.
