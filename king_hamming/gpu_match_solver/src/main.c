@@ -361,6 +361,9 @@ int main(int argc, char **argv) {
         gpu_ok(&gpu, gpu.cuda.cuCtxSynchronize(), "greedy");
     }
     uint32_t matched = gpu.error == NULL ? read_u32(&gpu, counters) : 0;
+    // Unmatched requests: [0] before greedy, [1] after greedy, then after each augmenting phase.
+    uint32_t trace[260] = {n, n - matched};
+    unsigned trace_count = 2;
     double t_greedy = now();
     fprintf(stderr, "greedy matched=%u/%u seconds=%.3f\n", matched, n, t_greedy - t_upload);
     progress(matched, n, "greedy");
@@ -420,6 +423,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "phase=%" PRIu64 " augmented=%u matched=%u/%u levels=%u longest=%u visited=%" PRIu64
                 " seconds=%.3f\n", phases, augmented, after, n, levels, read_u32(&gpu, longest), visited, now() - tp);
         matched = after;
+        if (trace_count < 256) trace[trace_count++] = n - matched;
         progress(matched, n, "augmenting");
         if (augmented == 0) {
             exhausted = true;  // root[] now marks the alternating closure: the Hall set.
@@ -516,10 +520,14 @@ int main(int argc, char **argv) {
     }
     printf("],\"status\":%u,\"required\":%u,\"matched\":%u,\"phases\":%" PRIu64 ",\"scans\":%" PRIu64
            ",\"memory_required\":%" PRIu64 ",\"hall_left\":%u,\"hall_right\":%u,\"engine\":\"gpu\","
-           "\"device\":\"%s\",\"device_bytes\":%" PRIu64 ",\"seconds\":{\"setup\":%.3f,\"field\":%.3f,"
-           "\"upload\":%.3f,\"greedy\":%.3f,\"augment\":%.3f,\"output\":%.3f}}\n",
+           "\"device\":\"%s\",\"device_bytes\":%" PRIu64 ",\"trace\":[",
            obstructed, n, matched, phases, scan_count, host_required, hall_left, hall_right, device_name,
-           device_required, 0.0, t_field - t0, t_upload - t_field, t_greedy - t_upload,
+           device_required);
+    for (unsigned k = 0; k < trace_count; ++k) {
+        printf("%s[%u,%u]", k == 0 ? "" : ",", k, trace[k]);
+    }
+    printf("],\"seconds\":{\"setup\":%.3f,\"field\":%.3f,\"upload\":%.3f,\"greedy\":%.3f,\"augment\":%.3f,"
+           "\"output\":%.3f}}\n", 0.0, t_field - t0, t_upload - t_field, t_greedy - t_upload,
            t_solve - t_greedy, t_end - t_solve);
     fflush(stdout);
     free(bfirst);

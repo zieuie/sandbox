@@ -52,6 +52,10 @@ def fixture(path: Path, poly: str | None, directory: Path) -> None:
     payload = directory / f"{path.stem}.gpu.bin"
     code, metadata = run_kernel(KERNEL, dp["p"], dp["r"], blocks, payload, "--threads", "2", *extra)
     assert code == 0 and metadata["matched"] == metadata["required"], metadata
+    trace = metadata["trace"]  # unmatched after: start, greedy, each augmenting phase (dashboard burndown)
+    assert [step for step, _ in trace] == list(range(len(trace))) and len(trace) == metadata["phases"] + 2, trace
+    assert trace[0][1] == metadata["required"] and trace[-1][1] == 0, trace
+    assert all(a[1] >= b[1] for a, b in zip(trace, trace[1:])), "unmatched count rose"
     output = directory / f"{path.stem}.khmatch"
     publish(output, header(dp, digest, metadata), payload)
     summary = verify(output, dp, digest)

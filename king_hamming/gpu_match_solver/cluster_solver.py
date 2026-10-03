@@ -92,6 +92,7 @@ def run(arguments: argparse.Namespace) -> int:
     raw.unlink(missing_ok=True)
     summary = {key: metadata[key] for key in ("matched", "required", "phases", "scans", "engine", "device")}
     summary["seconds"] = metadata.get("seconds")
+    summary["trace"] = metadata.get("trace")  # [[step, unmatched], ...] for the dashboard's burndown chart
     emit({"done": metadata["matched"], "total": metadata["required"], "checkpoint_done": 0,
           "phase": "complete", "units": "requests",
           "message": json.dumps(summary, separators=(",", ":"))})
