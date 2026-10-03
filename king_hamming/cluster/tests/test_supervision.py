@@ -28,6 +28,16 @@ from outcomes import SolverOutcome, classify
 class SupervisionTests(unittest.TestCase):
     """Exercise intentional stopping independently of solver stdout."""
 
+    def test_lease_renewal_cadence_keeps_slack_without_per_second_writes(self) -> None:
+        long_lease = agent.LeaseKeeper("http://leader", {
+            "run_id": "run", "lease_token": "token", "lease_seconds": 60,
+        }, 1.0)
+        short_lease = agent.LeaseKeeper("http://leader", {
+            "run_id": "run", "lease_token": "token", "lease_seconds": 9,
+        }, 1.0)
+        self.assertEqual(long_lease.interval, 5.0)
+        self.assertEqual(short_lease.interval, 1.0)
+
     def test_registration_retries_same_session_after_timeout(self) -> None:
         record = {"node_name": "worker", "session_id": "stable-session"}
         with patch.object(agent, "request_json", side_effect=[TimeoutError("busy"), {"ok": True}]) as request:

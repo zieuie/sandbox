@@ -417,7 +417,10 @@ class LeaseKeeper:
         self.leader = leader
         self.identity = {"run_id": job["run_id"], "lease_token": job["lease_token"]}
         self.seconds = float(job.get("lease_seconds", 60))
-        self.interval = min(interval, self.seconds / 3)
+        # Supervisor control still polls its cached stop flag promptly. Only
+        # the leader renewal needs to cross the SQLite writer queue, and a
+        # one-second cadence per busy CPU overwhelmed that queue at 40+ slots.
+        self.interval = min(max(interval, min(10.0, self.seconds / 12)), self.seconds / 3)
         self.deadline = time.monotonic() + self.seconds
         self.stopped = False
         self.lost = False
