@@ -25,6 +25,7 @@ from agent import request_json
 from blob_store import fetch_blob, file_digest, storage_transaction, store_blob
 from dependency_cache import checkout
 import gpus
+from dp_solver import tile_codec
 from dp_solver.bands import read_band, write_band
 from dp_solver.scheduling import dp_estimate
 from dp_solver.tiles import band_kind, band_region, build_halo, needed_bands, tile
@@ -71,10 +72,23 @@ def stop(signum, frame) -> None:
     STOP = True
 
 
+# A format-2 packet names its field, rectangle and native layout in its header.
+def packet_identity(p: int, r: int, rectangle) -> dict:
+    """Return the header fields a format-2 packet for rectangle must carry."""
+
+    return {"format":tile_codec.PACKET_FORMAT,"p":p,"r":r,"first_u":rectangle.first_u,"last_u":rectangle.last_u,
+            "first_v":rectangle.first_v,"last_v":rectangle.last_v,"byteorder":sys.byteorder,"value_bytes":8,"choice_bytes":4}
+
+
 # Open and verify only the three expected bounded regular files from a hashed tile packet.
 def unpack(packet: Path, directory: Path, rectangle, p: int, r: int) -> None:
     """Extract packet into private directory, validating sizes, identity and native layout."""
 
+    if tile_codec.is_xz(packet):
+        tile_codec.read_packet(packet,directory,rectangle.last_u-rectangle.first_u+1,rectangle.last_v-rectangle.first_v+1,
+                               packet_identity(p,r,rectangle),stopped)
+        check_tile_metadata(directory,rectangle,p,r)
+        return
     directory.mkdir()
     expected = {"values.bin":rectangle.value_bytes,"choices.bin":rectangle.value_bytes//2,"tile.json":None}
     seen=set()
@@ -91,6 +105,12 @@ def unpack(packet: Path, directory: Path, rectangle, p: int, r: int) -> None:
                     output.write(block)
     if seen!=set(expected):
         raise ValueError("unexpected tile artifact members")
+    check_tile_metadata(directory,rectangle,p,r)
+
+
+def check_tile_metadata(directory: Path, rectangle, p: int, r: int) -> None:
+    """Refuse unpacked kernel metadata naming another field, rectangle or native layout."""
+
     metadata=json.loads((directory/"tile.json").read_text())
     required={"format":"KH-DP-TILE-1","p":p,"r":r,"first_u":rectangle.first_u,"last_u":rectangle.last_u,
               "first_v":rectangle.first_v,"last_v":rectangle.last_v,"byteorder":sys.byteorder,"value_bytes":8,"choice_bytes":4}
@@ -219,7 +239,8 @@ def acquire_input(record: dict, arguments, p: int, r: int, side: int, target, ca
 
 
 # Cut the bands from the finished tile and index them, so successors can skip the whole packet.
-def publish_bands(arguments, p: int, r: int, side: int, rectangle, values: Path, packet: Path) -> int:
+def publish_bands(arguments, p: int, r: int, side: int, rectangle, values: Path, packet: Path,
+                  tile_format: int = 1) -> int:
     """Store this tile's needed bands in local storage and register them; return how many were registered.
 
     Failures are never fatal: the tile's own packet is complete, and a successor
@@ -239,7 +260,7 @@ def publish_bands(arguments, p: int, r: int, side: int, rectangle, values: Path,
         with storage_transaction(arguments.local_storage_root,stopped):
             for kind in kinds:
                 blob=work/(kind+".khband")
-                write_band(values,p,r,rectangle,kind,blob,stopped)
+                write_band(values,p,r,rectangle,kind,blob,stopped,tile_format)
                 digest,path=store_blob(blob,arguments.local_storage_root,stopped)
                 stored[kind]=path
                 entries[kind]={"sha256":digest,"size":path.stat().st_size,
@@ -259,6 +280,24 @@ def publish_bands(arguments, p: int, r: int, side: int, rectangle, values: Path,
         shutil.rmtree(work,ignore_errors=True)
 
 
+# The GPU kernel exits 3 both when the device is missing and when a tile does not fit in its
+# memory, and exit 3 marks this host's GPU unavailable for every tile for ten minutes. So a tile
+# too big for the card goes straight to the CPU. The agent exports the cards it detected
+# (KH_GPU_DEVICES); without that, assume the fleet's smallest, a P600 (1.7 GiB usable).
+def gpu_fits(p: int, rectangle, device: int = 0) -> bool:
+    """Return whether rectangle's halo, choices and transitions fit the device's usable memory."""
+
+    limit=1536*1024**2
+    try:
+        for item in json.loads(os.environ.get("KH_GPU_DEVICES","[]")):
+            if item.get("index")==device:
+                limit=gpus.usable_bytes(item)
+    except (ValueError,TypeError,KeyError,AttributeError):
+        pass
+    limit=int(os.environ.get("KH_GPU_DP_MAX_BYTES",limit))
+    return rectangle.halo_bytes+rectangle.value_bytes//2+p**3*24+32*1024**2<=limit
+
+
 # Compute an immutable tile from peer artifacts, leaving whole-calculation state on no worker.
 def compute(arguments, specification: dict) -> None:
     """Assemble one admitted halo, invoke the exact pinned C kernel and pack its complete output."""
@@ -271,14 +310,26 @@ def compute(arguments, specification: dict) -> None:
     sources={}
     fetched={"band":0,"packet":0}
     counts={"band":0,"packet":0}
+    # Seconds per phase, reported with the result so slow tiles can be explained.
+    timings={}
+    mark=time.monotonic()
+
+    def lap(name):
+        nonlocal mark
+        now=time.monotonic()
+        timings[name+"_seconds"]=round(timings.get(name+"_seconds",0)+now-mark,3)
+        mark=now
+
     for record in descriptions(arguments):
         source,mode,size=acquire_input(record,arguments,p,r,side,rectangle,cache)
         sources[(record["row"],record["column"])]=source
         fetched[mode]+=size
         counts[mode]+=1
+    lap("fetch")
     halo=arguments.output.parent/"halo.bin"
     build_halo(p,r,side,rectangle,sources,halo,int(options.get("max_tile_bytes",2*1024**3)))
     shutil.rmtree(cache)
+    lap("halo")
     if REPORTER is not None:
         REPORTER.close()
     output=arguments.output.parent/"tile-output"
@@ -308,14 +359,17 @@ def compute(arguments, specification: dict) -> None:
     # accelerator: wait briefly for this host's GPU, otherwise compute on the leased CPUs.
     computed=False
     device=int(os.environ.get("KH_GPU_DEVICE","0"))
-    if (GPU_TILE.exists() and os.environ.get("KH_DISABLE_GPU_DP")!="1" and
+    if (GPU_TILE.exists() and os.environ.get("KH_DISABLE_GPU_DP")!="1" and gpu_fits(p,rectangle,device) and
             not gpus.recently_unavailable(device)):
         lock=gpus.DeviceLock(device)
-        if lock.acquire(float(os.environ.get("KH_GPU_DP_WAIT_SECONDS","120")),lambda: STOP,skip_long=True):
+        acquired=lock.acquire(float(os.environ.get("KH_GPU_DP_WAIT_SECONDS","120")),lambda: STOP,skip_long=True)
+        lap("gpu_wait")
+        if acquired:
             try:
                 code=kernel(GPU_TILE)
             finally:
                 lock.release()
+                lap("kernel")
             computed=code==0
             if code==3:
                 gpus.mark_unavailable(device)
@@ -325,21 +379,31 @@ def compute(arguments, specification: dict) -> None:
             raise InterruptedError("tile stopped")
     if not computed:
         code=kernel(ROOT.parent/"dp_solver"/"kh_dp_tile")
+        lap("kernel")
         if code!=0:
             raise RuntimeError(f"C tile kernel exited {code}")
-    with arguments.output.open("xb") as stream:
-        with tarfile.open(fileobj=stream,mode="w|gz",format=tarfile.USTAR_FORMAT,compresslevel=1) as archive:
-            for name in ("values.bin","choices.bin","tile.json"):
-                archive.add(output/name,arcname=name,recursive=False)
-        stream.flush()
-        os.fsync(stream.fileno())
-    published=publish_bands(arguments,p,r,side,rectangle,output/"values.bin",arguments.output)
+    tile_format=int(options.get("tile_format",1))
+    if tile_format==2:
+        tile_codec.write_packet(output,rectangle.last_u-rectangle.first_u+1,rectangle.last_v-rectangle.first_v+1,
+                                packet_identity(p,r,rectangle),arguments.output,stopped)
+        with arguments.output.open("rb") as stream:
+            os.fsync(stream.fileno())
+    else:
+        with arguments.output.open("xb") as stream:
+            with tarfile.open(fileobj=stream,mode="w|gz",format=tarfile.USTAR_FORMAT,compresslevel=1) as archive:
+                for name in ("values.bin","choices.bin","tile.json"):
+                    archive.add(output/name,arcname=name,recursive=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+    lap("pack")
+    published=publish_bands(arguments,p,r,side,rectangle,output/"values.bin",arguments.output,tile_format)
+    lap("publish")
     cells=rectangle.value_bytes//8
     mode="none" if not counts["band"]+counts["packet"] else "bands" if not counts["packet"] else "packets" if not counts["band"] else "mixed"
     print(json.dumps({"done":cells,"total":cells,"checkpoint_done":cells,"units":"cells","phase":"complete","heartbeat":True,
                       "engine":"gpu" if computed else "cpu","input_mode":mode,
                       "input_bytes":fetched["band"]+fetched["packet"],"input_band_bytes":fetched["band"],
-                      "bands_published":published}),flush=True)
+                      "bands_published":published,**timings}),flush=True)
 
 
 # Reconstruct through on-demand native choice shards without downloading a whole field table.

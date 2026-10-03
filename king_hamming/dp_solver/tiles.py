@@ -162,6 +162,14 @@ def extract_region(values: Path, rectangle: tile_t, region: region_t, output,
                    check: Callable[[], None] | None = None) -> None:
     """Write region's cells, row-major, from a complete tile values file to the binary stream output."""
 
+    for row in region_rows(values, rectangle, region, check):
+        output.write(row)
+
+
+def region_rows(values: Path, rectangle: tile_t, region: region_t,
+                check: Callable[[], None] | None = None):
+    """Yield region's rows of native uint64 values, in order, from a complete tile values file."""
+
     if not whole(rectangle).covers(region.first_u, region.last_u, region.first_v, region.last_v):
         raise ValueError("band lies outside its tile")
     if values.stat().st_size != rectangle.value_bytes:
@@ -175,7 +183,7 @@ def extract_region(values: Path, rectangle: tile_t, region: region_t, output,
             row = source.read(region.width * 8)
             if len(row) != region.width * 8:
                 raise OSError("tile values truncated during band extraction")
-            output.write(row)
+            yield row
 
 
 # Assemble from immutable predecessor values (whole tiles or edge bands) with bounded buffers and sparse zero axes.

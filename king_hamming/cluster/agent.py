@@ -1297,6 +1297,8 @@ def main() -> int:
                   for index, values in enumerate(slot_cpus)],
         "gpus": [] if arguments.storage_only else gpus.detect(),
     }
+    # Solvers inherit this, so a DP tile can tell whether it fits this host's card.
+    os.environ["KH_GPU_DEVICES"] = json.dumps(node_record["gpus"])
 
     storage_host, storage_port = arguments.storage_listen.rsplit(":", 1)
     storage_server = ThreadingHTTPServer(

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -285,6 +286,32 @@ class GPUBlockTests(unittest.TestCase):
         command = GPUBlockMatchingAdapter().command(block_job(20 * MIB), Path("/x/out.khmatch"), None, 0)
         self.assertTrue(command[1].endswith("gpu_block_match_solver/cluster_solver.py"))
         self.assertIn("--poly", command)
+
+
+
+class DPTileGPUAdmissionTests(unittest.TestCase):
+    """A DP tile too big for the card goes to the CPU without marking the GPU unavailable."""
+
+    def test_large_tiles_skip_the_gpu(self) -> None:
+        from dp_solver import distributed_solver
+        from dp_solver.tiles import tile
+        p600 = {"index": 0, "name": "Quadro P600", "arch": 61, "total_bytes": 2088632320}
+        rtx = {"index": 1, "name": "RTX 3060 Laptop", "arch": 86, "total_bytes": 6086262784}
+        cube = tile(127, 3, 512, 30, 30)  # about 2.2 GiB
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KH_GPU_DP_MAX_BYTES", None)
+            os.environ.pop("KH_GPU_DEVICES", None)
+            self.assertTrue(distributed_solver.gpu_fits(13, tile(13, 9, 4096, 12, 9)))
+            self.assertTrue(distributed_solver.gpu_fits(113, tile(113, 3, 512, 20, 20)))
+            self.assertFalse(distributed_solver.gpu_fits(127, cube))
+            self.assertFalse(distributed_solver.gpu_fits(3, tile(3, 25, 16384, 5, 5)))
+            os.environ["KH_GPU_DEVICES"] = json.dumps([p600, rtx])
+            self.assertFalse(distributed_solver.gpu_fits(127, cube, 0))
+            self.assertTrue(distributed_solver.gpu_fits(127, cube, 1))
+            os.environ["KH_GPU_DEVICES"] = "not json"
+            self.assertFalse(distributed_solver.gpu_fits(127, cube, 1))
+            os.environ["KH_GPU_DP_MAX_BYTES"] = str(8 * 1024**3)
+            self.assertTrue(distributed_solver.gpu_fits(127, cube, 0))
 
 
 if __name__ == "__main__":

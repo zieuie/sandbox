@@ -59,6 +59,27 @@ class TileReuseTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NULL",
                 (root,)).fetchone()[0], 15)
 
+    def test_large_roots_are_rescanned_at_a_bounded_rate(self) -> None:
+        """A root above FULL_SCAN_TILES is skipped until its interval passes; small roots never are."""
+        root = self.enqueue()
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            with patch.object(distributed, "FULL_SCAN_TILES", 4), \
+                    patch.object(distributed, "_last_scan", {}), \
+                    patch.object(distributed, "reuse_tiles", wraps=distributed.reuse_tiles) as scans:
+                distributed.advance(connection, now)
+                distributed.advance(connection, now + 1)
+                self.assertEqual(scans.call_count, 1)
+                distributed.advance(connection, now + 5)
+                self.assertEqual(scans.call_count, 2)
+                distributed.advance(connection, now - 60)
+                self.assertEqual(scans.call_count, 3)
+            with patch.object(distributed, "reuse_tiles", wraps=distributed.reuse_tiles) as scans:
+                distributed.advance(connection, now)
+                distributed.advance(connection, now)
+                self.assertEqual(scans.call_count, 2)
+        self.assertTrue(root)
+
     def complete_old_tile(self, parent: str, replicas: int = 2) -> None:
         child = self.child(parent)
         self.assertEqual(child["state"], "queued")

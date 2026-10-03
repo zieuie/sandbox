@@ -52,6 +52,14 @@ MAX_BAND_BYTES = 2 * 1024**3
 TILE_RETRY_LIMIT = 3
 TILE_RETRY_BASE_SECONDS = 30
 TILE_RETRY_MAX_SECONDS = 300
+# A pass over one root reads all of its tiles inside the leader's write transaction
+# (about 7 microseconds per tile on the four-root campaign database). Roots beyond
+# FULL_SCAN_TILES are therefore rescanned at most every tiles/FULL_SCAN_TILES seconds,
+# up to MAX_SCAN_INTERVAL, which keeps the lock's average use at the level of one
+# 10,000-tile root. Ready tiles are already queued, so a few seconds' delay idles nothing.
+FULL_SCAN_TILES = 10_000
+MAX_SCAN_INTERVAL = 30.0
+_last_scan: dict[str, float] = {}
 
 
 # Store dependency ownership separately from ordinary run and lease history.
@@ -158,8 +166,10 @@ def child_specification(parent: sqlite3.Row, row: int, column: int) -> dict[str,
         "threads": int(arguments.get("threads", 1)),
         "max_tile_bytes": int(arguments.get("max_tile_bytes", 2 * 1024**3)),
     }}
-    if "max_cpus" in arguments:
-        result["arguments"]["max_cpus"] = arguments["max_cpus"]
+    # Present only when chosen, so format-1 tiles keep their earlier identities.
+    for name in ("max_cpus", "tile_format"):
+        if name in arguments:
+            result["arguments"][name] = arguments[name]
     return result
 
 
@@ -283,6 +293,35 @@ def retire_finished_tiles(connection: sqlite3.Connection, now: float, force: boo
     return len(packets)
 
 
+# Durable means complete with at least two replicas on live nodes, read in one query.
+def durable_tiles(connection: sqlite3.Connection, parent_run_id: str, now: float,
+                  lease_seconds: float) -> set[tuple[int, int]]:
+    """Return the (row, column) of parent's tiles whose results have two live replicas."""
+
+    return {(row[0], row[1]) for row in connection.execute(
+        "SELECT t.row,t.column FROM distributed_tiles t "
+        "JOIN runs child ON child.run_id=t.child_run_id "
+        "JOIN replicas replica ON replica.artifact_hash=child.artifact_hash "
+        "JOIN nodes node ON node.node_name=replica.node_name "
+        "WHERE t.parent_run_id=? AND child.state='complete' "
+        "AND node.last_heartbeat>? GROUP BY t.row,t.column HAVING COUNT(*)>=2",
+        (parent_run_id, now - lease_seconds))}
+
+
+# The same cover as tiles.dependencies(), as grid coordinates only: building full tile
+# descriptors for every blocked tile dominated scheduling passes on large roots.
+def predecessor_coordinates(p: int, side: int, row: int, column: int):
+    """Yield (row, column) of every earlier tile meeting this tile's halo, in dependencies() order."""
+
+    halo = p * p
+    first_row = max(0, (row * side - halo) // side)
+    first_column = max(0, (column * side - halo) // side)
+    for predecessor_row in range(first_row, row + 1):
+        for predecessor_column in range(first_column, column + 1):
+            if (predecessor_row, predecessor_column) != (row, column):
+                yield predecessor_row, predecessor_column
+
+
 # Dispatch roots by creating only ready child leases; parent state contains no bulk arrays.
 def advance(connection: sqlite3.Connection, now: float) -> None:
     """Advance waiting DAGs inside the caller's transaction and queue reconstruction when durable."""
@@ -299,20 +338,19 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
             continue
         arguments = specification["arguments"]
         p, r, side = arguments["p"], arguments["r"], int(arguments.get("tile_side", 4096))
+        count = (dp_estimate(specification)["budget"] + side - 1) // side
+        if count * count > FULL_SCAN_TILES:
+            last = _last_scan.get(parent["run_id"])
+            if last is not None and 0 <= now - last < min(MAX_SCAN_INTERVAL, count * count / FULL_SCAN_TILES):
+                continue
+            _last_scan[parent["run_id"]] = now
         reuse_tiles(connection, parent, now)
         rows = connection.execute(
             "SELECT t.row,t.column,t.child_run_id,r.* FROM distributed_tiles t LEFT JOIN runs r ON r.run_id=t.child_run_id "
             "WHERE t.parent_run_id=? ORDER BY t.row,t.column", (parent["run_id"],),
         ).fetchall()
         lease = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
-        durable = {(row[0], row[1]) for row in connection.execute(
-            "SELECT t.row,t.column FROM distributed_tiles t "
-            "JOIN runs child ON child.run_id=t.child_run_id "
-            "JOIN replicas replica ON replica.artifact_hash=child.artifact_hash "
-            "JOIN nodes node ON node.node_name=replica.node_name "
-            "WHERE t.parent_run_id=? AND child.state='complete' "
-            "AND node.last_heartbeat>? GROUP BY t.row,t.column HAVING COUNT(*)>=2",
-            (parent["run_id"], now - lease))}
+        durable = durable_tiles(connection, parent["run_id"], now, lease)
         budget = math.isqrt(parent["progress_total"])
         done = sum(min(side, budget - row * side) * min(side, budget - column * side)
                    for row, column in durable)
@@ -359,7 +397,6 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
         if len(durable) == len(rows):
             connection.execute("UPDATE runs SET state='queued',progress_phase='reconstructing' WHERE run_id=?", (parent["run_id"],))
             continue
-        halo = p * p
         for row in rows:
             if row["child_run_id"]:
                 continue
@@ -367,14 +404,7 @@ def advance(connection: sqlite3.Connection, now: float) -> None:
             if retry is not None and now < retry["next_retry"]:
                 continue
             target_row, target_column = row["row"], row["column"]
-            # dependencies() constructs full tile descriptors; only their grid
-            # coordinates matter until this child is actually ready to queue.
-            first_row = max(0, (target_row * side - halo) // side)
-            first_column = max(0, (target_column * side - halo) // side)
-            if any((predecessor_row, predecessor_column) not in durable
-                   for predecessor_row in range(first_row, target_row + 1)
-                   for predecessor_column in range(first_column, target_column + 1)
-                   if (predecessor_row, predecessor_column) != (target_row, target_column)):
+            if any(key not in durable for key in predecessor_coordinates(p, side, target_row, target_column)):
                 continue
             target = tile(p,r,side,target_row,target_column)
             child_specification_value = child_specification(parent, target.row, target.column)

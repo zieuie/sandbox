@@ -10,7 +10,7 @@ import sys
 
 from adapters import SolverAdapter
 from . import checkpoints, distributed, scheduling
-from .tiles import dependencies, memory_bytes, tile
+from .tiles import memory_bytes, tile
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -28,6 +28,8 @@ class DPAdapter(SolverAdapter):
         cap = specification.get('arguments', {}).get('max_cpus', 1024)
         if type(cap) is not int or not 1 <= cap <= 1024:
             raise ValueError('max_cpus must be an integer from 1 to 1024')
+        if specification.get('arguments', {}).get('tile_format', 1) not in (1, 2):
+            raise ValueError('tile_format must be 1 (gzip packets) or 2 (compact row-delta packets)')
         if specification['program']=='dp_tile' and not internal:
             raise ValueError('dp_tile is internal; enqueue dp_distributed instead')
 
@@ -81,17 +83,7 @@ class DPAdapter(SolverAdapter):
             ).fetchall()
             if not rows:
                 continue
-            durable = set()
-            for item in rows:
-                if item["state"] != "complete" or not item["artifact_hash"]:
-                    continue
-                copies = connection.execute(
-                    "SELECT COUNT(*) FROM replicas replica JOIN nodes USING(node_name) "
-                    "WHERE replica.artifact_hash=? AND nodes.last_heartbeat>?",
-                    (item["artifact_hash"], now - lease_seconds),
-                ).fetchone()[0]
-                if copies >= 2:
-                    durable.add((item["row"], item["column"]))
+            durable = distributed.durable_tiles(connection, run["run_id"], now, lease_seconds)
             counts = {"durable": len(durable), "running": 0, "ready": 0,
                       "blocked": 0, "failed": 0, "boundary": "none"}
             boundary = None
@@ -106,9 +98,8 @@ class DPAdapter(SolverAdapter):
                 elif item["child_run_id"] is not None:
                     counts["ready"] += 1
                 else:
-                    target = tile(p, r, side, item["row"], item["column"])
-                    missing = [(dep.row, dep.column) for dep in dependencies(p, r, side, target)
-                               if (dep.row, dep.column) not in durable]
+                    missing = [key for key in distributed.predecessor_coordinates(p, side, item["row"], item["column"])
+                               if key not in durable]
                     if missing:
                         counts["blocked"] += 1
                         if boundary is None:
