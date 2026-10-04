@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import fixture
 from fixture import NOW
@@ -242,6 +243,37 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(view["cluster"]["total"]["machines"], 2)
         self.assertEqual((view["measured_at"], view["running"]), (self.now, False))
         self.assertEqual(self.changes, 2)  # the snapshot is invalidated when it starts and when it ends
+
+    def test_gawain_is_named_and_included_in_fleet_disk_measurements(self) -> None:
+        with sqlite3.connect(self.deployments / "live" / "leader.sqlite") as connection:
+            fixture.node(connection, "dp-156", "http://192.168.4.156:9000", "0,1,2,3", NOW - 5)
+        monitor = disk.DiskMonitor(
+            self.state, self.deployments, "live", list(snapshot.HOST_NAMES), self.runner,
+            interval=1800, clock=lambda: self.now)
+        monitor.measure()
+        self.assertEqual(snapshot.HOST_NAMES["192.168.4.156"], "gawain")
+        self.assertIn("192.168.4.156", [host for host, _ in self.calls])
+        self.assertEqual(monitor.view()["hosts"]["192.168.4.156"]["size"], 400 * GIB)
+        cards = snapshot.Snapshots(self.deployments, "live", clock=lambda: NOW).get()[0]["fleet"]["nodes"]
+        self.assertEqual(next(card["hostname"] for card in cards if card["host"] == "192.168.4.156"),
+                         "gawain")
+
+    def test_new_host_prompts_disk_refresh_after_dashboard_restart(self) -> None:
+        self.monitor.measure()
+        enlarged = disk.DiskMonitor(
+            self.state, self.deployments, "live", [*self.monitor.hosts, "192.168.4.156"],
+            self.runner, interval=1800, clock=lambda: self.now)
+
+        class Observed(Exception):
+            pass
+
+        def observe(delay):
+            self.assertEqual(delay, 5.0)
+            raise Observed()
+
+        with patch.object(enlarged.wake, "wait", side_effect=observe):
+            with self.assertRaises(Observed):
+                enlarged.loop()
 
     def test_a_failed_host_keeps_its_last_numbers_and_says_why(self) -> None:
         self.monitor.measure()

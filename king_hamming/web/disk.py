@@ -362,7 +362,8 @@ class DiskMonitor:
             self.on_change()
 
     def loop(self) -> None:
-        stale = self.measured_at is None or self.clock() - self.measured_at >= self.interval
+        stale = (self.measured_at is None or self.clock() - self.measured_at >= self.interval
+                 or any(host not in self.results for host in self.hosts))
         delay = 5.0 if stale else max(5.0, self.interval - (self.clock() - self.measured_at))
         while True:
             woke = self.wake.wait(delay)
