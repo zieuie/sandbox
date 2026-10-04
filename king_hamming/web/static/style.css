@@ -302,13 +302,13 @@ details.finished summary { cursor: pointer; color: var(--muted); padding: 8px 0;
   background: var(--ink); color: var(--panel); box-shadow: 0 4px 14px rgb(0 0 0 / 25%);
 }
 .tooltip .error-text { color: #ff9d94; }
-
-@media (max-width: 640px) {
-  .top { padding: 8px 12px; }
 .tooltip svg.loupe { display: block; margin: 0 0 6px; border-radius: 4px; background: rgb(255 255 255 / 8%); }
 .tooltip svg.loupe rect.centre { stroke: var(--panel); stroke-width: 3; }
 .tooltip svg.loupe rect.selected { stroke: var(--panel); stroke-width: 1.6; stroke-dasharray: 3 2; }
 .loupe-label { font-size: 8px; text-anchor: middle; fill: #fff; font-weight: 600; pointer-events: none; }
+
+@media (max-width: 640px) {
+  .top { padding: 8px 12px; }
   main { padding: 12px; }
   .refresh-box { margin-left: 0; width: 100%; justify-content: space-between; }
   .node-grid, .root-grid { grid-template-columns: 1fr; }
@@ -559,13 +559,6 @@ svg.conv .axis { fill: var(--muted); font-size: 11px; }
 .conv-dot.done { fill: var(--ok); }
 .conv-dot.live { fill: var(--panel); stroke: var(--accent); }
 .conv-hit { fill: transparent; cursor: default; }
-.conv-end { fill: var(--ink); font-size: 12px; font-weight: 600; }
-.phase-table summary { cursor: pointer; color: var(--muted); font-size: 12px; }
-.phase-table table { margin-top: 6px; max-width: 520px; }
-table.history tr.history-row { cursor: pointer; }
-table.history tr.history-row:hover td, table.history tr.open td { background: var(--soft); }
-table.history > tbody > tr.history-detail > td { padding: 10px 14px 16px; }
-.link-button { all: unset; cursor: pointer; font-weight: 600; }
 
 /* block GPU matching: stages with progress */
 svg.stage-timeline { width: 100%; height: 14px; display: block; margin: 8px 0 10px; border-radius: 4px; background: var(--soft); }
@@ -590,6 +583,13 @@ ol.stages { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 
 .stage-running .stage-name { font-weight: 600; }
 @keyframes stage-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .stage-running .stage-mark { animation: none; background: var(--accent); } }
+.conv-end { fill: var(--ink); font-size: 12px; font-weight: 600; }
+.phase-table summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.phase-table table { margin-top: 6px; max-width: 520px; }
+table.history tr.history-row { cursor: pointer; }
+table.history tr.history-row:hover td, table.history tr.open td { background: var(--soft); }
+table.history > tbody > tr.history-detail > td { padding: 10px 14px 16px; }
+.link-button { all: unset; cursor: pointer; font-weight: 600; }
 .state-obstructed { color: var(--st-obstructed); }
 .all-clear.neutral { color: var(--muted); }
 @media (max-width: 640px) { .match-grid { grid-template-columns: 1fr; } }
