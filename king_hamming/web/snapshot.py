@@ -554,6 +554,10 @@ class Snapshots:
                 (now - lease_seconds, *identifiers)):
             cells_by_root[row["parent_run_id"]].append(dict(row))
 
+        # Tiles that finished more than once: complete child runs the grid no longer points at.
+        finished_runs = {row[0]: row[1] for row in connection.execute(
+            f"SELECT parent_run_id,COUNT(*) FROM runs WHERE state='complete' AND parent_run_id IN ({placeholders}) "
+            "GROUP BY parent_run_id", identifiers)}
         result = []
         for root in roots:
             arguments = root["arguments"]
@@ -622,6 +626,7 @@ class Snapshots:
                 "rows": 1 + max((cell["r"] for cell in cells), default=-1),
                 "columns": 1 + max((cell["c"] for cell in cells), default=-1),
                 "counts": counts,
+                "recomputed": max(0, finished_runs.get(root["run_id"], 0) - counts["durable"] - counts["complete"]),
                 "gpu_tiles": sum(1 for cell in cells if cell.get("gpu")),
                 "boundary": boundary or ("clear" if root["state"] not in TERMINAL else None),
                 "median_tile_seconds": statistics.median(durations) if durations else None,

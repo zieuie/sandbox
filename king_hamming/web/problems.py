@@ -58,7 +58,24 @@ def current_conditions(snapshot: dict, connection: sqlite3.Connection, now: floa
                           "No new leases are handed out until it is resumed.", None, "#fleet",
                           action={"command": "dispatch.resume", "params": {}, "label": "Resume dispatch"}))
 
+    # The scheduler refuses to clear a large share of a root's finished tiles at once (see
+    # dp_solver.distributed.recompute_lost_tiles); while it holds, nothing there is recomputed.
+    holds = {}
+    for held in connection.execute("SELECT key,value FROM settings WHERE key LIKE 'tile_clear_hold:%'"):
+        try:
+            holds[held["key"].split(":", 1)[1]] = json.loads(held["value"])
+        except ValueError:
+            pass
     for root in snapshot.get("roots") or []:
+        hold = holds.get(root["run_id"])
+        if hold and root["state"] not in {"complete", "failed", "cancelled"}:
+            found.append(item("critical", f"clear_hold:{root['p']},{root['r']}",
+                              f"{label([root['p'], root['r']])}: {hold['would_clear']} of {hold['finished']} finished "
+                              "tiles look lost, so none are being recomputed",
+                              "Their copies are missing from the leader's records, but a fleet-wide worker restart "
+                              "does that too. Check that the workers have finished revalidating; if the copies "
+                              "really are gone, raise the tile_clear_max_fraction setting to let them recompute.",
+                              hold["time"], "#tiles"))
         stuck = [cell for cell in root["cells"] if cell["s"] == "cancelled"]
         if root["state"] not in {"complete", "failed", "cancelled"} and stuck:
             found.append(item("warning", f"stuck:{root['p']},{root['r']}",

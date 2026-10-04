@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -135,6 +136,18 @@ class ViewTests(unittest.TestCase):
         self.assertNotIn("feeder_failing", groups)  # the last feeder line succeeded
         self.assertEqual(problems["counts"]["critical"], 3)
         self.assertEqual(problems["active"][0]["severity"], "critical")
+
+    def test_a_clearing_hold_is_a_critical_problem_and_recomputed_tiles_are_counted(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("UPDATE runs SET state='waiting',finished=NULL WHERE run_id='root-5-3'")
+            connection.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('tile_clear_hold:root-5-3',?)",
+                               (json.dumps({"time": NOW - 20, "would_clear": 900, "finished": 1000, "limit": 50}),))
+        built = self.build()
+        groups = {entry["group"]: entry for entry in built["problems"]["active"]}
+        self.assertEqual(groups["clear_hold:5,3"]["severity"], "critical")
+        self.assertIn("900 of 1000", groups["clear_hold:5,3"]["title"])
+        root = next(item for item in built["roots"] if item["run_id"] == "root-5-3")
+        self.assertGreaterEqual(root["recomputed"], 0)
 
     def test_problem_events(self) -> None:
         with sqlite3.connect(self.database) as connection:

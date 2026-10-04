@@ -180,6 +180,13 @@ function healthyMachines(snapshot) {
   return nodes.filter((n) => n.state !== 'unavailable').length || nodes.length;
 }
 
+// Tiles that finished more than once are work done twice (a lost or cleared copy, then a recompute).
+function recomputedNote(root) {
+  if (!root.recomputed) return '';
+  const done = root.counts.durable + root.counts.complete;
+  return html`<p class="hint" title="Complete tile runs the grid no longer points at: a tile whose copy was lost or cleared and then computed again.">${fmtInt(root.recomputed)} tile${root.recomputed === 1 ? '' : 's'} finished more than once${done ? html` (${pct(root.recomputed / (done + root.recomputed))} of all finished work)` : ''}</p>`;
+}
+
 function rootCard(root, index, machines, roots) {
   const estimate = typicalEstimate(root, machines, roots);
   const total = root.cells.length;
@@ -197,6 +204,7 @@ function rootCard(root, index, machines, roots) {
       ${estimate ? html` · <span title="${estimateTitle(root, estimate)}">${estimateText(estimate)}</span>` : ''}
       ${root.gpu_tiles ? html` · <span class="gpu-tag" title="Tiles computed or computing on a GPU with kh_gpu_dp_tile (byte-identical to the CPU kernel)">${fmtInt(root.gpu_tiles)} tile${root.gpu_tiles === 1 ? '' : 's'} on GPU</span>` : ''}</div>
     <div class="chips">${chips(root)}</div>
+    ${recomputedNote(root)}
     ${root.boundary && root.boundary !== 'clear' ? html`<p class="hint">Frontier: tile ${root.boundary}</p>` : ''}
     ${root.orphaned_children ? html`<p class="alert">This root is ${root.state}, but ${root.orphaned_children}
       of its tiles are still running or queued.</p>` : ''}
