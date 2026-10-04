@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
@@ -23,6 +24,92 @@ KERNEL = HERE / "kh_gpu_block_kernel"
 def emit(record: dict) -> None:
     sys.stdout.write(json.dumps(record, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+
+# Stages of a block run in order, with the phase text the leader shows. The agent adds
+# "verify" after this bridge exits; the dashboard knows the whole list (static/matching.js).
+STAGES = {"gpu_wait": "waiting for the GPU", "field": "building field rows", "blocks": "matching blocks",
+          "exchange": "exchange rounds", "write": "writing the result", "publish": "publishing"}
+EMIT_SECONDS = 10.0
+
+
+class Live:
+    """Where a block run is: per-stage progress and the unmatched-request burndown.
+
+    Sent as the progress message (JSON), so the dashboard can draw every stage and the
+    burndown while the run is still going. Stage changes and finished blocks are sent at once;
+    progress inside a stage at most every EMIT_SECONDS.
+    """
+
+    def __init__(self, total: int) -> None:
+        self.total, self.matched = total, 0
+        self.stages: dict[str, dict] = {}
+        self.current: str | None = None
+        self.trace = [[0, total]]
+        self.last_emit = 0.0
+        self.extra: dict = {}
+        self.phase = ""
+        self.lock = threading.Lock()
+        # Re-send the current state when a stage is quiet (a block can take minutes), so the
+        # leader keeps seeing the solver alive.
+        threading.Thread(target=self.heartbeat, daemon=True).start()
+
+    def heartbeat(self) -> None:
+        while True:
+            time.sleep(EMIT_SECONDS)
+            with self.lock:
+                if self.current is not None and time.time() - self.last_emit >= EMIT_SECONDS:
+                    self.send()
+
+    def send(self) -> None:
+        self.last_emit = time.time()
+        emit({"done": self.matched, "total": self.total, "checkpoint_done": 0,
+              "phase": self.phase, "units": "requests", "message": self.message()})
+
+    def update(self, key: str, done: int, total: int | None, phase: str | None = None, force: bool = False) -> None:
+        with self.lock:
+            self.advance(key, done, total, phase, force)
+
+    def advance(self, key: str, done: int, total: int | None, phase: str | None, force: bool) -> None:
+        now = time.time()
+        if key != self.current:
+            if self.current is not None:
+                self.stages[self.current]["finished"] = now
+                self.stages[self.current]["done"] = self.stages[self.current].get("total") or \
+                    self.stages[self.current]["done"]
+            self.stages.setdefault(key, {"started": now, "finished": None})
+            self.current, force = key, True
+        self.stages[key].update(done=done, total=total, updated=now)
+        self.phase = phase or STAGES[key]
+        if force or now - self.last_emit >= EMIT_SECONDS:
+            self.send()
+
+    def finish(self) -> None:
+        with self.lock:
+            if self.current is not None:
+                self.stages[self.current]["finished"] = time.time()
+            self.current = None   # stops the heartbeat; the final record follows
+
+    def record(self) -> dict:
+        return {**self.extra, "stages": [{"key": key, **value} for key, value in self.stages.items()],
+                "trace": self.trace}
+
+    def message(self) -> str:
+        return json.dumps(self.record(), separators=(",", ":"))
+
+    def kernel_line(self, record: dict) -> None:
+        """Fold one kernel progress line into the stages and the burndown."""
+        stage = record.get("stage")
+        if stage not in STAGES:
+            return
+        self.matched = int(record.get("done", self.matched))
+        done, total = int(record.get("stage_done", 0)), int(record.get("stage_total", 0)) or None
+        step = stage in ("blocks", "exchange") and done > 0
+        if step and (stage, done) != getattr(self, "_last_step", None):
+            self._last_step = (stage, done)
+            self.trace.append([len(self.trace), self.total - self.matched])
+        phase = f"block {done}/{total}" if stage == "blocks" else STAGES[stage]
+        self.update(stage, done, total, phase, force=step)
 
 
 def run(arguments: argparse.Namespace) -> int:
@@ -41,7 +128,9 @@ def run(arguments: argparse.Namespace) -> int:
 
     blocks = arguments.output.with_name("blocks.txt")
     raw = arguments.output.with_name("native-choices.bin")
+    scratch = arguments.output.with_name("choices.scratch")   # the kernel maps, then unlinks it
     raw.unlink(missing_ok=True)
+    scratch.unlink(missing_ok=True)
     with blocks.open("w") as stream:
         stream.write(f"{len(dp['runs'])}\n")
         for entry in dp["runs"]:
@@ -49,8 +138,8 @@ def run(arguments: argparse.Namespace) -> int:
 
     device = int(os.environ.get("KH_GPU_DEVICE", "0"))
     lock = gpus.DeviceLock(device)
-    emit({"done": 0, "total": total, "checkpoint_done": 0, "phase": "waiting for gpu",
-          "units": "requests", "heartbeat": True})
+    live = Live(total)
+    live.update("gpu_wait", 0, None)
     # Opportunistic DP tiles hold the device for seconds at a time; wait for them.
     if not lock.acquire(timeout=arguments.lock_seconds, hold="long"):
         raise RuntimeError(f"GPU {device} stayed busy for {arguments.lock_seconds} s")
@@ -68,7 +157,11 @@ def run(arguments: argparse.Namespace) -> int:
                 record = json.loads(line)
                 if "polynomial" in record and "status" in record:
                     metadata = record
-                elif record.get("event") == "resource_usage" or "done" in record:
+                elif record.get("event") == "resource_usage":
+                    emit(record)
+                elif "stage" in record:
+                    live.kernel_line(record)
+                elif "done" in record:
                     emit(record)
             code = child.wait()
     finally:
@@ -83,27 +176,19 @@ def run(arguments: argparse.Namespace) -> int:
         raise RuntimeError("GPU kernel used a different polynomial")
 
     # The agent independently verifies the KHM1 (validate_result) before publication.
-    stop = threading.Event()
-
-    def heartbeat() -> None:
-        while not stop.wait(10):
-            emit({"done": metadata["matched"], "total": total, "checkpoint_done": 0,
-                  "phase": "publishing", "units": "requests", "heartbeat": True})
-
-    reporter = threading.Thread(target=heartbeat, daemon=True)
-    reporter.start()
-    try:
-        publish(arguments.output, header(dp, digest, metadata), raw)
-    finally:
-        stop.set()
+    live.matched = metadata["matched"]
+    live.update("publish", 0, raw.stat().st_size)
+    publish(arguments.output, header(dp, digest, metadata), raw,
+            progress=lambda copied, size: live.update("publish", copied, size))
+    live.finish()
     raw.unlink(missing_ok=True)
     summary = {key: metadata[key] for key in ("matched", "required", "phases", "scans", "engine", "device",
                                              "blocks", "rounds", "residual_round1", "imported")}
     summary["seconds"] = metadata.get("seconds")
-    summary["trace"] = metadata.get("trace")  # [[step, unmatched], ...] for the dashboard's burndown chart
+    live.extra = summary
+    live.trace = metadata.get("trace") or live.trace  # the kernel's own [[step, unmatched], ...] record
     emit({"done": metadata["matched"], "total": metadata["required"], "checkpoint_done": 0,
-          "phase": "complete", "units": "requests",
-          "message": json.dumps(summary, separators=(",", ":"))})
+          "phase": "complete", "units": "requests", "message": live.message()})
     return 0
 
 
@@ -129,9 +214,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-    scratch = arguments.output.with_name("choices.scratch")   # the kernel maps, then unlinks it
         raise SystemExit(main())
-    scratch.unlink(missing_ok=True)
     except (OSError, ValueError, RuntimeError) as error:
         print(f"gpu_block_match_solver/cluster_solver.py: {error}", file=sys.stderr)
         raise SystemExit(1)

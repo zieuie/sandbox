@@ -1174,10 +1174,15 @@ def run_job(
 
         def verifying_heartbeat() -> None:
             report = {key: final[key] for key in ("done", "total", "checkpoint_done", "units") if key in final}
+            # A solver that reports its stages as a JSON message (block GPU matching) keeps that
+            # record while it is verified, so the dashboard can still show every stage.
+            message = final.get("message")
+            if not (isinstance(message, str) and message.startswith("{")):
+                message = "verifying the certificate"
             while not verifying_done.wait(10):
                 try:
                     request_json(leader, "/v1/progress", {**report, **identity, "phase": "verifying",
-                                                          "message": "verifying the certificate"})
+                                                          "message": message})
                 except (OSError, HTTPError):
                     pass  # the lease keeper decides whether the lease is lost
 

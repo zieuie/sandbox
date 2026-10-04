@@ -45,18 +45,25 @@ def file_hash(path):
 
 
 # Publish complete artifacts without overwriting previous attempts.
-def publish(path, header, payload):
-    """Write header plus input payload plus checksum to fresh path, with durable atomic publication."""
+def publish(path, header, payload, progress=None):
+    """Write header plus input payload plus checksum to fresh path, with durable atomic publication.
+
+    progress, if given, is called with (bytes copied, payload bytes) after each chunk."""
     path = Path(path)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         digest = hashlib.sha256()
+        size = Path(payload).stat().st_size
+        copied = 0
         with os.fdopen(descriptor, "wb") as output, Path(payload).open("rb") as source:
             output.write(header)
             digest.update(header)
             while chunk := source.read(1024 * 1024):
                 output.write(chunk)
                 digest.update(chunk)
+                copied += len(chunk)
+                if progress is not None:
+                    progress(copied, size)
             output.write(digest.digest())
             output.flush()
             os.fsync(output.fileno())

@@ -78,6 +78,12 @@ def main() -> int:
             summary = json.loads(row["progress_message"])
             assert summary["engine"] == "gpu-blocks" and summary["blocks"] >= 2, summary
             assert summary["trace"][0][1] == dp_requests(dp_path) and summary["trace"][-1][1] == 0, summary["trace"]
+            # Every stage the bridge saw, in order and finished (the agent's verification follows).
+            stages = [item["key"] for item in summary["stages"]]
+            assert stages[:3] == ["gpu_wait", "field", "blocks"] and stages[-2:] == ["write", "publish"], stages
+            assert all(item["finished"] and item["finished"] >= item["started"] for item in summary["stages"]), summary
+            blocks = next(item for item in summary["stages"] if item["key"] == "blocks")
+            assert blocks["done"] == blocks["total"] == summary["blocks"], blocks
             dp, digest = load_dp(dp_path)
             output = temporary / "result.khmatch"
             with urlopen(row["artifact_location"], timeout=10) as response:

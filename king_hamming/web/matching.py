@@ -12,6 +12,30 @@ import sqlite3
 from typing import Callable
 
 MATCH_PROGRAMS = ("match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks")
+STAGE_KEYS = ("gpu_wait", "field", "blocks", "exchange", "write", "publish", "verify")
+QUIET_SECONDS = 300   # mirrors the "no-progress-warning" threshold in snapshot.solver_health
+
+
+def number(value) -> float | int | None:
+    return value if type(value) in (int, float) else None
+
+
+def block_stages(run: dict, record: dict) -> list[dict]:
+    """The stages of a match_gpu_blocks run from its bridge's record (progress message), plus the
+    agent's verification, which follows publication: [{key, started, finished, done, total}]."""
+    stages = []
+    for item in record.get("stages") or []:
+        if isinstance(item, dict) and item.get("key") in STAGE_KEYS:
+            stages.append({"key": item["key"], **{name: number(item.get(name)) for name in
+                                                  ("started", "finished", "done", "total", "updated")}})
+    published = next((item for item in stages if item["key"] == "publish" and item["finished"]), None)
+    if run["state"] == "running" and run["progress_phase"] == "verifying":
+        stages.append({"key": "verify", "started": published and published["finished"], "finished": None,
+                       "done": None, "total": None, "updated": run["last_solver_heartbeat"]})
+    elif run["state"] == "complete" and published:
+        stages.append({"key": "verify", "started": published["finished"], "finished": run["finished"],
+                       "done": None, "total": None, "updated": run["finished"]})
+    return stages
 
 
 def build_matching(connection: sqlite3.Connection, names: dict[str, str],
@@ -71,9 +95,11 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
                 summary = {}
             if isinstance(summary, dict):
                 trace = summary.get("trace")
-                if isinstance(trace, list) and run["state"] == "complete":
+                if isinstance(trace, list) and (run["state"] == "complete" or
+                                                description.get("program") == "match_gpu_blocks"):
                     # The chart reads checkpoint-like rows: [step, matched, time]. A GPU run has no
-                    # checkpoints, so rebuild them from the kernel's own record of unmatched counts.
+                    # checkpoints, so rebuild them from the kernel's own record of unmatched counts
+                    # (a block run keeps it up to date while running).
                     when = run["finished"] or run["started"] or 0
                     phase_rows = [[item[0], (total or 0) - item[1], when] for item in trace[1:]
                                   if isinstance(item, list) and len(item) == 2 and
@@ -82,11 +108,20 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
                            seconds=summary.get("seconds"), scans=summary.get("scans"),
                            blocks=summary.get("blocks"), rounds=summary.get("rounds"),
                            residual_round1=summary.get("residual_round1"))
+                if description.get("program") == "match_gpu_blocks":
+                    gpu["stages"] = block_stages(run, summary)
+        health_label = health(run, now)
+        if gpu and gpu.get("stages") and health_label in ("no-progress-warning", "stalled"):
+            # Field build, writing, publishing and verifying advance without matching more
+            # requests: a stage that reported recently is progress too.
+            latest = max((item["updated"] or 0 for item in gpu["stages"]), default=0)
+            if now - latest < QUIET_SECONDS:
+                health_label = "responding"
         result.append({
             "run_id": run["run_id"], "field": description.get("field"), "program": description.get("program"),
             "engine": "gpu" if gpu else "cpu", "gpu": gpu,
             "poly": arguments.get("poly"), "workers": arguments.get("workers", 1),
-            "threads": arguments.get("threads"), "state": run["state"], "health": health(run, now),
+            "threads": arguments.get("threads"), "state": run["state"], "health": health_label,
             "created": run["created"], "started": run["started"], "finished": run["finished"],
             "done": done, "total": total or None, "phase_label": run["progress_phase"],
             "last_progress_at": run["last_progress_at"], "attempt": run.get("lease_attempt"),

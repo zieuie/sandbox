@@ -32,6 +32,9 @@ function matchedPct(done, total) {
   return `${(Math.floor(fraction * 100 * 10 ** digits) / 10 ** digits).toFixed(digits)}%`;
 }
 
+const linearScale = (run) => run.program === 'match_gpu_blocks';
+const scaleText = (run) => (linearScale(run) ? '' : ' (log scale)');
+
 // Log-scale line of unmatched requests per phase. Zero (fully matched) sits on
 // the baseline with its own marker, since log(0) is undefined.
 function convergence(run, index) {
@@ -46,10 +49,14 @@ function convergence(run, index) {
   const maxPhase = Math.max(1, ...data.map((d) => d[0]));
   const top = Math.ceil(Math.log10(Math.max(10, run.total)));
   const x = (phase) => L + (phase / maxPhase) * (W - L - R);
-  const y = (value) => (value <= 0 ? H - B : T + (1 - Math.log10(Math.max(1, value)) / top) * (H - T - B - 12));
+  // Block runs fall steadily, block by block: a linear scale shows that; phases fall by orders of magnitude.
+  const linear = linearScale(run);
+  const y = linear ? (value) => T + (1 - Math.max(0, value) / run.total) * (H - T - B)
+    : (value) => (value <= 0 ? H - B : T + (1 - Math.log10(Math.max(1, value)) / top) * (H - T - B - 12));
   const yTicks = [];
   const step = Math.max(1, Math.ceil(top / 5));
-  for (let k = step; k <= top; k += step) yTicks.push(10 ** k);
+  if (linear) [0.25, 0.5, 0.75, 1].forEach((share) => yTicks.push(Math.round(run.total * share)));
+  else for (let k = step; k <= top; k += step) yTicks.push(10 ** k);
   const xStep = Math.max(1, Math.ceil(maxPhase / 10));
   const xTicks = [];
   for (let p = 0; p <= maxPhase; p += xStep) xTicks.push(p);
@@ -61,7 +68,7 @@ function convergence(run, index) {
   return html`<svg class="conv" viewBox="0 0 ${W} ${H}" role="img"
       aria-label="Requests still unmatched after each phase, ${label(run.field)}">
     ${yTicks.map((v) => html`<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"></line>
-      <text class="axis" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${axisLabel(v)}</text>`)}
+      <text class="axis" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${linear ? fmtCompact(v) : axisLabel(v)}</text>`)}
     <line class="grid zero" x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}"></line>
     <text class="axis" x="${L - 6}" y="${H - B + 4}" text-anchor="end">0</text>
     ${xTicks.map((p) => html`<text class="axis" x="${x(p)}" y="${H - B + 18}" text-anchor="middle">${p}</text>`)}
@@ -89,8 +96,78 @@ function phaseTable(run) {
 const GPU_STAGES = [['field', 'field build (CPU)'], ['upload', 'upload'], ['greedy', 'greedy'],
   ['augment', 'augmenting'], ['blocks', 'block matching'], ['exchange', 'exchange rounds'], ['output', 'payload write']];
 
+// Stages of a block GPU run, in order (keys from gpu_block_match_solver/cluster_solver.py; the agent
+// adds "verify"). Units say how a stage's done/total counts are shown.
+const BLOCK_STAGES = [
+  ['gpu_wait', 'Waiting for the GPU', null],
+  ['field', 'Building field rows (CPU)', 'labels'],
+  ['blocks', 'Matching blocks (GPU)', 'blocks'],
+  ['exchange', 'Exchange rounds (GPU)', 'rounds'],
+  ['write', 'Writing the result (CPU)', 'requests'],
+  ['publish', 'Publishing the certificate', 'bytes'],
+  ['verify', 'Independent verification', null],
+];
+
+function countText(value, units) {
+  if (units === 'bytes') return fmtBytes(value);
+  if (units === 'blocks' || units === 'rounds') return fmtInt(value);
+  return fmtCompact(value);
+}
+
+// Each stage with its state (done, running, pending, skipped, stopped), time, and for the running
+// one a progress bar and a time-left estimate from its own pace so far.
+function blockStages(run, at) {
+  const recorded = new Map((run.gpu.stages || []).map((item) => [item.key, item]));
+  const lastStarted = Math.max(-1, ...BLOCK_STAGES.map(([key], i) => (recorded.has(key) ? i : -1)));
+  const rows = BLOCK_STAGES.map(([key, name, units], i) => {
+    const item = recorded.get(key);
+    let state = 'pending';
+    if (item && item.finished) state = 'done';
+    else if (item) state = run.state === 'running' ? 'running' : 'stopped';
+    else if (i < lastStarted || run.state === 'complete') state = 'skipped';
+    const end = item && (item.finished || (state === 'running' ? at : item.updated)) || null;
+    const seconds = item && item.started && end ? Math.max(0, end - item.started) : null;
+    return { key, name, units, item, state, seconds };
+  });
+  const total = rows.reduce((sum, row) => sum + (row.seconds || 0), 0);
+  let offset = 0;
+  const timeline = total > 0 ? html`<svg class="stage-timeline" viewBox="0 0 1000 14" preserveAspectRatio="none"
+      role="img" aria-label="Time spent in each stage">${rows.filter((row) => row.seconds).map((row) => {
+        const width = (row.seconds / total) * 1000;
+        const rect = html`<rect class="stage-seg seg-${row.key}${row.state === 'running' ? ' running' : ''}" x="${offset.toFixed(1)}"
+          y="0" width="${Math.max(1, width).toFixed(1)}" height="14"><title>${row.name}: ${fmtDuration(row.seconds)}</title></rect>`;
+        offset += width;
+        return rect;
+      })}</svg>` : '';
+  return html`${timeline}<ol class="stages">${rows.map((row) => {
+    const item = row.item || {};
+    const known = typeof item.total === 'number' && item.total > 0 && typeof item.done === 'number';
+    const fraction = known ? Math.min(1, item.done / item.total) : null;
+    let detail = '';
+    if (row.state === 'running' && known) {
+      const elapsed = at - item.started;
+      const left = item.done > 0 && elapsed > 0 ? (elapsed * (item.total - item.done)) / item.done : null;
+      detail = html`${countText(item.done, row.units)} of ${countText(item.total, row.units)} ${row.units === 'bytes' ? '' : row.units}
+        · ${pct(fraction)}${left !== null ? html` · about ${fmtDuration(left)} left` : ''}`;
+    } else if (row.state === 'done' && known && row.units !== 'bytes') {
+      detail = html`${countText(item.total, row.units)} ${row.units}`;
+    } else if (row.state === 'skipped') {
+      detail = row.key === 'exchange' ? 'not needed: every block matched on its own' : 'skipped';
+    } else if (row.state === 'running' && row.key === 'verify') {
+      detail = 'kh_verify_khm1 rebuilds the field independently and checks every edge';
+    }
+    return html`<li class="stage stage-${row.state}">
+      <span class="stage-mark" aria-hidden="true"></span>
+      <span class="stage-name"><span class="swatch seg-${row.key}"></span>${row.name}</span>
+      <span class="stage-time">${row.seconds !== null ? fmtDuration(row.seconds) : ''}</span>
+      ${detail ? html`<span class="stage-detail hint">${detail}</span>` : ''}
+      ${row.state === 'running' && fraction !== null ? bar(fraction) : ''}
+    </li>`;
+  })}</ol>`;
+}
+
 // GPU runs finish in seconds and keep no phase checkpoints; show the stage timings instead.
-function gpuSummary(run) {
+function gpuSummary(run, at = now()) {
   const gpu = run.gpu || {};
   const seconds = gpu.seconds || {};
   const stages = GPU_STAGES.filter(([key]) => typeof seconds[key] === 'number');
@@ -99,7 +176,7 @@ function gpuSummary(run) {
       ${gpu.blocks ? html` · ${gpu.blocks} blocks, ${gpu.rounds} round${gpu.rounds === 1 ? '' : 's'}${gpu.residual_round1 ? html`, ${fmtInt(gpu.residual_round1)} left after block matching` : ''}` : ''}
       ${gpu.phases !== null && gpu.phases !== undefined ? html` · ${gpu.phases} augmenting phase${gpu.phases === 1 ? '' : 's'} after greedy` : ''}
       ${gpu.scans ? html` · ${fmtCompact(gpu.scans)} edge scans` : ''}</p>
-    ${stages.length ? html`<table class="mini"><thead><tr><th>Stage</th><th>Seconds</th></tr></thead>
+    ${gpu.stages && gpu.stages.length ? blockStages(run, at) : stages.length ? html`<table class="mini"><thead><tr><th>Stage</th><th>Seconds</th></tr></thead>
       <tbody>${stages.map(([key, name]) => html`<tr><td>${name}</td><td>${seconds[key].toFixed(2)}</td></tr>`)}</tbody></table>`
       : html`<p class="hint">${run.state === 'complete' ? 'Stage timings were not recorded.' : 'Single GPU run: no per-phase checkpoints; it finishes in seconds to minutes.'}</p>`}
   </div>`;
@@ -118,6 +195,12 @@ function resources(run) {
       <td>${fmtDuration(r.cpu_seconds)}</td><td>${fmtBytes(r.peak_rss)}</td></tr>`)}</tbody></table>`;
 }
 
+// "12 of 69 blocks matched" from the block stage, while the run reports it.
+function blockCount(run) {
+  const blocks = ((run.gpu && run.gpu.stages) || []).find((item) => item.key === 'blocks');
+  return blocks && blocks.total ? `${fmtInt(blocks.done || 0)} of ${fmtInt(blocks.total)} blocks matched` : 'no block matched yet';
+}
+
 function liveCard(run, index, generatedAt) {
   const fraction = run.total ? run.done / run.total : 0;
   const lastPhase = run.phases.length ? run.phases[run.phases.length - 1][0] : 0;
@@ -132,12 +215,13 @@ function liveCard(run, index, generatedAt) {
     <div class="match-progress">
       <div><b>${matchedPct(run.done, run.total)}</b> matched · ${fmtInt(run.total - run.done)} of ${fmtInt(run.total)} requests left</div>
       ${bar(fraction)}
-      <div class="hint">${lastPhase} phase${lastPhase === 1 ? '' : 's'} committed ·
+      <div class="hint">${run.program === 'match_gpu_blocks' ? blockCount(run)
+        : `${lastPhase} phase${lastPhase === 1 ? '' : 's'} committed`} ·
         ${run.started ? `running ${fmtDuration(generatedAt - run.started)}` : `queued ${ago(run.created)}`}
         ${run.last_progress_at ? ` · progress ${ago(run.last_progress_at)}` : ''}</div>
     </div>
-    ${run.engine === 'gpu' ? html`${run.phases.length ? html`<h4>Unmatched requests after each ${run.step_label || 'step'} (log scale)</h4>
-      ${convergence(run, index)}` : ''}${gpuSummary(run)}${run.phases.length ? phaseTable(run) : ''}`
+    ${run.engine === 'gpu' ? html`${gpuSummary(run, generatedAt)}${run.phases.length ? html`<h4>Unmatched requests after each ${run.step_label || 'step'}${scaleText(run)}</h4>
+      ${convergence(run, index)}` : ''}${run.phases.length ? phaseTable(run) : ''}`
       : html`<h4>Unmatched requests after each phase (log scale)</h4>
     ${convergence(run, index)}
     ${phaseTable(run)}`}
