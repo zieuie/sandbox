@@ -80,6 +80,40 @@ class DependencyCopyTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT state FROM runs WHERE run_id=?", (self.root,)).fetchone()[0],
                              "waiting")
 
+    def test_a_copy_awaiting_revalidation_is_not_a_lost_copy(self) -> None:
+        """An agent restart deletes its replica rows until it revalidates its disk; a fleet-wide
+        upgrade must not make every finished tile look lost."""
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            old = self.complete_corner(connection, now, finished=now - 700)
+            digest = connection.execute("SELECT artifact_hash FROM runs WHERE run_id=?", (old,)).fetchone()[0]
+            connection.execute("DELETE FROM replicas WHERE artifact_hash=?", (digest,))
+            connection.execute("INSERT INTO node_revalidation(node_name,kind,digest,created) VALUES('a','artifact',?,?)",
+                               (digest, now - 60))
+            connection.execute("UPDATE nodes SET last_heartbeat=? WHERE node_name='a'", (now - 5,))
+            distributed.advance(connection, now + distributed.REFRESH_SECONDS)
+            self.assertEqual(self.tile(connection, 0, 0)["run_id"], old, "revalidating: keep the tile")
+
+            # The same node silent for the whole grace: its claim cannot be revalidated, so recompute.
+            connection.execute("UPDATE nodes SET last_heartbeat=? WHERE node_name='a'", (now - 700,))
+            distributed.advance(connection, now + 2 * distributed.REFRESH_SECONDS)
+            self.assertNotEqual(self.tile(connection, 0, 0)["run_id"], old)
+
+    def test_cleared_tiles_are_pointed_back_at_their_surviving_child(self) -> None:
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            old = self.complete_corner(connection, now, finished=now - 700)
+            connection.execute("UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? AND row=0 AND column=0",
+                               (self.root,))
+            self.assertEqual(distributed.restore_cleared_tiles(connection, self.root), 1)
+            self.assertEqual(self.tile(connection, 0, 0)["run_id"], old)
+            self.assertEqual(distributed.restore_cleared_tiles(connection, self.root), 0)
+            # A child whose blob has no copy anywhere stays cleared.
+            connection.execute("UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? AND row=0 AND column=0",
+                               (self.root,))
+            connection.execute("DELETE FROM replicas WHERE artifact_hash=(SELECT artifact_hash FROM runs WHERE run_id=?)", (old,))
+            self.assertEqual(distributed.restore_cleared_tiles(connection, self.root), 0)
+
     def test_failure_while_an_input_is_unreachable_does_not_spend_an_attempt(self) -> None:
         now = time.time()
         with leader.connect(self.database) as connection:

@@ -335,17 +335,53 @@ def recompute_lost_tiles(connection: sqlite3.Connection, parent_run_id: str, now
 
     grace = retention_module.number(connection, "replica_grace_seconds",
                                     retention_module.DEFAULT_REPLICA_GRACE_SECONDS)
+    # A restarted agent's replica rows are deleted and re-added as it revalidates its disk (minutes
+    # to hours for a big store), so a missing row is not a lost copy while a live node still has the
+    # artifact queued for revalidation. A fleet-wide worker upgrade once cleared 87% of a root's
+    # finished tiles this way, and the cluster recomputed them.
     lost = connection.execute(
         "SELECT t.row,t.column,t.child_run_id FROM distributed_tiles t "
         "JOIN runs child ON child.run_id=t.child_run_id "
         "WHERE t.parent_run_id=? AND child.state='complete' AND child.finished<? "
         "AND NOT EXISTS (SELECT 1 FROM replicas r JOIN nodes n USING(node_name) "
-        "WHERE r.artifact_hash=child.artifact_hash AND n.last_heartbeat>?)",
-        (parent_run_id, now - grace, now - grace)).fetchall()
+        "WHERE r.artifact_hash=child.artifact_hash AND n.last_heartbeat>?) "
+        "AND NOT EXISTS (SELECT 1 FROM node_revalidation v JOIN nodes vn ON vn.node_name=v.node_name "
+        "WHERE v.kind='artifact' AND v.digest=child.artifact_hash AND vn.last_heartbeat>?)",
+        (parent_run_id, now - grace, now - grace, now - grace)).fetchall()
     for row, column, child in lost:
         connection.execute("UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? AND row=? "
                            "AND column=? AND child_run_id=?", (parent_run_id, row, column, child))
     return len(lost)
+
+
+def restore_cleared_tiles(connection: sqlite3.Connection, parent_run_id: str) -> int:
+    """Point cleared tiles back at their finished child when its artifact still has a copy.
+
+    Repairs the damage described in recompute_lost_tiles: the child runs completed, their blobs
+    are on disk and registered again, but the tile row was cleared. Only tiles still without a
+    child are touched; the newest finished child with a replica (or one awaiting revalidation)
+    wins. Returns how many tiles were restored. Run inside a write transaction.
+    """
+
+    empty = {(row[0], row[1]) for row in connection.execute(
+        "SELECT row,column FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NULL",
+        (parent_run_id,))}
+    if not empty:
+        return 0
+    best: dict[tuple[int, int], tuple[float, str]] = {}
+    for child in connection.execute(
+            "SELECT c.run_id,c.finished,c.specification FROM runs c WHERE c.parent_run_id=? AND c.state='complete' "
+            "AND c.artifact_hash IS NOT NULL AND (EXISTS (SELECT 1 FROM replicas r WHERE r.artifact_hash=c.artifact_hash) "
+            "OR EXISTS (SELECT 1 FROM node_revalidation v WHERE v.kind='artifact' AND v.digest=c.artifact_hash))",
+            (parent_run_id,)):
+        arguments = json.loads(child["specification"]).get("arguments", {})
+        key = (arguments.get("row"), arguments.get("column"))
+        if key in empty and (key not in best or (child["finished"] or 0) > best[key][0]):
+            best[key] = (child["finished"] or 0, child["run_id"])
+    for (row, column), (_, run_id) in best.items():
+        connection.execute("UPDATE distributed_tiles SET child_run_id=? WHERE parent_run_id=? AND row=? AND column=? "
+                           "AND child_run_id IS NULL", (run_id, parent_run_id, row, column))
+    return len(best)
 
 
 def durable_among(connection: sqlite3.Connection, parent_run_id: str, coordinates, now: float,
