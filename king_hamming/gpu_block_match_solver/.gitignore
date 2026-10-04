@@ -1,2 +1,4 @@
 __pycache__/
 kh_gpu_block_kernel
+tests/field_prefix_unit
+tests/bench_field

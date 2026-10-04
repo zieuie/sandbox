@@ -243,6 +243,27 @@ class GPUBlockTests(unittest.TestCase):
         self.assertIsNone(gpu_policy.plan(dp, {}, [self.node("small", SMALL, ram=64 * MIB)]))
         self.assertIsNone(gpu_policy.plan(dp, {}, [{**self.node("small", SMALL), "state": "unavailable"}]))
 
+    def test_fields_above_2_32_go_to_block_mode_on_a_host_with_the_ram(self) -> None:
+        from campaigns import gpu_policy
+        from gpu_block_match_solver.adapter import GPUBlockMatchingAdapter, host_bytes
+        from gpu_block_match_solver.submit import specification
+        from gpu_match_solver.adapter import GPUMatchingAdapter
+        from matching_solver.artifacts import load_dp
+        big = ROOT.parent / "examples" / "13_9.khdp"   # the campaign's 13^9 DP result: q = 2.47 * 2^32
+        dp, _ = load_dp(big)
+        self.assertGreater(dp["q"], 2**32)
+        rtx = {"index": 0, "name": "RTX 3060", "arch": 86, "total_bytes": 6 * 1024**3}
+        plan = gpu_policy.plan(dp, {}, [self.node("merlin", rtx, ram=40 * 1024**3), self.node("small", rtx)])
+        self.assertEqual((plan["program"], plan["hosts"]), ("match_gpu_blocks", ["merlin"]))
+        # Rows of the used cells only (a_max = 5 of 13) and choices in a scratch file: under 20 GiB.
+        self.assertLess(host_bytes(dp, 4), 20 * 1024**3)
+        self.assertGreater(host_bytes(dp, 4, choice_file=False), 35 * 1024**3)
+        self.assertIn("of host RAM", gpu_policy.blocker(dp, {}, [self.node("small", rtx)]))
+        job = specification(big, "2,7,0,0,0,0,0,0,0,1", threads=4, gpu_memory_bytes=plan["gpu_memory_bytes"])
+        GPUBlockMatchingAdapter().validate(job)
+        with self.assertRaisesRegex(ValueError, "uint32 labels"):
+            GPUMatchingAdapter().validate({**job, "program": "match_gpu"})
+
     def test_plan_offers_every_host_with_the_memory_and_sizes_the_lease_to_the_smallest(self) -> None:
         from campaigns import gpu_policy
         from matching_solver.artifacts import load_dp

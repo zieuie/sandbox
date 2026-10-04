@@ -67,14 +67,16 @@ class MatchingAdapter(SolverAdapter):
     """Run one pinned field attempt and retain either a matching or certified Hall obstruction."""
 
     programs = ("match", "match_distributed")
+    max_q = 2**32 - 1   # labels are 32-bit in the CPU and single-GPU kernels; block GPU matching goes further
 
     def validate(self, specification, internal=False):
         """Reject malformed input, nonprimitive fields and resource controls."""
         super().validate(specification, internal)
         dp, _, _ = decode_input(specification)
         arguments = specification["arguments"]
-        if dp["q"] > 2**32 - 1:
-            raise ValueError("matching requires a field with at most uint32 labels")
+        if dp["q"] > self.max_q:
+            raise ValueError("matching requires a field with at most uint32 labels" if self.max_q == 2**32 - 1
+                             else f"this matcher requires q <= {self.max_q}")
         polynomial = arguments.get("poly")
         if not isinstance(polynomial, list) or any(type(value) is not int for value in polynomial) or not primitive(dp["p"], dp["r"], polynomial):
             raise ValueError("matching polynomial must be primitive with generator X")

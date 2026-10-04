@@ -31,13 +31,14 @@ class GPUMatchingAdapter(MatchingAdapter):
     """Run one pinned field attempt on one fenced GPU; seconds, so no checkpoints."""
 
     programs = ("match_gpu",)
+    max_requests = 2**32 - 2   # request indices are 32-bit in src/main.c
 
     def validate(self, specification, internal=False):
         """Reuse pinned-field validation; add the kernel's 16-bit choice bound."""
         super().validate(specification, internal)
         dp, _, _ = decode_input(specification)
-        if dp["f"] > 65535 or request_count(dp) >= 2**32 - 1:
-            raise ValueError("GPU matching requires F <= 65535 and fewer than 2^32-1 requests")
+        if dp["f"] > 65535 or request_count(dp) > self.max_requests:
+            raise ValueError(f"GPU matching requires F <= 65535 and at most {self.max_requests} requests")
 
     def required_nodes(self, specification):
         return 1

@@ -1,6 +1,9 @@
 # Matching fields larger than one GPU: block decomposition
 
-Design, 2026-10-02. Stage 1 is implemented (see the solver's README for results). It is a separate solver, `gpu_block_match_solver/`
+Design, 2026-10-02. Stage 1 is implemented (see the solver's README for results). Stage 2's
+prefix-only builder was implemented on 2026-10-04 together with 64-bit labels, for 13^9
+(see [MATCHING_13_9.md](MATCHING_13_9.md)); it lives in `gpu_block_match_solver/src/field_prefix.c`,
+not in `kh_build_field`. It is a separate solver, `gpu_block_match_solver/`
 ([README](../gpu_block_match_solver/README.md)), built beside `match_gpu`
 ([gpu_match_solver](../gpu_match_solver/README.md)) for fields that are larger than
 any single GPU's memory. Fields that fit one GPU keep using `match_gpu`, which can

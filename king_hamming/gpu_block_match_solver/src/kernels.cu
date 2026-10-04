@@ -9,10 +9,11 @@ typedef unsigned short u16;
 #define RESERVED 0xFFFFFFFEu
 #define FULL 0xFFFFFFFFu
 
-// Same map as kh_neighbor(): zero fixed, nonzero labels multiplied by X^-coset.
-__device__ __forceinline__ u32 shift(u32 label, u32 coset, u32 qm1) {
+// Same map as kh_neighbor(): zero fixed, nonzero labels multiplied by X^-coset. 64-bit, as
+// labels and rights reach q - 1, which may exceed 2^32.
+__device__ __forceinline__ u64 shift(u64 label, u32 coset, u64 qm1) {
     if (label == 0) return 0;
-    u32 x = label - 1;
+    u64 x = label - 1;
     x = x >= coset ? x - coset : x + (qm1 - coset);
     return x + 1;
 }
@@ -74,21 +75,42 @@ extern "C" __global__ void augment(u32 nroots, const u32 *roots, u32 *left, u16 
 #define NOCHOICE 0xFFFFu
 
 struct bgraph_t {
-    const u32 *rows;     // row slot s occupies rows[s*f .. s*f+f), ascending labels
+    const u32 *rows;     // row slot s occupies rows[s*f .. s*f+f): low words of ascending labels
+    const u32 *bp;       // row slot s: bp[s*nbp + h-1] = first index whose label is >= h << lshift
     const u32 *lfirst;   // first local own index of each clipped DP block
     const u32 *lcoset;   // first coset of each clipped DP block
     const u32 *lwidth;   // clipped cells per coset of each clipped DP block
     const u32 *icoset;   // imported request i: coset
     const u32 *islot;    // imported request i: row slot
+    u64 qm1;
+    u64 lo;              // this block's right window [lo, hi); hi - lo < 2^32
+    u64 hi;
     u32 nblocks;
     u32 f;
-    u32 qm1;
     u32 nown;            // own requests, local indices [0, nown); imports follow
     u32 n;               // own + imported
-    u32 lo;
-    u32 hi;
-    u32 pad;
+    u32 nbp;             // breakpoints per row: 0 while q <= 2^lshift
+    u32 lshift;
 };
+
+// One stored row: its low words and breakpoints, so a full label can be rebuilt.
+struct row_t {
+    const u32 *low;
+    const u32 *bp;
+    u32 nbp;
+    u32 lshift;
+};
+
+__device__ __forceinline__ row_t row_of(const bgraph_t &g, u32 slot) {
+    row_t row = {g.rows + (u64)slot * g.f, g.bp + (u64)slot * g.nbp, g.nbp, g.lshift};
+    return row;
+}
+
+__device__ __forceinline__ u64 label(const row_t &row, u32 k) {
+    u64 high = 0;
+    for (u32 i = 0; i < row.nbp; ++i) high += k >= row.bp[i];
+    return (u64)row.low[k] + (high << row.lshift);
+}
 
 struct win_t {
     u32 start[3];
@@ -114,26 +136,26 @@ __device__ __forceinline__ void request(const bgraph_t &g, u32 u, u32 *coset, u3
 }
 
 // Number of row entries strictly below x (the row is ascending).
-__device__ __forceinline__ u32 lower_bound(const u32 *row, u32 f, u64 x) {
+__device__ __forceinline__ u32 lower_bound(const row_t &row, u32 f, u64 x) {
     u32 lo = 0, hi = f;
     while (lo < hi) {
         u32 m = (lo + hi) >> 1;
-        if ((u64)row[m] < x) lo = m + 1; else hi = m;
+        if (label(row, m) < x) lo = m + 1; else hi = m;
     }
     return lo;
 }
 
 // Row index ranges whose neighbor lies in [lo, hi): zero labels (if the window holds right 0),
 // then the circular label interval that maps onto the nonzero rights of the window.
-__device__ __forceinline__ void window(const u32 *row, u32 f, u32 coset, u32 lo, u32 hi, u32 qm1, win_t *w) {
+__device__ __forceinline__ void window(const row_t &row, u32 f, u32 coset, u64 lo, u64 hi, u64 qm1, win_t *w) {
     w->start[0] = w->start[1] = w->start[2] = 0;
     w->len[0] = w->len[1] = w->len[2] = 0;
     if (lo == 0) w->len[0] = lower_bound(row, f, 1);
-    u32 tlo = lo ? lo - 1 : 0;
-    u32 thi = hi ? hi - 1 : 0;
+    u64 tlo = lo ? lo - 1 : 0;
+    u64 thi = hi ? hi - 1 : 0;
     u64 count = thi > tlo ? thi - tlo : 0;
     if (count) {
-        u64 s = ((u64)tlo + coset) % qm1;          // labels s+1 .. s+count, wrapping past qm1 to 1
+        u64 s = (tlo + coset) % qm1;               // labels s+1 .. s+count, wrapping past qm1 to 1
         if (s + count <= qm1) {
             u32 a = lower_bound(row, f, s + 1), b = lower_bound(row, f, s + count + 1);
             w->start[1] = a; w->len[1] = b - a;
@@ -165,7 +187,7 @@ extern "C" __global__ void greedy_w(bgraph_t g, u32 *left, u16 *choice, u32 *rig
     if (left[u] != FREE) return;
     u32 coset, slot;
     request(g, u, &coset, &slot);
-    const u32 *row = g.rows + (u64)slot * g.f;
+    row_t row = row_of(g, slot);
     win_t w;
     window(row, g.f, coset, g.lo, g.hi, g.qm1, &w);
     if (w.total == 0) return;
@@ -179,8 +201,8 @@ extern "C" __global__ void greedy_w(bgraph_t g, u32 *left, u16 *choice, u32 *rig
             u32 jj = j + start;
             if (jj >= w.total) jj -= w.total;
             k = window_k(w, jj);
-            v = shift(row[k], coset, g.qm1);
-            free = right[v - g.lo] == FREE;
+            v = (u32)(shift(label(row, k), coset, g.qm1) - g.lo);   // local right index
+            free = right[v] == FREE;
         }
         scanned += min(32u, w.total - base);
         unsigned m = __ballot_sync(FULL, free);
@@ -189,11 +211,11 @@ extern "C" __global__ void greedy_w(bgraph_t g, u32 *left, u16 *choice, u32 *rig
             u32 vv = __shfl_sync(FULL, v, l);
             u32 kl = __shfl_sync(FULL, k, l);
             u32 got = 0;
-            if (lane == 0) got = atomicCAS(&right[vv - g.lo], FREE, u);
+            if (lane == 0) got = atomicCAS(&right[vv], FREE, u);
             got = __shfl_sync(FULL, got, 0);
             if (got == FREE) {
                 if (lane == 0) {
-                    left[u] = vv - g.lo;
+                    left[u] = vv;
                     choice[u] = (u16)kl;
                     atomicAdd(matched, 1u);
                     atomicAdd(scans, (u64)scanned);
@@ -220,7 +242,7 @@ extern "C" __global__ void expand_w(bgraph_t g, u32 nfront, const u32 *front, u3
     if (done[r]) return;
     u32 coset, slot;
     request(g, u, &coset, &slot);
-    const u32 *row = g.rows + (u64)slot * g.f;
+    row_t row = row_of(g, slot);
     win_t win;
     window(row, g.f, coset, g.lo, g.hi, g.qm1, &win);
     u32 scanned = 0;
@@ -233,7 +255,7 @@ extern "C" __global__ void expand_w(bgraph_t g, u32 nfront, const u32 *front, u3
         u32 v = 0, k = 0, w = RESERVED;
         if (j < win.total) {
             k = window_k(win, j);
-            v = shift(row[k], coset, g.qm1) - g.lo;
+            v = (u32)(shift(label(row, k), coset, g.qm1) - g.lo);
             w = right[v];
         }
         scanned += min(32u, win.total - base);
@@ -296,13 +318,13 @@ extern "C" __global__ void restore_w(bgraph_t g, const u16 *choice, u32 *left, u
     }
     u32 coset, slot;
     request(g, u, &coset, &slot);
-    u32 v = shift(g.rows[(u64)slot * g.f + c], coset, g.qm1);
+    u64 v = shift(label(row_of(g, slot), c), coset, g.qm1);
     if (v < g.lo || v >= g.hi) {
         left[u] = INACTIVE;
         if (!own) atomicAdd(bad, 1u);
         return;
     }
-    left[u] = v - g.lo;
+    left[u] = (u32)(v - g.lo);
     if (atomicExch(&right[v - g.lo], u) != FREE) atomicAdd(bad, 1u);
 }
 
@@ -328,6 +350,6 @@ extern "C" __global__ void check_w(bgraph_t g, const u32 *left, const u16 *choic
     request(g, u, &coset, &slot);
     u32 k = choice[u];
     if (k >= g.f) { atomicAdd(bad, 1u); return; }
-    u32 v = shift(g.rows[(u64)slot * g.f + k], coset, g.qm1);
+    u64 v = shift(label(row_of(g, slot), k), coset, g.qm1);
     if (v < g.lo || v >= g.hi || v - g.lo != vl || right[vl] != u) atomicAdd(bad, 1u);
 }

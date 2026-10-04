@@ -2,11 +2,14 @@
 
 // Exact GPU matching kernel with the same input/payload contract as kh_match_kernel.
 
+#include "field_prefix.h"
 #include "kh_cuda.h"
 #include "kh_field.h"
 #include "kh_resource.h"
 
 #include <fcntl.h>
+#include <pthread.h>
+#include <sys/mman.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,13 +29,18 @@ static void help(void) {
          "Usage: kh_gpu_block_kernel P R BLOCKS.txt PAYLOAD.bin [--poly C0,...,Cr]\n"
          "       [--start N] [--threads N] [--max-bytes N] [--device N] [--salt N]\n"
          "       [--block-device-bytes N] [--block-requests N] [--max-rounds N] [--max-residual N]\n"
+         "       [--choice-file PATH]\n"
          "Example: printf '1\\n1 1\\n' > /tmp/blocks.txt\n"
          "         ./kh_gpu_block_kernel 3 3 /tmp/blocks.txt /tmp/choices.bin\n"
          "Blocks, payload and metadata JSON match kh_gpu_block_kernel. Exit 0: full matching; 4: ended\n"
          "incomplete (never an obstruction); 1: error. --block-device-bytes sets the per-block device\n"
          "budget (default: free device memory minus 256 MiB); --block-requests caps requests per block\n"
-         "(tests). --threads only affects CPU field construction.\n"
-         "--test-cells FILE (tests only) replaces the field with q raw u32 labels, ascending per cell.");
+         "(tests). --threads only affects CPU field construction. Fields up to q < 2^36: only the cell\n"
+         "rows that requests use are built (4 bytes per label). --choice-file keeps the 2-byte-per-request\n"
+         "choices in a scratch file (page cache) instead of process memory; it must not exist and is\n"
+         "removed on exit.\n"
+         "--test-cells FILE (tests only) replaces the field with q raw u32 labels, ascending per cell.\n"
+         "--label-split-bits B (tests only, default 32) stores labels as B low bits plus breakpoints.");
 }
 
 static double now(void) {
@@ -59,7 +67,7 @@ static bool polynomial_parse(const char *text, const kh_parameters_t *parameters
 
 // Same validation as kh_match_kernel's blocks_read(), producing device-friendly arrays.
 static bool blocks_read(const char *path, const kh_parameters_t *parameters, uint64_t **first,
-                        uint32_t **coset, uint32_t **width, uint32_t **copies_out, uint32_t *count, uint32_t *n) {
+                        uint32_t **coset, uint32_t **width, uint32_t **copies_out, uint32_t *count, uint64_t *n) {
     FILE *file = fopen(path, "r");
     uint64_t blocks = 0;
     if (file == NULL) {
@@ -90,42 +98,16 @@ static bool blocks_read(const char *path, const kh_parameters_t *parameters, uin
         cosets += copies;
     }
     char trailing;
-    if (valid && (cosets + 1 > parameters->q - 1 || fscanf(file, " %c", &trailing) == 1 || ferror(file) ||
-                  stripes * parameters->f > UINT32_MAX - 1)) {
+    // Cosets stay 32-bit (they are X-exponent offsets, and there are at most n/F of them); the
+    // request count is 64-bit but at most q.
+    if (valid && (cosets + 1 > parameters->q - 1 || cosets >= UINT32_MAX || fscanf(file, " %c", &trailing) == 1 ||
+                  ferror(file) || stripes * parameters->f > parameters->q)) {
         valid = false;
     }
     fclose(file);
     *count = (uint32_t)blocks;
-    *n = (uint32_t)(stripes * parameters->f);
+    *n = stripes * parameters->f;
     return valid;
-}
-
-// Stream packed little-bit-first values exactly like kh_match_kernel's packed_write().
-typedef struct {
-    FILE *file;
-    uint64_t accumulator;
-    uint32_t available;
-    bool ok;
-} packer_t;
-
-static void pack(packer_t *packer, uint32_t value, uint32_t bits) {
-    packer->accumulator |= (uint64_t)value << packer->available;
-    packer->available += bits;
-    while (packer->available >= 8) {
-        if (fputc((int)(packer->accumulator & 255), packer->file) == EOF) {
-            packer->ok = false;
-        }
-        packer->accumulator >>= 8;
-        packer->available -= 8;
-    }
-}
-
-static void pack_flush(packer_t *packer) {
-    if (packer->available != 0 && fputc((int)packer->accumulator, packer->file) == EOF) {
-        packer->ok = false;
-    }
-    packer->accumulator = 0;
-    packer->available = 0;
 }
 
 typedef struct {
@@ -170,9 +152,13 @@ static uint32_t read_u32(gpu_t *gpu, kh_dptr_t pointer) {
     return value;
 }
 
-static void progress(uint32_t done, uint32_t total, const char *phase) {
-    printf("{\"done\":%u,\"total\":%u,\"checkpoint_done\":0,\"phase\":\"%s\",\"units\":\"requests\"}\n",
-           done, total, phase);
+// One progress line: matched requests overall, plus where the current stage is (field, blocks,
+// exchange, write) so the bridge and dashboard can show every stage of a long run.
+static void progress(uint64_t done, uint64_t total, const char *phase, const char *stage, uint64_t stage_done,
+                     uint64_t stage_total) {
+    printf("{\"done\":%" PRIu64 ",\"total\":%" PRIu64 ",\"checkpoint_done\":0,\"phase\":\"%s\",\"units\":\"requests\","
+           "\"stage\":\"%s\",\"stage_done\":%" PRIu64 ",\"stage_total\":%" PRIu64 "}\n",
+           done, total, phase, stage, stage_done, stage_total);
     fflush(stdout);
 }
 
@@ -184,12 +170,24 @@ static void progress(uint32_t done, uint32_t total, const char *phase) {
 // ---------------------------------------------------------------------------------------------
 #define EXTRA_MAX 256
 #define NOCHOICE 0xFFFFu
+
+// Host choices are stored XOR NOCHOICE, so zero means unmatched: a fresh scratch file (or
+// calloc) needs no 2n-byte initializing write. A 20 GB fill once flooded merlin's disk with
+// dirty pages and stalled the leader's fsyncs for over a minute.
+static inline uint16_t choice_get(const uint16_t *choices, uint64_t index) {
+    return (uint16_t)(choices[index] ^ NOCHOICE);
+}
+
+static inline void choice_set(uint16_t *choices, uint64_t index, uint16_t value) {
+    choices[index] = (uint16_t)(value ^ NOCHOICE);
+}
 #define MAX_ROUNDS_LIMIT 4096
 
-// Mirrors bgraph_t in kernels.cu.
+// Mirrors bgraph_t in kernels.cu (same member order and widths).
 typedef struct {
-    kh_dptr_t rows, lfirst, lcoset, lwidth, icoset, islot;
-    uint32_t nblocks, f, qm1, nown, n, lo, hi, pad;
+    kh_dptr_t rows, bp, lfirst, lcoset, lwidth, icoset, islot;
+    uint64_t qm1, lo, hi;
+    uint32_t nblocks, f, nown, n, nbp, lshift;
 } device_bgraph_t;
 
 typedef struct {
@@ -216,8 +214,11 @@ typedef struct {
     uint64_t q, f, n;
     uint32_t nblocks_dp, *bcoset, *bwidth, *copies;
     uint64_t *bfirst;
-    const uint32_t *cells;
+    const fp_rows_t *rows;   // cell rows 0 .. amax*F-1
+    uint16_t *choices;       // n choices (choice_get/choice_set), block by block; each lchoice points into it
+    bool choices_mapped;     // in a scratch file: flushed after each block
     uint32_t salt;
+    uint32_t threads;        // CPU threads for the field build and the payload write
     block_t *blocks;
     uint32_t nblock;
     uint64_t phases, scans;
@@ -248,6 +249,14 @@ static bool slot_of(const block_t *blk, uint32_t cell, uint32_t *slot) {
     return false;
 }
 
+// Write a block's choices in the scratch file through to disk, so dirty pages stay bounded.
+static void flush_choices(const bctx_t *x, uint16_t *choices, uint64_t count) {
+    if (!x->choices_mapped || count == 0) return;
+    uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    uintptr_t start = (uintptr_t)choices & ~(page - 1);
+    msync((void *)start, (uintptr_t)(choices + count) - start, MS_SYNC);
+}
+
 // One matching of one block on the device, with the imports it currently holds plus `fresh`.
 static bool run_block(bctx_t *x, uint32_t b, const member_t *fresh, size_t nfresh, bool first) {
     gpu_t *gpu = x->gpu;
@@ -266,7 +275,7 @@ static bool run_block(bctx_t *x, uint32_t b, const member_t *fresh, size_t nfres
         free(icoset); free(islot); free(hchoice);
         return false;
     }
-    memcpy(hchoice, blk->lchoice, (size_t)nown * 2);
+    for (uint32_t index = 0; index < nown; ++index) hchoice[index] = choice_get(blk->lchoice, index);
     for (size_t index = 0; index < nimp; ++index) {
         member_t m = index < blk->nimp ? blk->imp[index] : fresh[index - blk->nimp];
         const block_t *home = &x->blocks[m.home];
@@ -276,13 +285,15 @@ static bool run_block(bctx_t *x, uint32_t b, const member_t *fresh, size_t nfres
             gpu->error = "imported request has no uploaded row";
             break;
         }
-        hchoice[nown + index] = home->lchoice[m.li];
+        hchoice[nown + index] = choice_get(home->lchoice, m.li);
     }
     uint32_t slots = cells + blk->nextra;
+    uint32_t nbp = x->rows->nbp;
     device_bgraph_t g = {0};
-    g.nblocks = blk->nseg; g.f = f; g.qm1 = (uint32_t)(x->q - 1); g.nown = nown; g.n = n;
-    g.lo = (uint32_t)blk->rlo; g.hi = (uint32_t)blk->rhi;
+    g.nblocks = blk->nseg; g.f = f; g.qm1 = x->q - 1; g.nown = nown; g.n = n;
+    g.lo = blk->rlo; g.hi = blk->rhi; g.nbp = nbp; g.lshift = x->rows->shift;
     g.rows = gpu_alloc(gpu, (uint64_t)slots * f * 4);
+    g.bp = gpu_alloc(gpu, (uint64_t)slots * nbp * 4);
     g.lfirst = gpu_alloc(gpu, blk->nseg * 4);
     g.lcoset = gpu_alloc(gpu, blk->nseg * 4);
     g.lwidth = gpu_alloc(gpu, blk->nseg * 4);
@@ -299,10 +310,20 @@ static bool run_block(bctx_t *x, uint32_t b, const member_t *fresh, size_t nfres
     kh_dptr_t counters = gpu_alloc(gpu, 64);
     kh_dptr_t scans = counters + 32;
     if (gpu->error == NULL) {
-        gpu_ok(gpu, gpu->cuda.cuMemcpyHtoD(g.rows, x->cells + (uint64_t)blk->c_lo * f, (uint64_t)cells * f * 4), "upload rows");
+        const fp_rows_t *rows = x->rows;
+        gpu_ok(gpu, gpu->cuda.cuMemcpyHtoD(g.rows, rows->rows + (uint64_t)blk->c_lo * f, (uint64_t)cells * f * 4), "upload rows");
+        if (nbp != 0) {
+            gpu_ok(gpu, gpu->cuda.cuMemcpyHtoD(g.bp, rows->bp + (uint64_t)blk->c_lo * nbp, (uint64_t)cells * nbp * 4),
+                   "upload breakpoints");
+        }
         for (uint32_t index = 0; gpu->error == NULL && index < blk->nextra; ++index) {
             gpu_ok(gpu, gpu->cuda.cuMemcpyHtoD(g.rows + ((uint64_t)cells + index) * f * 4,
-                                               x->cells + (uint64_t)blk->extra[index] * f, (uint64_t)f * 4), "upload rows");
+                                               rows->rows + (uint64_t)blk->extra[index] * f, (uint64_t)f * 4), "upload rows");
+            if (nbp != 0) {
+                gpu_ok(gpu, gpu->cuda.cuMemcpyHtoD(g.bp + ((uint64_t)cells + index) * nbp * 4,
+                                                   rows->bp + (uint64_t)blk->extra[index] * nbp, (uint64_t)nbp * 4),
+                       "upload breakpoints");
+            }
         }
         gpu_ok(gpu, gpu->cuda.cuMemcpyHtoD(g.lfirst, blk->lfirst, blk->nseg * 4), "upload segments");
         gpu_ok(gpu, gpu->cuda.cuMemcpyHtoD(g.lcoset, blk->lcoset, blk->nseg * 4), "upload segments");
@@ -408,7 +429,8 @@ static bool run_block(bctx_t *x, uint32_t b, const member_t *fresh, size_t nfres
         free(hchoice);
         return false;
     }
-    memcpy(blk->lchoice, hchoice, (size_t)nown * 2);
+    for (uint32_t index = 0; index < nown; ++index) choice_set(blk->lchoice, index, hchoice[index]);
+    flush_choices(x, blk->lchoice, nown);
     member_t *kept = malloc((nimp + 1) * sizeof *kept);
     if (kept == NULL) {
         free(hchoice);
@@ -418,7 +440,7 @@ static bool run_block(bctx_t *x, uint32_t b, const member_t *fresh, size_t nfres
     size_t count = 0;
     for (size_t index = 0; index < nimp; ++index) {
         member_t m = index < blk->nimp ? blk->imp[index] : fresh[index - blk->nimp];
-        x->blocks[m.home].lchoice[m.li] = hchoice[nown + index];
+        choice_set(x->blocks[m.home].lchoice, m.li, hchoice[nown + index]);
         if (hchoice[nown + index] != NOCHOICE) {
             kept[count++] = m;
         }
@@ -431,16 +453,17 @@ static bool run_block(bctx_t *x, uint32_t b, const member_t *fresh, size_t nfres
     return true;
 }
 
-static uint32_t host_shift(uint32_t label, uint32_t coset, uint32_t qm1) {
+static uint64_t host_shift(uint64_t label, uint32_t coset, uint64_t qm1) {
     if (label == 0) return 0;
-    uint32_t v = label - 1;
+    uint64_t v = label - 1;
     v = v >= coset ? v - coset : v + (qm1 - coset);
     return v + 1;
 }
 
-static uint64_t block_cost(uint64_t f, uint64_t cells, uint64_t m) {
+// Device bytes for a block; mirrors block_cost() in adapter.py.
+static uint64_t block_cost(uint64_t f, uint64_t nbp, uint64_t cells, uint64_t m) {
     uint64_t imports = m / 64 + 64;
-    return 4 * f * (cells + EXTRA_MAX) + 31 * (m + imports) + 4 * m + UINT64_C(16777216);
+    return 4 * (f + nbp) * (cells + EXTRA_MAX) + 31 * (m + imports) + 4 * m + UINT64_C(16777216);
 }
 
 // Cut the used cells into `count` blocks of nearly equal request counts (a tiny remainder block
@@ -461,7 +484,10 @@ static bool cut_blocks(bctx_t *x, uint32_t count, uint64_t budget, const uint64_
             m += per_cell[c];
             ++c;
         }
-        if (c == start || block_cost(f, c - start, m) > budget) return false;
+        // Local request indices are 32-bit, below the FREE/RESERVED/INACTIVE sentinels.
+        if (c == start || m + m / 64 + 64 >= UINT32_MAX - 3 || block_cost(f, x->rows->nbp, c - start, m) > budget) {
+            return false;
+        }
         bounds[k] = (uint32_t)c;
     }
     return c == ncells;
@@ -524,12 +550,11 @@ static bool layout_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, con
         blk->lfirst = calloc(x->nblocks_dp, 4);
         blk->lcoset = calloc(x->nblocks_dp, 4);
         blk->lwidth = calloc(x->nblocks_dp, 4);
-        blk->lchoice = malloc(blk->m * 2 + 4);
-        if (!blk->segj || !blk->lfirst || !blk->lcoset || !blk->lwidth || !blk->lchoice) {
+        blk->lchoice = x->choices + blk->rlo;   // blocks' requests are numbered like their windows
+        if (!blk->segj || !blk->lfirst || !blk->lcoset || !blk->lwidth) {
             *error = "host allocation failed";
             return false;
         }
-        memset(blk->lchoice, 0xFF, blk->m * 2);
         uint32_t local = 0;
         for (uint32_t j = 0; j < x->nblocks_dp; ++j) {
             if (start >= x->bwidth[j]) continue;
@@ -554,12 +579,69 @@ typedef struct {
     double seconds;
 } round_t;
 
+// One thread's share of the payload: canonical requests [first, last), packed little-bit-first
+// into buffer (first is a multiple of 8, so the range starts on a byte). Marks each request's
+// right in `used` and fails on a repeat.
+typedef struct {
+    const bctx_t *x;
+    const uint32_t *cell_block, *offj, *clipj;   // offj/clipj[j * blocks + b]: run j's segment in block b
+    uint32_t bits;
+    uint64_t first, last;
+    uint8_t *buffer;
+    uint8_t *used;
+    bool ok;
+} writer_t;
+
+static void *write_range(void *raw) {
+    writer_t *w = raw;
+    const bctx_t *x = w->x;
+    uint64_t f = x->f, qm1 = x->q - 1, pn = x->nblock;
+    uint32_t j = 0;
+    while (j + 1 < x->nblocks_dp && x->bfirst[j + 1] <= w->first) ++j;
+    uint64_t offset = w->first - x->bfirst[j];
+    uint32_t coset = (uint32_t)(offset / x->bwidth[j]), cell = (uint32_t)(offset % x->bwidth[j]);
+    uint64_t accumulator = 0, at = 0;
+    uint32_t available = 0;
+    for (uint64_t u = w->first; u < w->last; ++u) {
+        uint32_t b = w->cell_block[cell];
+        const block_t *blk = &x->blocks[b];
+        uint32_t li = w->offj[j * pn + b] + coset * w->clipj[j * pn + b] + (cell - blk->c_lo);
+        uint32_t k = choice_get(blk->lchoice, li);
+        if (k >= f) {
+            w->ok = false;
+            return NULL;
+        }
+        uint64_t v = host_shift(fp_label(x->rows, cell, k), x->bcoset[j] + coset, qm1);
+        uint8_t bit = (uint8_t)(1u << (v & 7));
+        if (__atomic_fetch_or(&w->used[v >> 3], bit, __ATOMIC_RELAXED) & bit) {
+            w->ok = false;
+            return NULL;
+        }
+        accumulator |= (uint64_t)k << available;
+        available += w->bits;
+        while (available >= 8) {
+            w->buffer[at++] = (uint8_t)accumulator;
+            accumulator >>= 8;
+            available -= 8;
+        }
+        if (++cell == x->bwidth[j]) {
+            cell = 0;
+            if (++coset == x->copies[j]) {
+                coset = 0;
+                ++j;
+            }
+        }
+    }
+    if (available != 0) w->buffer[at] = (uint8_t)accumulator;   // only the payload's very last byte
+    return NULL;
+}
+
 
 
 // Returns the process exit code: 0 full matching, 4 incomplete, 1 error.
 static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint64_t max_rounds,
                         uint64_t max_residual, const uint16_t *polynomial_in, const char *output,
-                        const kh_parameters_t *parameters, uint32_t candidate, double t0, double t_field,
+                        const kh_parameters_t *parameters, uint64_t candidate, double t0, double t_field,
                         const char *device_name) {
     (void)polynomial_in;
     gpu_t *gpu = x->gpu;
@@ -579,6 +661,7 @@ static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint6
         return 1;
     }
     trace[trace_count++] = x->n;
+    progress(0, x->n, "block 0/0", "blocks", 0, pn);
     for (uint32_t b = 0; b < pn; ++b) {
         char phase[64];
         snprintf(phase, sizeof phase, "block %u/%u", b + 1, pn);
@@ -589,7 +672,7 @@ static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint6
         uint64_t done = 0;
         for (uint32_t i = 0; i <= b; ++i) done += x->blocks[i].matched;
         trace[trace_count++] = x->n - done;
-        progress((uint32_t)done, (uint32_t)x->n, phase);
+        progress(done, x->n, phase, "blocks", b + 1, pn);
         fprintf(stderr, "block %u/%u cells=[%u,%u) requests=%" PRIu64 " matched=%" PRIu64 "\n",
                 b + 1, pn, x->blocks[b].c_lo, x->blocks[b].c_hi, x->blocks[b].m, x->blocks[b].matched);
     }
@@ -604,7 +687,7 @@ static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint6
     }
     for (uint32_t b = 0; b < pn; ++b) {
         for (uint64_t li = 0; li < x->blocks[b].m; ++li) {
-            if (x->blocks[b].lchoice[li] == NOCHOICE) {
+            if (choice_get(x->blocks[b].lchoice, li) == NOCHOICE) {
                 if (npending == residual) {
                     fprintf(stderr, "kh_gpu_block_kernel: matched count disagrees with free requests\n");
                     return 1;
@@ -666,7 +749,7 @@ static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint6
         }
         size_t kept = 0;
         for (size_t i = 0; i < npending; ++i) {
-            if (x->blocks[pending[i].home].lchoice[pending[i].li] == NOCHOICE) pending[kept++] = pending[i];
+            if (choice_get(x->blocks[pending[i].home].lchoice, pending[i].li) == NOCHOICE) pending[kept++] = pending[i];
         }
         total_matched = 0;
         for (uint32_t b = 0; b < pn; ++b) total_matched += x->blocks[b].matched;
@@ -679,7 +762,7 @@ static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint6
         fprintf(stderr, "round %" PRIu64 " imports=%" PRIu64 " residual=%zu seconds=%.3f\n",
                 round_count, assigned, kept, now() - tr);
         npending = kept;
-        progress((uint32_t)total_matched, (uint32_t)x->n, "exchange");
+        progress(total_matched, x->n, "exchange", "exchange", round_count - 1, max_rounds - 1);
     }
     residual = npending;
     double t_solve = now();
@@ -693,58 +776,72 @@ static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint6
     snprintf(device, sizeof device, "%s", device_name);
     kh_cuda_close(&gpu->cuda);
 
-    // Canonical-order walk: uniqueness of rights (host check) and the packed payload.
-    uint64_t q = x->q;
-    FILE *file = NULL;
-    packer_t packer = {NULL, 0, 0, true};
-    uint8_t *used = NULL;
-    bool success = true;
+    // Canonical-order walk: uniqueness of rights (host check) and the packed payload, in segments
+    // written in order; within a segment the threads pack byte-aligned ranges in parallel.
+    uint64_t q = x->q, n = x->n;
     if (complete) {
-        used = calloc((q + 7) / 8, 1);
-        int descriptor = open(output, O_WRONLY | O_CREAT | O_EXCL, 0600);
-        file = descriptor < 0 ? NULL : fdopen(descriptor, "wb");
-        packer.file = file;
-        packer.ok = file != NULL && used != NULL;
         uint32_t bits = 0;
         for (uint32_t value = f - 1; value != 0; value >>= 1) ++bits;
-        uint32_t *off = malloc(pn * 4), *clip = malloc(pn * 4);
+        uint8_t *used = calloc((q + 7) / 8, 1);
         uint32_t amax_cells = x->blocks[pn - 1].c_hi;
         uint32_t *cell_block = malloc((size_t)amax_cells * 4);
-        if (off == NULL || clip == NULL || cell_block == NULL) packer.ok = false;
-        for (uint32_t b = 0; packer.ok && b < pn; ++b) {
+        uint32_t *offj = calloc((uint64_t)x->nblocks_dp * pn, 4), *clipj = calloc((uint64_t)x->nblocks_dp * pn, 4);
+        uint64_t segment = UINT64_C(1) << 26;   // requests per segment; a multiple of 8
+        const char *segment_text = getenv("KH_BLOCK_WRITE_SEGMENT");   // tests only: many small segments
+        if (segment_text != NULL && kh_parse_u64(segment_text, &segment) && segment >= 8) segment &= ~UINT64_C(7);
+        else segment = UINT64_C(1) << 26;
+        uint32_t workers = x->threads ? x->threads : 1;
+        uint8_t *buffer = malloc((segment * bits + 7) / 8 + 8);
+        writer_t *writers = calloc(workers, sizeof *writers);
+        pthread_t *ids = calloc(workers, sizeof *ids);
+        int descriptor = open(output, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        FILE *file = descriptor < 0 ? NULL : fdopen(descriptor, "wb");
+        bool ok = used && cell_block && offj && clipj && buffer && writers && ids && file;
+        for (uint32_t b = 0; ok && b < pn; ++b) {
             for (uint32_t c = x->blocks[b].c_lo; c < x->blocks[b].c_hi; ++c) cell_block[c] = b;
-        }
-        for (uint32_t j = 0; packer.ok && j < x->nblocks_dp; ++j) {
-            for (uint32_t b = 0; b < pn; ++b) {
-                off[b] = clip[b] = 0;
-                for (uint32_t s = 0; s < x->blocks[b].nseg; ++s) {
-                    if (x->blocks[b].segj[s] == j) {
-                        off[b] = x->blocks[b].lfirst[s];
-                        clip[b] = x->blocks[b].lwidth[s];
-                    }
-                }
-            }
-            for (uint32_t coset = 0; packer.ok && coset < x->copies[j]; ++coset) {
-                for (uint32_t cell = 0; packer.ok && cell < x->bwidth[j]; ++cell) {
-                    const block_t *blk = &x->blocks[cell_block[cell]];
-                    uint32_t b = cell_block[cell];
-                    uint32_t li = off[b] + coset * clip[b] + (cell - blk->c_lo);
-                    uint32_t k = blk->lchoice[li];
-                    uint32_t v = k < f ? host_shift(x->cells[(uint64_t)cell * f + k], x->bcoset[j] + coset, (uint32_t)(q - 1)) : UINT32_MAX;
-                    if (k >= f || used[v >> 3] >> (v & 7) & 1) {
-                        fprintf(stderr, "kh_gpu_block_kernel: final matching is inconsistent\n");
-                        packer.ok = false;
-                        break;
-                    }
-                    used[v >> 3] |= (uint8_t)(1u << (v & 7));
-                    pack(&packer, k, bits);
-                }
+            for (uint32_t s = 0; s < x->blocks[b].nseg; ++s) {
+                offj[(uint64_t)x->blocks[b].segj[s] * pn + b] = x->blocks[b].lfirst[s];
+                clipj[(uint64_t)x->blocks[b].segj[s] * pn + b] = x->blocks[b].lwidth[s];
             }
         }
-        free(off); free(clip); free(cell_block);
-        pack_flush(&packer);
-        success = packer.ok && file != NULL && fflush(file) == 0 && fsync(fileno(file)) == 0;
+        progress(n, n, "writing", "write", 0, n);
+        double last_report = now();
+        for (uint64_t first = 0; ok && first < n; first += segment) {
+            uint64_t last = first + segment < n ? first + segment : n;
+            uint64_t share = ((last - first) / workers + 7) & ~UINT64_C(7);
+            if (share == 0) share = 8;
+            uint32_t started = 0;
+            for (uint32_t w = 0; w < workers; ++w) {
+                uint64_t from = first + (uint64_t)w * share;
+                if (from >= last) break;
+                writers[w] = (writer_t){x, cell_block, offj, clipj, bits, from, from + share < last ? from + share : last,
+                                        buffer + (from - first) * bits / 8, used, true};
+                if (pthread_create(&ids[w], NULL, write_range, &writers[w]) != 0) {
+                    ok = false;
+                    break;
+                }
+                ++started;
+            }
+            for (uint32_t w = 0; w < started; ++w) {
+                pthread_join(ids[w], NULL);
+                ok = ok && writers[w].ok;
+            }
+            if (!ok) {
+                fprintf(stderr, "kh_gpu_block_kernel: final matching is inconsistent\n");
+                break;
+            }
+            uint64_t bytes = ((last - first) * bits + 7) / 8;
+            // Write each segment through to disk (about 120 MB) rather than leaving gigabytes
+            // dirty for the leader's fsyncs on the same disk to wait behind.
+            ok = fwrite(buffer, 1, bytes, file) == bytes && fflush(file) == 0 && fdatasync(fileno(file)) == 0;
+            if (now() - last_report >= 5.0 || last == n) {
+                progress(n, n, "writing", "write", last, n);
+                last_report = now();
+            }
+        }
+        bool success = ok && fflush(file) == 0 && fsync(fileno(file)) == 0;
         if (file == NULL || fclose(file) != 0) success = false;
+        free(used); free(cell_block); free(offj); free(clipj); free(buffer); free(writers); free(ids);
         if (!success) {
             unlink(output);
             fprintf(stderr, "kh_gpu_block_kernel: payload write failed\n");
@@ -752,7 +849,7 @@ static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint6
         }
     }
     double t_end = now();
-    printf("{\"p\":%u,\"r\":%u,\"candidate\":%u,\"polynomial\":[", parameters->p, parameters->r, candidate);
+    printf("{\"p\":%u,\"r\":%u,\"candidate\":%" PRIu64 ",\"polynomial\":[", parameters->p, parameters->r, candidate);
     for (uint32_t index = 0; index <= parameters->r; ++index) {
         printf("%s%u", index == 0 ? "" : ",", polynomial[index]);
     }
@@ -773,8 +870,29 @@ static int solve_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, uint6
     printf("],\"seconds\":{\"setup\":0.0,\"field\":%.3f,\"blocks\":%.3f,\"exchange\":%.3f,\"output\":%.3f}}\n",
            t_field - t0, rounds[0].seconds, t_solve - t_start - rounds[0].seconds, t_end - t_solve);
     fflush(stdout);
-    free(used);
     return complete ? 0 : 4;
+}
+
+static void field_progress(uint64_t done, uint64_t total, void *context) {
+    progress(0, *(const uint64_t *)context, "field", "field", done, total);
+}
+
+// Choices for all n requests: a scratch file mapped shared (page cache can write it back under
+// memory pressure) or plain memory. The file is unlinked at once; the mapping keeps it alive.
+static uint16_t *choices_alloc(uint64_t n, const char *path) {
+    uint64_t bytes = n * 2 + 8;
+    if (path == NULL) {
+        return calloc(bytes, 1);   // zero is "unmatched" (choice_get)
+    }
+    int descriptor = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (descriptor < 0) return NULL;
+    void *mapped = MAP_FAILED;
+    if (ftruncate(descriptor, (off_t)bytes) == 0) {
+        mapped = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
+    }
+    unlink(path);
+    close(descriptor);
+    return mapped == MAP_FAILED ? NULL : mapped;   // a sparse file reads as zero: all unmatched
 }
 
 int main(int argc, char **argv) {
@@ -787,13 +905,13 @@ int main(int argc, char **argv) {
         return 1;
     }
     uint64_t p, r, threads = 1, start = 1, maximum = UINT64_C(2147483648), device = 0, salt = 0x9E3779B9u;
-    uint64_t block_budget = 0, block_requests = 0, max_rounds = 16, max_residual = UINT64_MAX;
-    const char *poly_text = NULL, *test_cells = NULL, *error = NULL;
+    uint64_t block_budget = 0, block_requests = 0, max_rounds = 16, max_residual = UINT64_MAX, split_bits = 32;
+    const char *poly_text = NULL, *test_cells = NULL, *choice_file = NULL, *error = NULL;
     kh_parameters_t parameters;
 
     if (!kh_parse_u64(argv[1], &p) || !kh_parse_u64(argv[2], &r) || p > UINT32_MAX || r > UINT32_MAX ||
-        !kh_parameters((uint32_t)p, (uint32_t)r, &parameters, &error)) {
-        fprintf(stderr, "kh_gpu_block_kernel: invalid dimensions\n");
+        !kh_parameters_dp64((uint32_t)p, (uint32_t)r, &parameters, &error) || parameters.q >= FP_MAX_Q) {
+        fprintf(stderr, "kh_gpu_block_kernel: invalid dimensions (q must be below 2^36)\n");
         return 1;
     }
     for (int index = 5; index < argc; ++index) {
@@ -810,6 +928,10 @@ int main(int argc, char **argv) {
             test_cells = argv[index];
             continue;
         }
+        if (!strcmp(option, "--choice-file")) {
+            choice_file = argv[index];
+            continue;
+        }
         uint64_t value;
         if (!kh_parse_u64(argv[index], &value)) {
             fprintf(stderr, "kh_gpu_block_kernel: invalid value for %s\n", option);
@@ -824,19 +946,22 @@ int main(int argc, char **argv) {
         else if (!strcmp(option, "--block-requests")) block_requests = value;
         else if (!strcmp(option, "--max-rounds")) max_rounds = value;
         else if (!strcmp(option, "--max-residual")) max_residual = value;
+        else if (!strcmp(option, "--label-split-bits")) split_bits = value;
         else {
             fprintf(stderr, "kh_gpu_block_kernel: unsupported option %s\n", option);
             return 1;
         }
     }
-    if (threads == 0 || threads > 1024 || start > UINT32_MAX || maximum == 0 || device > 64 ||
-        salt > UINT32_MAX || parameters.f > 65534 || max_rounds == 0 || max_rounds > MAX_ROUNDS_LIMIT) {
+    if (threads == 0 || threads > 1024 || start >= parameters.q || maximum == 0 || device > 64 ||
+        salt > UINT32_MAX || parameters.f > 65534 || max_rounds == 0 || max_rounds > MAX_ROUNDS_LIMIT ||
+        split_bits == 0 || split_bits > 32 || ((parameters.q - 1) >> split_bits) > FP_MAX_BREAKPOINTS ||
+        (test_cells != NULL && parameters.q > UINT32_MAX)) {
         fprintf(stderr, "kh_gpu_block_kernel: invalid resource controls, F above 65534, or --max-rounds outside 1..%d\n",
                 MAX_ROUNDS_LIMIT);
         return 1;
     }
-    uint64_t *bfirst = NULL;
-    uint32_t *bcoset = NULL, *bwidth = NULL, *bcopies = NULL, nblocks = 0, n = 0;
+    uint64_t *bfirst = NULL, n = 0;
+    uint32_t *bcoset = NULL, *bwidth = NULL, *bcopies = NULL, nblocks = 0;
     if (!blocks_read(argv[3], &parameters, &bfirst, &bcoset, &bwidth, &bcopies, &nblocks, &n)) {
         fprintf(stderr, "kh_gpu_block_kernel: invalid request blocks\n");
         return 1;
@@ -845,14 +970,11 @@ int main(int argc, char **argv) {
     if (max_residual == UINT64_MAX) {
         max_residual = n / 1000 + 16;
     }
-    // Full field table (4q), choices (2n), and the field builder's per-thread positions.
-    uint64_t host_required = 4 * q + 2 * (uint64_t)n + 4 * (uint64_t)parameters.budget * threads +
-                             UINT64_C(8388608) * threads + UINT64_C(67108864);
-    if (host_required > maximum) {
-        fprintf(stderr, "kh_gpu_block_kernel: requires at least %" PRIu64 " host bytes; limit=%" PRIu64 "\n",
-                host_required, maximum);
-        return 1;
+    uint64_t amax = 0;
+    for (uint32_t j = 0; j < nblocks; ++j) {
+        if (bwidth[j] / f > amax) amax = bwidth[j] / f;
     }
+    uint64_t limit = amax * f;   // requests use only cells 0 .. amax*F - 1
 
     double t0 = now();
     gpu_t gpu = {0};
@@ -865,6 +987,18 @@ int main(int argc, char **argv) {
     uint64_t budget = block_budget;
     if (budget == 0) {
         budget = free_bytes > UINT64_C(268435456) ? free_bytes - UINT64_C(268435456) : 0;
+    }
+    // Used cell rows, choices (unless in a scratch file), the final right-endpoint bitmap, per-block
+    // staging (at most budget/8: a block's requests cost the device at least 31 bytes each and the
+    // host about 2), and fixed overhead. Mirrors host_bytes() in adapter.py.
+    uint64_t host_required = fp_build_bytes(&parameters, (uint32_t)threads, limit, (uint32_t)split_bits) +
+                             (choice_file ? 0 : 2 * n) + (q + 7) / 8 + budget / 8 +
+                             UINT64_C(8388608) * threads + UINT64_C(268435456);
+    if (host_required > maximum) {
+        fprintf(stderr, "kh_gpu_block_kernel: requires at least %" PRIu64 " host bytes; limit=%" PRIu64 "\n",
+                host_required, maximum);
+        kh_cuda_close(&gpu.cuda);
+        return 1;
     }
     bctx_t bx = {0};
     bx.gpu = &gpu;
@@ -882,51 +1016,75 @@ int main(int argc, char **argv) {
     }
 
     uint16_t polynomial[32] = {0};
-    uint32_t candidate = 0;
+    uint64_t candidate = 0;
     if (poly_text != NULL) {
-        if (!polynomial_parse(poly_text, &parameters, polynomial) || !kh_primitive(&parameters, polynomial)) {
+        if (!polynomial_parse(poly_text, &parameters, polynomial) || !fp_primitive(&parameters, polynomial)) {
             fprintf(stderr, "kh_gpu_block_kernel: polynomial is not primitive with generator X\n");
             return 1;
         }
-    } else if (!kh_generate_polynomial(&parameters, (uint32_t)start, polynomial, &candidate)) {
+    } else if (!fp_generate(&parameters, start, polynomial, &candidate)) {
         fprintf(stderr, "kh_gpu_block_kernel: primitive polynomial candidates exhausted\n");
         return 1;
     }
-    kh_field_t field = {0};
+    fp_rows_t rows = {0};
+    progress(0, n, "field", "field", 0, 2 * (q - 1));
     if (test_cells != NULL) {
         // Test-only: q raw little-endian u32 labels replace the field (synthetic deficient graphs).
         FILE *cells = fopen(test_cells, "rb");
-        field.cells = malloc(q * 4);
-        bool loaded = cells != NULL && field.cells != NULL && fread(field.cells, 4, q, cells) == q;
+        uint32_t *table = malloc(q * 4);
+        bool loaded = cells != NULL && table != NULL && fread(table, 4, q, cells) == q;
         if (cells != NULL) {
             fclose(cells);
         }
         for (uint64_t index = 0; loaded && index < q; ++index) {
-            loaded = field.cells[index] < q;
+            loaded = table[index] < q;
         }
         if (!loaded) {
             fprintf(stderr, "kh_gpu_block_kernel: invalid --test-cells table\n");
             return 1;
         }
-    } else if (!kh_build_field(&parameters, polynomial, (uint32_t)threads, maximum, &field, &error)) {
+        // Store it the way fp_build_rows would: low words plus breakpoints, used cells only.
+        uint32_t nbp = (uint32_t)((q - 1) >> split_bits);
+        uint32_t mask = split_bits == 32 ? UINT32_MAX : (UINT32_C(1) << split_bits) - 1;
+        rows = (fp_rows_t){table, nbp ? malloc(limit * nbp * 4) : NULL, limit, (uint32_t)f, nbp, (uint32_t)split_bits};
+        for (uint64_t cell = 0; cell < limit; ++cell) {
+            for (uint32_t high = 1; high <= nbp; ++high) {
+                uint32_t k = 0;
+                while (k < f && table[cell * f + k] < ((uint64_t)high << split_bits)) ++k;
+                rows.bp[cell * nbp + high - 1] = k;
+            }
+        }
+        for (uint64_t index = 0; index < limit * f; ++index) {
+            table[index] &= mask;
+        }
+    } else if (!fp_build_rows(&parameters, polynomial, (uint32_t)threads, limit, (uint32_t)split_bits, field_progress, &n,
+                              &rows, &error)) {
         fprintf(stderr, "kh_gpu_block_kernel: %s\n", error);
         return 1;
     }
     double t_field = now();
 
     // Rows must ascend (real fields do by construction; --test-cells tables must be sorted too).
-    for (uint64_t cell = 0; cell < parameters.budget && cell * f < q; ++cell) {
-        for (uint64_t k = 1; k < f && cell * f + k < q; ++k) {
-            if (field.cells[cell * f + k - 1] > field.cells[cell * f + k]) {
+    for (uint64_t cell = 0; cell < limit; ++cell) {
+        for (uint32_t k = 1; k < f; ++k) {
+            if (fp_label(&rows, cell, k - 1) > fp_label(&rows, cell, k)) {
                 fprintf(stderr, "kh_gpu_block_kernel: needs ascending cell rows\n");
                 return 1;
             }
         }
     }
+    bx.choices = choices_alloc(n, choice_file);
+    bx.choices_mapped = choice_file != NULL;
+    if (bx.choices == NULL) {
+        fprintf(stderr, "kh_gpu_block_kernel: cannot allocate the choice array%s\n",
+                choice_file ? " (scratch file exists or cannot be mapped)" : "");
+        return 1;
+    }
     bx.q = q; bx.f = f; bx.n = n;
     bx.nblocks_dp = nblocks; bx.bcoset = bcoset; bx.bwidth = bwidth; bx.copies = bcopies; bx.bfirst = bfirst;
-    bx.cells = field.cells;
+    bx.rows = &rows;
     bx.salt = (uint32_t)salt;
+    bx.threads = (uint32_t)threads;
     char name[128];
     snprintf(name, sizeof name, "%s", gpu.cuda.name);
     int code = solve_blocks(&bx, budget, block_requests, max_rounds, max_residual, polynomial, argv[4],

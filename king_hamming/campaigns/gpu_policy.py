@@ -15,9 +15,10 @@ def plan(dp: dict, settings: dict, nodes: list[dict]) -> dict | None:
     """Return an admitted match_gpu plan, or None when no live GPU can hold this field."""
     if not settings.get("gpu_matching", DEFAULTS["gpu_matching"]):
         return None
-    if dp["f"] > 65535 or dp["q"] > 2**32 - 1 or request_count(dp) >= 2**32 - 1:
-        return None
     threads = int(settings.get("gpu_matching_threads", DEFAULTS["gpu_matching_threads"]))
+    if dp["f"] > 65535 or dp["q"] > 2**32 - 1 or request_count(dp) >= 2**32 - 1:
+        # Only block mode takes fields this large (64-bit labels, rows of used cells only).
+        return block_plan(dp, settings, nodes, threads)
     device, host = device_bytes(dp), host_bytes(dp, threads)
     hosts = []
     for node in nodes:
@@ -43,6 +44,8 @@ def block_plan(dp: dict, settings: dict, nodes: list[dict], threads: int) -> dic
     bigger GPU simply uses fewer blocks.
     """
     if not settings.get("gpu_block_matching", DEFAULTS["gpu_block_matching"]) or dp["f"] > 65534:
+        return None
+    if dp["q"] > block_adapter.MAX_Q or request_count(dp) > block_adapter.MAX_Q:
         return None
     host = block_adapter.host_bytes(dp, threads)
     hosts = []

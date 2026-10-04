@@ -58,7 +58,8 @@ def run(arguments: argparse.Namespace) -> int:
     try:
         command = [str(KERNEL), str(dp["p"]), str(dp["r"]), str(blocks), str(raw),
                    "--poly", arguments.poly, "--threads", str(arguments.threads),
-                   "--max-bytes", str(arguments.max_bytes), "--device", str(device)]
+                   "--max-bytes", str(arguments.max_bytes), "--device", str(device),
+                   "--choice-file", str(scratch)]
         if arguments.block_device_bytes:
             command += ["--block-device-bytes", str(arguments.block_device_bytes)]
         with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=sys.stderr, text=True) as child:
@@ -128,7 +129,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
+    scratch = arguments.output.with_name("choices.scratch")   # the kernel maps, then unlinks it
         raise SystemExit(main())
+    scratch.unlink(missing_ok=True)
     except (OSError, ValueError, RuntimeError) as error:
         print(f"gpu_block_match_solver/cluster_solver.py: {error}", file=sys.stderr)
         raise SystemExit(1)

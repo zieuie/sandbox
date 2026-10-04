@@ -239,9 +239,11 @@ def field_cells(p, r, polynomial):
 
 # Large full matchings: the native verifier checks every edge in a streaming pass.
 def native_memory(dp, q, f):
-    """Bytes the native verifier needs: cell rows of used prefixes, endpoint bitmap, and slack."""
+    """Bytes the native verifier needs: cell rows of used prefixes (and their breakpoints above
+    q = 2^32), endpoint bitmap, and slack."""
     amax = max(run["a"] for run in dp["runs"])
-    return 4 * f * amax * f + (q + 7) // 8 + 4 * dimensions(dp["p"], dp["r"])[2] + 64 * 1024 * 1024
+    breakpoints = 4 * amax * f * ((q - 1) >> 32)
+    return 4 * f * amax * f + breakpoints + (q + 7) // 8 + 4 * dimensions(dp["p"], dp["r"])[2] + 64 * 1024 * 1024
 
 
 def native_assigned(path, dp, polynomial, payload_start):

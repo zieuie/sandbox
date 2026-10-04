@@ -9,7 +9,8 @@
 // BLOCKS.txt: "<runs>\n" then one "<a> <copies>" line per run, as for kh_match_kernel.
 // FILE at OFFSET holds n packed choices of bit_length(F-1) bits, low bit first, then zero padding.
 // Prints {"assigned":N} and exits 0, or prints a reason to stderr and exits 1.
-// Memory: 4*F*amax*F bytes of cell rows, q/8 bytes of endpoints, and 4*budget bytes of counters.
+// Memory: 4*F*amax*F bytes of cell rows (32-bit low words; above q = 2^32, (q-1)>>32 breakpoints
+// per row give the high part), q/8 bytes of endpoints, and 4*budget bytes of counters.
 
 #include <inttypes.h>
 #include <stdbool.h>
@@ -44,7 +45,7 @@ int main(int argc, char **argv) {
     uint64_t q = 1;
     for (uint64_t i = 0; i < r; ++i) {
         q *= p;
-        if (q > UINT32_MAX) return fail("field too large");
+        if (q >= (UINT64_C(1) << 36)) return fail("field too large");
     }
     uint64_t f = 1;
     for (uint64_t i = 0; i < r / 2; ++i) f *= p;
@@ -75,12 +76,23 @@ int main(int argc, char **argv) {
     }
     fclose(blocks);
     uint64_t limit = amax * f;  // requests use only cells 0 .. amax*F-1
-    if (limit > budget || limit * f > UINT32_MAX) return fail("cell rows too large");
+    if (limit > budget) return fail("cell rows too large");
 
     // Field cells, as artifacts.field_cells: label 0 first, then labels 1..q-1 follow X^0, X^1, ...
+    // A row stores each label's low 32 bits; bp[cell*nbp + h-1] is the first index of that row
+    // whose label is at least h*2^32 (f while none is yet), so labels come back exactly.
+    // KH_VERIFY_SPLIT_BITS (tests only) splits lower, to exercise this on small fields.
+    uint64_t split = 32;
+    const char *split_text = getenv("KH_VERIFY_SPLIT_BITS");
+    if (split_text != NULL && (!parse_u64(split_text, &split) || split == 0 || split > 32)) return fail("invalid KH_VERIFY_SPLIT_BITS");
+    uint64_t nbp = (q - 1) >> split;
+    if (nbp > 4096) return fail("KH_VERIFY_SPLIT_BITS is too small for this field");
+    uint64_t low_mask = split == 32 ? UINT32_MAX : (UINT64_C(1) << split) - 1;
     uint32_t *rows = malloc(limit * f * 4);
+    uint32_t *bp = nbp ? malloc(limit * nbp * 4) : NULL;
     uint32_t *counts = calloc(budget, 4);
-    if (rows == NULL || counts == NULL) return fail("allocation failed");
+    if (rows == NULL || counts == NULL || (nbp && bp == NULL)) return fail("allocation failed");
+    for (uint64_t index = 0; index < limit * nbp; ++index) bp[index] = (uint32_t)f;
     uint64_t half = r / 2, top_place = q / p, current = 1, packed = 0;
     for (uint64_t j = 0, place = 1; j < r; ++j, place *= p) packed += poly[j] * place;
     for (uint64_t label = 0; label < q; ++label) {
@@ -96,7 +108,12 @@ int main(int argc, char **argv) {
         }
         uint64_t cell = (prefix % p) * f + suffix;
         if (counts[cell] >= f) return fail("invalid SUD bucket size");
-        if (cell < limit) rows[cell * f + counts[cell]] = (uint32_t)label;
+        if (cell < limit) {
+            rows[cell * f + counts[cell]] = (uint32_t)(label & low_mask);
+            for (uint64_t h = 1; h <= (label >> split); ++h) {
+                if (bp[cell * nbp + h - 1] == f) bp[cell * nbp + h - 1] = counts[cell];
+            }
+        }
         ++counts[cell];
         if (label != 0) {
             uint64_t top = current / top_place, rest = (current % top_place) * p;
@@ -144,7 +161,8 @@ int main(int argc, char **argv) {
                     accumulator >>= bits;
                     available -= bits;
                     if (choice >= f) return fail("neighbor index out of range");
-                    uint64_t label = rows[(prefix * f + suffix) * f + choice];
+                    uint64_t row = prefix * f + suffix, label = rows[row * f + choice];
+                    for (uint64_t h = 0; h < nbp; ++h) label += (uint64_t)(choice >= bp[row * nbp + h]) << split;
                     uint64_t right = label == 0 ? 0 : 1 + (label - 1 + qm1 - coset % qm1) % qm1;
                     if (used[right >> 3] >> (right & 7) & 1) return fail("matching repeats a right endpoint");
                     used[right >> 3] |= (uint8_t)(1u << (right & 7));

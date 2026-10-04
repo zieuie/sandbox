@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import random
 import re
@@ -86,27 +87,38 @@ def unpack(data: bytes, count: int, bits: int, offset_bits: int = 0) -> list[int
 
 
 
-def blocks_fixture(path: Path, poly: str | None, directory: Path, requests: int, minimum_blocks: int) -> None:
-    """Forced block mode on a real KHD1: a full matching must verify, with several blocks."""
+def blocks_fixture(path: Path, poly: str | None, directory: Path, requests: int, minimum_blocks: int,
+                   split_bits: int = 32, tag: str = "") -> None:
+    """Forced block mode on a real KHD1: a full matching must verify, with several blocks. With
+    split_bits < 32 labels are stored as low words plus breakpoints (the path q > 2^32 takes), and
+    the choices live in a scratch file."""
     dp, digest = load_dp(path)
     blocks = directory / f"{path.stem}.blocks"
     write_blocks(blocks, [(run["a"], run["t"] * run["repeat"]) for run in dp["runs"]])
     extra = ["--poly", poly] if poly else []
-    payload = directory / f"{path.stem}.{requests}.bin"
-    code, metadata = run_kernel(KERNEL, dp["p"], dp["r"], blocks, payload, "--threads", "2",
-                                "--block-requests", str(requests), *extra)
+    if split_bits != 32:
+        extra += ["--label-split-bits", str(split_bits), "--choice-file", str(directory / f"{path.stem}{tag}.choices")]
+    payload = directory / f"{path.stem}.{requests}{tag}.bin"
+    if split_bits != 32:   # and many small write segments, packed by three threads
+        os.environ["KH_BLOCK_WRITE_SEGMENT"] = "1000"
+    try:
+        code, metadata = run_kernel(KERNEL, dp["p"], dp["r"], blocks, payload, "--threads", "3" if split_bits != 32 else "2",
+                                    "--block-requests", str(requests), *extra)
+    finally:
+        os.environ.pop("KH_BLOCK_WRITE_SEGMENT", None)
     assert code == 0 and metadata["engine"] == "gpu-blocks" and metadata["blocks"] >= minimum_blocks, metadata
     trace = metadata["trace"]  # unmatched after: start, each block, each exchange round (dashboard burndown)
     assert [step for step, _ in trace] == list(range(len(trace))), trace
     assert len(trace) == 1 + metadata["blocks"] + metadata["rounds"] - 1 and trace[0][1] == metadata["required"], trace
     assert trace[-1][1] == metadata["required"] - metadata["matched"] == 0, trace
     assert all(a[1] >= b[1] for a, b in zip(trace, trace[1:])), "unmatched count rose"
-    output = directory / f"{path.stem}.{requests}.khmatch"
+    output = directory / f"{path.stem}.{requests}{tag}.khmatch"
     publish(output, header(dp, digest, metadata), payload)
     summary = verify(output, dp, digest)
     assert summary["verified"] and summary["status"] == "full_matching", summary
-    print(f"ok block fixture {path.name}: {metadata['blocks']} blocks, {metadata['rounds']} rounds, "
-          f"round-1 residual {metadata['residual_round1']}")
+    assert not (directory / f"{path.stem}{tag}.choices").exists(), "choice scratch file left behind"
+    print(f"ok block fixture {path.name}{' (' + str(split_bits) + '-bit label words)' if split_bits != 32 else ''}: "
+          f"{metadata['blocks']} blocks, {metadata['rounds']} rounds, round-1 residual {metadata['residual_round1']}")
 
 
 def block_synthetic(rng: random.Random, p: int, r: int, directory: Path, index: int, one_round: bool) -> None:
@@ -141,6 +153,9 @@ def block_synthetic(rng: random.Random, p: int, r: int, directory: Path, index: 
     payload = directory / f"bsynthetic{index}.bin"
     cap = max(1, n // rng.choice([2, 3, 4, 6]))
     options = ["--test-cells", str(table), "--block-requests", str(cap), "--max-residual", str(n)]
+    if index % 3 == 1:  # narrow label words: breakpoints rebuild the labels, as for q > 2^32
+        narrowest = next(bits for bits in range(1, 33) if (q - 1) >> bits <= 64)
+        options += ["--label-split-bits", str(rng.randint(narrowest, max(narrowest, (q - 1).bit_length() - 1)))]
     if one_round:
         options += ["--max-rounds", "1"]
     code, metadata = run_kernel(KERNEL, p, r, blocks, payload, *options)
@@ -186,6 +201,9 @@ def main() -> int:
         directory = Path(temporary)
         blocks_fixture(ROOT / "examples/7_5.khdp", None, directory, 5000, 3)
         blocks_fixture(ROOT / "matching_solver/examples/13_5.khdp", "2,4,0,0,0,1", directory, 100000, 3)
+        blocks_fixture(ROOT / "examples/7_5.khdp", None, directory, 5000, 3, split_bits=9, tag=".split")
+        blocks_fixture(ROOT / "matching_solver/examples/13_5.khdp", "2,4,0,0,0,1", directory, 100000, 3,
+                       split_bits=13, tag=".split")
         rng = random.Random(arguments.seed)
         shapes = [(2, 3), (2, 5), (3, 3), (5, 3), (2, 7), (3, 5)]
         seen = []

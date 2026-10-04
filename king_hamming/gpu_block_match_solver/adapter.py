@@ -12,18 +12,35 @@ ROOT = Path(__file__).resolve().parent.parent
 MIB = 1024**2
 EXTRA_CELLS = 256                 # mirrors EXTRA_MAX in src/main.c
 MIN_DEVICE_BYTES = 512 * MIB      # smallest GPU lease worth planning blocks on
+MAX_Q = 2**36 - 1                 # FP_MAX_Q - 1 in src/field_prefix.h
+STAGING_BYTES = 1024 * MIB        # per-block host staging; the kernel needs at most device budget / 8
 
 
-def host_bytes(dp: dict, threads: int = 4) -> int:
-    """Host bound for the block kernel (full field table, choices) and the native KHM1 verifier."""
-    n, q = request_count(dp), dp["q"]
-    kernel = 4 * q + 2 * n + 4 * dp["f"] * dp["p"] * threads + 8 * MIB * threads + 64 * MIB
-    return max(kernel, native_memory(dp, q, dp["f"]))
+def breakpoints(dp: dict) -> int:
+    """Row breakpoints per stored cell: labels are 32-bit words plus (q-1) >> 32 breakpoints."""
+    return (dp["q"] - 1) >> 32
+
+
+def host_bytes(dp: dict, threads: int = 4, choice_file: bool = True) -> int:
+    """Host bound for the block kernel and the native KHM1 verifier; mirrors main() in src/main.c.
+
+    The kernel stores only the rows of the cells requests use (4*F per cell plus breakpoints),
+    the final right-endpoint bitmap (q/8), and per-block staging. Its 2-byte-per-request choices
+    live in a scratch file (the bridge passes --choice-file), so they need disk, not RAM.
+    """
+    n, q, f, p = request_count(dp), dp["q"], dp["f"], dp["p"]
+    limit = max(run["a"] for run in dp["runs"]) * f
+    nbp = breakpoints(dp)
+    field = 4 * limit * f + 4 * limit * nbp + 4 * (threads + nbp + 1) * p * f + 4 * p * dp["r"]
+    kernel = (field + (0 if choice_file else 2 * n) + (q + 7) // 8 + STAGING_BYTES +
+              8 * MIB * threads + 256 * MIB)
+    return max(kernel, native_memory(dp, q, f))
 
 
 def block_cost(dp: dict, cells: int, requests: int) -> int:
     """Device bytes for a block of this many cells and requests; mirrors block_cost() in src/main.c."""
-    return 4 * dp["f"] * (cells + EXTRA_CELLS) + 31 * (requests + requests // 64 + 64) + 4 * requests + 16 * MIB
+    return (4 * (dp["f"] + breakpoints(dp)) * (cells + EXTRA_CELLS) + 31 * (requests + requests // 64 + 64) +
+            4 * requests + 16 * MIB)
 
 
 def block_count(dp: dict, device_bytes: int) -> int | None:
@@ -40,6 +57,8 @@ class GPUBlockMatchingAdapter(GPUMatchingAdapter):
     """Run one pinned field attempt on one fenced GPU, one block at a time; minutes, so no checkpoints."""
 
     programs = ("match_gpu_blocks",)
+    max_q = MAX_Q
+    max_requests = MAX_Q
 
     def validate(self, specification, internal=False):
         """Reuse pinned-field validation; add the block kernel's 16-bit choice bound and device size."""

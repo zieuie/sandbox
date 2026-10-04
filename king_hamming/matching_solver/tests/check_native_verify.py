@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
 import subprocess
@@ -34,12 +35,18 @@ def certificate(path: Path, poly: str | None, directory: Path) -> tuple[dict, by
     return dp, digest, output
 
 
-def outcome(path: Path, dp: dict, digest: bytes, native: bool) -> tuple[bool, str]:
+def outcome(path: Path, dp: dict, digest: bytes, native: bool, split: int | None = None) -> tuple[bool, str]:
+    """Verify on one path; with split, the native verifier stores split-bit label words plus row
+    breakpoints (the representation it uses for q > 2^32), to cover that code on small fields."""
+    if split is not None:
+        os.environ["KH_VERIFY_SPLIT_BITS"] = str(split)
     try:
         verify(path, dp, digest, 2**31, native=native)
         return True, ""
     except ValueError as error:
         return False, str(error)
+    finally:
+        os.environ.pop("KH_VERIFY_SPLIT_BITS", None)
 
 
 def rewrite(data: bytes, mutated: bytearray, path: Path) -> Path:
@@ -66,6 +73,8 @@ def main() -> int:
             dp, digest, good = certificate(fixture, poly, directory)
             python, native = verify(good, dp, digest, native=False), verify(good, dp, digest, native=True)
             assert python == native, (python, native)
+            split = max(1, (dp["q"] - 1).bit_length() - 6)   # at most 63 breakpoints per row
+            assert outcome(good, dp, digest, True, split) == (True, ""), outcome(good, dp, digest, True, split)
             data = bytearray(good.read_bytes())
             # Corrupt only payload bytes: parse the header to find where the choices begin.
             with good.open("rb") as stream:
@@ -86,11 +95,12 @@ def main() -> int:
                     mutated[position] ^= 1 << rng.randrange(8)
                 path = rewrite(bytes(data), mutated, directory / "mutated.khmatch")
                 a, b = outcome(path, dp, digest, False), outcome(path, dp, digest, True)
-                assert a[0] == b[0], f"{fixture.name} trial {trial}: python {a} native {b}"
+                c = outcome(path, dp, digest, True, split)
+                assert a[0] == b[0] == c[0], f"{fixture.name} trial {trial}: python {a} native {b} split native {c}"
                 accepted += a[0]
                 rejected += not a[0]
             assert rejected > 0, "corruptions were never rejected"
-            print(f"ok {fixture.name}: native == python on the good file and {trials} corruptions "
+            print(f"ok {fixture.name}: native (32-bit and {split}-bit label words) == python on the good file and {trials} corruptions "
                   f"({rejected} rejected, {accepted} still valid)")
         # Structural damage the Python wrapper catches before the native pass.
         for label, damage in (("truncated", lambda d: d[:-40] + d[-32:]), ("wrong checksum", lambda d: d[:-1] + bytes([d[-1] ^ 1]))):
