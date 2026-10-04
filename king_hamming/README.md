@@ -38,6 +38,8 @@ The design documents at the project root are:
   per-machine memory admission, runtime ordering, and progress thresholds.
 - [`docs/DESIGN.md`](docs/DESIGN.md): accumulated mathematical, artifact, operational,
   and cluster requirements from the brainstorming process.
+- [`docs/MATCHING_CERTIFICATE.md`](docs/MATCHING_CERTIFICATE.md): plain-language
+  explanation of the `.khmatch` certificate and why checking it proves the bound.
 
 The control and storage protocol supports both a demonstration solver and the
 exact C tiled DP. Exact identical-cost
