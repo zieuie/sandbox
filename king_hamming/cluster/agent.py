@@ -1301,6 +1301,8 @@ def main() -> int:
 
     if not cpus:
         parser.error("no CPUs remain after reservation")
+    # Solvers inherit this: a tile may borrow the node's idle CPUs (CPU assist).
+    os.environ["KH_NODE_CPUS"] = ",".join(str(cpu) for cpu in cpus)
     try:
         slot_count = len(cpus) if arguments.slots == "auto" else int(arguments.slots)
     except ValueError:

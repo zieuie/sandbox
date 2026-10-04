@@ -345,6 +345,32 @@ def gpu_wait_seconds(p: int, rectangle, threads: int) -> float:
     return min(MAX_GPU_WAIT_SECONDS,max(MIN_GPU_WAIT_SECONDS,cpu_seconds/2))
 
 
+# While the GPU serves one tile, the host's other CPUs sit idle: each slot's two CPUs belong to a
+# tile that is only waiting for the GPU. CPU assist lets one tile per host that finds the GPU busy
+# compute on the node's CPUs instead, at idle priority, so GPU and CPUs work on different tiles at
+# once (+6-15% on heavy fields, more on light ones). Racing the two on one tile gains nothing: the
+# GPU wait is seconds, the CPU run minutes.
+ASSIST_MAX_THREADS = 8
+ASSIST_MAX_SECONDS = 1200.0
+
+
+def assist_plan(p: int, rectangle, lease_cpus: list[int]) -> list[int] | None:
+    """Return the CPUs a CPU-assist run would use, or None when assisting is off or not worth it."""
+
+    if os.environ.get("KH_CPU_ASSIST","1")=="0":
+        return None
+    try:
+        node=sorted({int(item) for item in os.environ.get("KH_NODE_CPUS","").split(",") if item})
+    except ValueError:
+        return None
+    # The lease's own CPUs first, so the run is never narrower than an ordinary CPU fallback.
+    wide=(lease_cpus+[cpu for cpu in node if cpu not in lease_cpus])[:ASSIST_MAX_THREADS]
+    if len(wide)<=len(lease_cpus):
+        return None
+    cpu_seconds=(rectangle.value_bytes//8)*p**3*CPU_SECONDS_PER_VISIT/len(wide)
+    return wide if cpu_seconds<=ASSIST_MAX_SECONDS else None
+
+
 # Compute an immutable tile from peer artifacts, leaving whole-calculation state on no worker.
 def compute(arguments, specification: dict) -> None:
     """Assemble one admitted halo, invoke the exact pinned C kernel and pack its complete output."""
@@ -382,13 +408,16 @@ def compute(arguments, specification: dict) -> None:
     output=arguments.output.parent/"tile-output"
     cpus=sorted(os.sched_getaffinity(0))
     threads=min(int(options.get("threads",1)),len(cpus))
-    tail=[str(p),str(r),str(rectangle.first_u),str(rectangle.last_u),str(rectangle.first_v),str(rectangle.last_v),
-          str(halo),str(output),str(threads),str(options.get("max_tile_bytes",2*1024**3))]
 
-    def kernel(binary):
-        """Run one tile binary under the lease's CPU affinity; return its exit status."""
+    def kernel(binary,on=None,team=None,idle=False):
+        """Run one tile binary on the lease's CPUs (or on, with team threads); return its exit status."""
+        on=cpus if on is None else on
+        tail=[str(p),str(r),str(rectangle.first_u),str(rectangle.last_u),str(rectangle.first_v),str(rectangle.last_v),
+              str(halo),str(output),str(threads if team is None else team),str(options.get("max_tile_bytes",2*1024**3))]
         command=[sys.executable,str(ROOT.parent/"cluster"/"affinity_exec.py"),"--parent-pid",str(os.getpid()),
-                 "--cpus",",".join(map(str,cpus)),"--",str(binary),*tail]
+                 "--cpus",",".join(map(str,on)),"--",str(binary),*tail]
+        if idle:
+            command=["nice","-n","19",*command]
         process=subprocess.Popen(command)
         try:
             while process.poll() is None:
@@ -405,13 +434,30 @@ def compute(arguments, specification: dict) -> None:
     # The GPU kernel's output is byte-identical to kh_dp_tile, so it is an opportunistic
     # accelerator: wait briefly for this host's GPU, otherwise compute on the leased CPUs.
     computed=False
+    assisted=0
     limit=0.0
     device=int(os.environ.get("KH_GPU_DEVICE","0"))
     if (GPU_TILE.exists() and os.environ.get("KH_DISABLE_GPU_DP")!="1" and gpu_fits(p,rectangle,device) and
             not gpus.recently_unavailable(device)):
         lock=gpus.DeviceLock(device)
         limit=gpu_wait_seconds(p,rectangle,threads)
-        acquired=lock.acquire(limit,lambda: STOP,skip_long=True)
+        acquired=lock.acquire(0.0,lambda: STOP,skip_long=True)
+        wide=None if acquired else assist_plan(p,rectangle,cpus)
+        if wide is not None:
+            slot=gpus.AssistSlot(int(os.environ.get("KH_CPU_ASSIST_SLOTS","1")))
+            if slot.acquire():
+                assisted=len(wide)
+                lap("gpu_wait")
+                try:
+                    code=kernel(ROOT.parent/"dp_solver"/"kh_dp_tile",on=wide,team=len(wide),idle=True)
+                finally:
+                    slot.release()
+                    lap("kernel")
+                if code!=0:
+                    raise RuntimeError(f"C tile kernel exited {code}")
+                computed=True
+        if not computed and not acquired:
+            acquired=lock.acquire(limit,lambda: STOP,skip_long=True)
         lap("gpu_wait")
         if acquired:
             try:
@@ -450,7 +496,8 @@ def compute(arguments, specification: dict) -> None:
     cells=rectangle.value_bytes//8
     mode="none" if not counts["band"]+counts["packet"] else "bands" if not counts["packet"] else "packets" if not counts["band"] else "mixed"
     print(json.dumps({"done":cells,"total":cells,"checkpoint_done":cells,"units":"cells","phase":"complete","heartbeat":True,
-                      "engine":"gpu" if computed else "cpu","gpu_wait_limit":round(limit,1),"input_mode":mode,
+                      "engine":"cpu-assist" if assisted else "gpu" if computed else "cpu","assist_threads":assisted,
+                      "gpu_wait_limit":round(limit,1),"input_mode":mode,
                       "input_bytes":fetched["band"]+fetched["packet"],"input_band_bytes":fetched["band"],
                       "bands_published":published,**timings}),flush=True)
 

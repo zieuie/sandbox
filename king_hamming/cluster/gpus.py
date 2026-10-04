@@ -148,6 +148,37 @@ class DeviceLock:
 
 
 # A device that recently failed to initialize is skipped for opportunistic work.
+# A host's idle CPUs can compute a tile of their own while its GPU serves the others. This
+# host-wide slot limits how many such CPU-assist tiles run at once.
+class AssistSlot:
+    """A non-blocking claim on one of count host-wide CPU-assist slots."""
+
+    def __init__(self, count: int = 1) -> None:
+        self.count = max(0, count)
+        self.descriptor: int | None = None
+
+    def acquire(self) -> bool:
+        """Claim a free slot if there is one; never waits."""
+
+        for index in range(self.count):
+            descriptor = os.open(LOCK_DIRECTORY / f"kh-cpu-assist-{index}.lock", os.O_RDWR | os.O_CREAT, 0o666)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                os.close(descriptor)
+                if error.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
+                continue
+            self.descriptor = descriptor
+            return True
+        return False
+
+    def release(self) -> None:
+        if self.descriptor is not None:
+            os.close(self.descriptor)
+            self.descriptor = None
+
+
 def mark_unavailable(index: int) -> None:
     try:
         (LOCK_DIRECTORY / f"kh-gpu-{int(index)}.unavailable").write_text(str(time.time()))
