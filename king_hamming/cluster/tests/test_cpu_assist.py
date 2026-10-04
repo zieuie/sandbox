@@ -32,19 +32,23 @@ class AssistPlanTests(unittest.TestCase):
             os.environ.pop("KH_CPU_ASSIST", None) if "KH_CPU_ASSIST" not in environment else None
             return distributed_solver.assist_plan(p, tile(p, r, side, row, column), lease)
 
+    def test_light_tiles_are_left_to_the_ordinary_rule(self) -> None:
+        self.assertIsNone(self.plan(7, 13, 4096, 30, 30, [2, 3], list(range(16))))   # about 16 s on two CPUs
+        self.assertIsNone(self.plan(5, 13, 1024, 16, 16, [2, 3], list(range(16))))
+
     def test_borrows_the_nodes_idle_cpus_up_to_eight_threads(self) -> None:
-        wide = self.plan(7, 13, 4096, 30, 30, [2, 3], list(range(16)))
+        wide = self.plan(29, 7, 4096, 30, 30, [2, 3], list(range(16)))      # about 1,380 s on two CPUs
         self.assertEqual(wide[:2], [2, 3])
         self.assertEqual(len(wide), 8)
         self.assertEqual(len(set(wide)), 8)
 
     def test_no_assist_when_off_unknown_or_no_wider_than_the_lease(self) -> None:
         node = [0, 1, 2, 3]
-        self.assertIsNone(self.plan(7, 13, 4096, 30, 30, [0, 1], node, KH_CPU_ASSIST="0"))
-        self.assertIsNone(self.plan(7, 13, 4096, 30, 30, [0, 1], []))
-        self.assertIsNone(self.plan(7, 13, 4096, 30, 30, [0, 1], [0, 1]))
+        self.assertIsNone(self.plan(29, 7, 4096, 30, 30, [0, 1], node, KH_CPU_ASSIST="0"))
+        self.assertIsNone(self.plan(29, 7, 4096, 30, 30, [0, 1], []))
+        self.assertIsNone(self.plan(29, 7, 4096, 30, 30, [0, 1], [0, 1]))
         with mock.patch.dict(os.environ, {"KH_NODE_CPUS": "x,y"}):
-            self.assertIsNone(distributed_solver.assist_plan(7, tile(7, 13, 4096, 30, 30), [0, 1]))
+            self.assertIsNone(distributed_solver.assist_plan(29, tile(29, 7, 4096, 30, 30), [0, 1]))
 
     def test_a_tile_too_slow_even_with_all_cpus_is_left_to_the_gpu(self) -> None:
         # 3^29 style tiles would take hours on eight CPUs.
@@ -71,7 +75,8 @@ class AssistClusterTests(unittest.TestCase):
             root = Path(temporary)
             locks = root / "locks"
             locks.mkdir()
-            environment = {"KH_DISABLE_GPU_DP": "0", "KH_GPU_LOCK_DIR": str(locks), "KH_CPU_ASSIST_SLOTS": "2"}
+            environment = {"KH_DISABLE_GPU_DP": "0", "KH_GPU_LOCK_DIR": str(locks), "KH_CPU_ASSIST_SLOTS": "2",
+                           "KH_CPU_ASSIST_MIN_SECONDS": "0"}   # these tiles are tiny
             with mock.patch.dict(os.environ, environment), mock.patch.object(gpus, "LOCK_DIRECTORY", locks):
                 holder = gpus.DeviceLock(0)
                 self.assertTrue(holder.acquire(1.0))          # someone else is using the GPU

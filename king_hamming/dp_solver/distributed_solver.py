@@ -352,6 +352,11 @@ def gpu_wait_seconds(p: int, rectangle, threads: int) -> float:
 # GPU wait is seconds, the CPU run minutes.
 ASSIST_MAX_THREADS = 8
 ASSIST_MAX_SECONDS = 1200.0
+# Light tiles are better served by the ordinary rule (wait briefly for the GPU, else compute on the
+# leased CPUs): measured live, an idle-priority eight-thread run of a 16 s tile took 80 s, starved
+# by those ordinary CPU runs and slowed by waiting on its own barriers, and held its slot ten times
+# longer than the GPU would have. Assist only tiles whose own CPUs would take longer than this.
+ASSIST_MIN_SECONDS = 120.0
 
 
 def assist_plan(p: int, rectangle, lease_cpus: list[int]) -> list[int] | None:
@@ -367,8 +372,9 @@ def assist_plan(p: int, rectangle, lease_cpus: list[int]) -> list[int] | None:
     wide=(lease_cpus+[cpu for cpu in node if cpu not in lease_cpus])[:ASSIST_MAX_THREADS]
     if len(wide)<=len(lease_cpus):
         return None
-    cpu_seconds=(rectangle.value_bytes//8)*p**3*CPU_SECONDS_PER_VISIT/len(wide)
-    return wide if cpu_seconds<=ASSIST_MAX_SECONDS else None
+    work=(rectangle.value_bytes//8)*p**3*CPU_SECONDS_PER_VISIT
+    minimum=float(os.environ.get("KH_CPU_ASSIST_MIN_SECONDS",ASSIST_MIN_SECONDS))
+    return wide if work/len(lease_cpus)>minimum and work/len(wide)<=ASSIST_MAX_SECONDS else None
 
 
 # Compute an immutable tile from peer artifacts, leaving whole-calculation state on no worker.
