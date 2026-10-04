@@ -550,6 +550,56 @@ print(json.dumps({'running':running}))
                       'workers': len(expected)}, indent=2))
 
 
+TILE_CHECK_SECONDS = 45   # two refresh cycles of the scheduler's grid-wide pass, and then some
+
+
+def tile_progress(database_path: Path) -> dict[str, dict]:
+    """Finished tiles each active distributed DP root still counts, by root run id.
+
+    A worker upgrade deletes each agent's replica records until it revalidates its disk; a scheduler
+    that read that gap as loss once cleared 87% of a root's finished tiles. Comparing this before
+    and after an upgrade shows it at once. Each entry: field, finished tiles, and the scheduler's
+    clearing hold if it is refusing to clear tiles. Returns {} if the database cannot be read.
+    """
+
+    try:
+        with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=30) as database:
+            result = {}
+            for run_id, specification in database.execute(
+                    "SELECT run_id,specification FROM runs WHERE parent_run_id IS NULL AND "
+                    "state IN ('waiting','running','queued') AND specification LIKE '%dp_distributed%'").fetchall():
+                arguments = json.loads(specification)["arguments"]
+                finished = database.execute(
+                    "SELECT COUNT(*) FROM distributed_tiles t JOIN runs c ON c.run_id=t.child_run_id "
+                    "WHERE t.parent_run_id=? AND c.state='complete'", (run_id,)).fetchone()[0]
+                hold = database.execute("SELECT value FROM settings WHERE key=?",
+                                        (f"tile_clear_hold:{run_id}",)).fetchone()
+                result[run_id] = {"field": f"{arguments['p']}^{arguments['r']}", "finished": finished,
+                                  "hold": json.loads(hold[0]) if hold else None}
+            return result
+    except (sqlite3.Error, KeyError, ValueError):
+        return {}
+
+
+def tile_progress_warnings(before: dict[str, dict], after: dict[str, dict]) -> list[str]:
+    """Describe roots that lost finished tiles, or whose clearing the scheduler is holding back."""
+
+    warnings = []
+    for run_id, old in before.items():
+        new = after.get(run_id)
+        if new is None:
+            continue
+        lost = old["finished"] - new["finished"]
+        if lost > max(50, old["finished"] // 100):
+            warnings.append(f"{old['field']}: {lost} of {old['finished']} finished tiles are no longer counted "
+                            "(the scheduler will recompute them; see docs/MATCHING_13_9.md and "
+                            "dp_solver/distributed.restore_cleared_tiles)")
+        if new["hold"]:
+            warnings.append(f"{old['field']}: the scheduler is refusing to clear {new['hold']['would_clear']} "
+                            f"tiles it believes are lost; their copies may really be missing")
+    return warnings
+
+
 def stop_dispatch_if_idle(database_path: Path) -> None:
     """Atomically latch dispatch stopped only when no solver or tile is active."""
 
@@ -598,6 +648,8 @@ def upgrade_workers(path: Path) -> None:
     save(report_path, report)
     try:
         stop_dispatch_if_idle(path.parent / 'leader.sqlite')
+        tiles_before = tile_progress(path.parent / 'leader.sqlite')
+        report["tiles_before"] = tiles_before
         report["stage"] = "building"
         save(report_path, report)
         build_runtime()
@@ -641,6 +693,15 @@ def upgrade_workers(path: Path) -> None:
         manifest['state'] = 'stopped-after-upgrade'
         save(path, manifest)
         feeder_restarted = restart_owned_feeder(path.parent)
+        # The first scheduler passes after the workers re-register are where finished tiles used to be
+        # cleared: give them time, then compare.
+        if any(entry["finished"] for entry in tiles_before.values()):
+            time.sleep(TILE_CHECK_SECONDS)
+        tiles_after = tile_progress(path.parent / 'leader.sqlite')
+        tile_warnings = tile_progress_warnings(tiles_before, tiles_after)
+        for warning in tile_warnings:
+            print(f"WARNING: {warning}", file=sys.stderr, flush=True)
+        report.update(tiles_after=tiles_after, tile_warnings=tile_warnings)
         report.update(stage="complete", finished=time.time(),
                       feeder_restarted=feeder_restarted,
                       schema_version=status.get("schema_version"),
@@ -651,6 +712,9 @@ def upgrade_workers(path: Path) -> None:
         print(json.dumps({'upgraded_workers': len(replacements),
                           'feeder_restarted': feeder_restarted,
                           'campaign_state': 'stopped', 'manifest': str(path),
+                          'finished_tiles': {entry["field"]: [tiles_before[run_id]["finished"], entry["finished"]]
+                                             for run_id, entry in tiles_after.items() if run_id in tiles_before},
+                          'tile_warnings': tile_warnings,
                           'report': str(report_path)}, indent=2))
     except Exception as error:
         report.update(stage="failed:" + report["stage"], finished=time.time(), error=str(error))

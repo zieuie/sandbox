@@ -60,6 +60,8 @@ TILE_RETRY_MAX_SECONDS = 300
 # tiles) runs every REFRESH_SECONDS, or every pass once no tile is left to create.
 FULL_SCAN_TILES = 100_000
 MAX_SCAN_INTERVAL = 30.0
+TILE_CLEAR_MAX_FRACTION = 0.01   # most a pass may clear of a root's finished tiles (setting tile_clear_max_fraction)
+TILE_CLEAR_MIN_TILES = 50        # ... but at least this many, so small roots can still repair themselves
 REFRESH_SECONDS = 10.0
 END_GAME_REFRESH_SECONDS = 3.0
 REFRESH_TILES_PER_SECOND = 1000.0   # a grid of N tiles refreshes at most every N/1000 s
@@ -348,6 +350,28 @@ def recompute_lost_tiles(connection: sqlite3.Connection, parent_run_id: str, now
         "AND NOT EXISTS (SELECT 1 FROM node_revalidation v JOIN nodes vn ON vn.node_name=v.node_name "
         "WHERE v.kind='artifact' AND v.digest=child.artifact_hash AND vn.last_heartbeat>?)",
         (parent_run_id, now - grace, now - grace, now - grace)).fetchall()
+    # Circuit breaker. Clearing finished work is the one destructive step the scheduler takes on
+    # its own, and it rests on bookkeeping (replica rows, heartbeats) that can be wrong in bulk.
+    # A pass that would clear more than a small share of a root's finished tiles clears nothing
+    # and says so (a setting the dashboard shows); an operator who knows the copies really are
+    # gone raises tile_clear_max_fraction.
+    finished = connection.execute(
+        "SELECT COUNT(*) FROM distributed_tiles t JOIN runs child ON child.run_id=t.child_run_id "
+        "WHERE t.parent_run_id=? AND child.state='complete'", (parent_run_id,)).fetchone()[0]
+    fraction = retention_module.number(connection, "tile_clear_max_fraction", TILE_CLEAR_MAX_FRACTION)
+    limit = max(TILE_CLEAR_MIN_TILES, fraction * finished)
+    hold_key = f"tile_clear_hold:{parent_run_id}"
+    if len(lost) > limit:
+        held = connection.execute("SELECT value FROM settings WHERE key=?", (hold_key,)).fetchone()
+        previous = json.loads(held[0]).get("would_clear") if held else None
+        if previous != len(lost):
+            connection.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (hold_key, json.dumps(
+                {"time": now, "would_clear": len(lost), "finished": finished, "limit": int(limit)})))
+            print(f"distributed: refusing to clear {len(lost)} of {finished} finished tiles of {parent_run_id[:8]} "
+                  f"(limit {int(limit)}); recomputing is paused until the copies return or "
+                  f"tile_clear_max_fraction is raised", flush=True)
+        return 0
+    connection.execute("DELETE FROM settings WHERE key=?", (hold_key,))
     for row, column, child in lost:
         connection.execute("UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? AND row=? "
                            "AND column=? AND child_run_id=?", (parent_run_id, row, column, child))
