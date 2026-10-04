@@ -159,6 +159,7 @@ def writer_session(database: Path, route: str, health: "SchedulerHealth", timeou
             connection.execute("BEGIN IMMEDIATE")
             acquired = time.monotonic()
             yield connection
+        LAST_COMMIT[0] = time.time()
     except Exception as failure:
         error = failure
         raise
@@ -169,6 +170,25 @@ def writer_session(database: Path, route: str, health: "SchedulerHealth", timeou
 
 
 DEFAULT_DISK_FLOOR_BYTES = 10 * 1024**3
+
+# When the leader itself could not commit for a while (on 2026-10-04 its fsyncs waited over a
+# minute behind 20 GB of another process's writes to the same disk), no agent could renew a
+# lease either. Expiring every lease afterwards punished the fleet for the leader's stall, and
+# restarted a long matching run from scratch. After such a gap, running leases first get one
+# more full lease to renew in.
+STALL_SECONDS = 15.0          # the scheduler commits every few seconds when healthy
+LAST_COMMIT = [time.time()]
+
+
+def expire_leases(connection, now: float) -> None:
+    """recovery.expire, after forgiving a gap in which the leader committed nothing."""
+
+    gap = now - LAST_COMMIT[0]
+    if gap > STALL_SECONDS:
+        extended = recovery.forgive_stall(connection, now)
+        print(f"leader made no commit for {gap:.0f} s; gave {extended} running lease(s) a full lease to renew",
+              flush=True)
+    recovery.expire(connection, now, partner_grace=gap if gap > STALL_SECONDS else 0.0)
 
 
 def disk_floor(connection) -> int:
@@ -762,7 +782,7 @@ def make_handler(
                 # A lease request also expires promptly so an idle replacement
                 # need not wait for the next scheduler tick.
                 if route == "/v1/lease":
-                    recovery.expire(connection, now)
+                    expire_leases(connection, now)
                 lease_seconds = recovery.setting(connection, "lease_seconds")
                 if route == "/v1/enqueue":
                     specification = request["specification"]
@@ -1637,7 +1657,7 @@ def scheduler_loop(
         try:
             with writer_session(database, "scheduler", health, timeout=connect_timeout) as connection:
                 now = time.time()
-                recovery.expire(connection, now)
+                expire_leases(connection, now)
                 adapters.advance(connection, now)
         except Exception as error:
             health.failed(error)

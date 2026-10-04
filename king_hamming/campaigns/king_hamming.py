@@ -250,7 +250,11 @@ def archive_matching(state: Path, record: dict, attempt: dict, run: dict,
     maximum = (count * (dp["f"] + 1).bit_length() + 7) // 8 + (count + 7) // 8 + 4096
     output = state / "matching-results" / f"{record['p']}_{record['r']}_{run['run_id']}.khmatch"
     retrieve(run, output, maximum, nodes)
-    summary = verify(output, dp, digest, settings["max_matching_bytes"])
+    # A field matched under a larger plan (block GPU matching of 13^9 verifies in ~17 GB) is
+    # verified under that plan's memory allowance, not the CPU matchers' limit.
+    plan = attempt.get("plan") or {}
+    limit = max(settings["max_matching_bytes"], int(plan.get("max_bytes") or 0))
+    summary = verify(output, dp, digest, limit)
     if summary["polynomial"] != attempt["poly"]:
         raise ValueError("archived certificate polynomial differs from queued attempt")
     return output

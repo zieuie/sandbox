@@ -15,6 +15,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 BLOCK_BYTES = 1024 * 1024
+SYNC_BYTES = 256 * 1024 * 1024  # large blobs write through; see matching_solver.artifacts.SYNC_BYTES
 
 
 # Reject names that could escape the content-addressed storage tree.
@@ -77,6 +78,7 @@ def store_blob(
     descriptor, name = tempfile.mkstemp(prefix=".store-", dir=root)
     temporary = Path(name)
     digest = hashlib.sha256()
+    written = 0
 
     try:
         with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_file:
@@ -91,6 +93,10 @@ def store_blob(
 
                 output.write(block)
                 digest.update(block)
+                written += len(block)
+                if written % SYNC_BYTES < len(block):   # bound dirty pages on large blobs
+                    output.flush()
+                    os.fdatasync(output.fileno())
 
             output.flush()
             os.fsync(output.fileno())

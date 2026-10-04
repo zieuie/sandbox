@@ -14,6 +14,9 @@ from dp_solver.artifacts import dimensions, varint
 
 NATIVE_VERIFIER = Path(__file__).resolve().parent / "kh_verify_khm1"
 NATIVE_MIN_LABELS = 1 << 24  # below this the Python verifier is fast enough
+# Large copies write through every SYNC_BYTES: gigabytes of dirty pages once delayed the
+# leader's SQLite fsyncs on the same disk past every lease (all leases expired at once).
+SYNC_BYTES = 256 * 1024 * 1024
 
 
 # Derive the request count without expanding compressed DP runs.
@@ -62,6 +65,9 @@ def publish(path, header, payload, progress=None):
                 output.write(chunk)
                 digest.update(chunk)
                 copied += len(chunk)
+                if copied % SYNC_BYTES == 0:   # bound dirty pages on large copies (see SYNC_BYTES)
+                    output.flush()
+                    os.fdatasync(output.fileno())
                 if progress is not None:
                     progress(copied, size)
             output.write(digest.digest())

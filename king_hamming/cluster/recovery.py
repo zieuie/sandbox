@@ -119,8 +119,23 @@ def retire(connection: sqlite3.Connection, row: sqlite3.Row, now: float, reason:
 
 
 # Reassignment depends on the supervising lease, not a synthetic solver heartbeat.
-def expire(connection: sqlite3.Connection, now: float) -> None:
-    """Retire expired running leases inside the caller's write transaction."""
+def forgive_stall(connection: sqlite3.Connection, now: float) -> int:
+    """Give every running lease at least one full lease from now; return how many were extended.
+
+    For use after the leader itself stalled: agents could not renew while it was stuck.
+    """
+
+    return connection.execute(
+        "UPDATE runs SET lease_expires=? WHERE state='running' AND lease_expires<?",
+        (now + setting(connection, "lease_seconds"), now + setting(connection, "lease_seconds")),
+    ).rowcount
+
+
+def expire(connection: sqlite3.Connection, now: float, partner_grace: float = 0.0) -> None:
+    """Retire expired running leases inside the caller's write transaction.
+
+    partner_grace widens the partner-heartbeat window by a leader stall's length.
+    """
 
     rows = connection.execute(
         "SELECT * FROM runs WHERE state='running' AND lease_expires<=?", (now,),
@@ -130,7 +145,7 @@ def expire(connection: sqlite3.Connection, now: float) -> None:
         retire(connection, row, now, "lease expired")
 
     # A reserved partner's missing agent heartbeat fences the entire group.
-    cutoff = now - setting(connection, "lease_seconds")
+    cutoff = now - setting(connection, "lease_seconds") - partner_grace
     partners = connection.execute(
         "SELECT DISTINCT r.* FROM runs r JOIN node_reservations reserve ON reserve.run_id=r.run_id "
         "JOIN nodes n ON n.node_name=reserve.node_name "

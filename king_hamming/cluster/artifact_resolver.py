@@ -21,18 +21,41 @@ def live_sources(run: dict, nodes: list[dict] | tuple = ()) -> tuple[str, ...]:
     return tuple(dict.fromkeys(sources))
 
 
+# Callers read small artifacts (DP results) from the return value; large ones (a 13^9 matching
+# certificate is 20 GB) stay on disk and are hashed and copied in bounded pieces.
+INLINE_BYTES = 64 * 1024 * 1024
+SYNC_BYTES = 256 * 1024 * 1024
+
+
+def file_digest(path: Path) -> tuple[int, str]:
+    """Size and SHA-256 of path, read in 1 MiB pieces."""
+    size, checksum = 0, hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            size += len(chunk)
+            checksum.update(chunk)
+    return size, checksum.hexdigest()
+
+
+def contents(path: Path) -> bytes:
+    """The artifact's bytes when small enough to hold, else b"" (read it from path)."""
+    return path.read_bytes() if path.stat().st_size <= INLINE_BYTES else b""
+
+
 def retrieve(run: dict, output: Path, maximum: int,
              nodes: list[dict] | tuple = (), timeout: float = 60) -> bytes:
-    """Atomically retain an artifact from any live source after size/hash checks."""
+    """Atomically retain an artifact from any live source after size/hash checks.
+
+    Returns its bytes if at most INLINE_BYTES, else b"" (the verified file is at output)."""
     digest = run.get("artifact_hash")
     if (not isinstance(digest, str) or len(digest) != 64 or maximum < 1 or
             not live_sources(run, nodes)):
         raise ValueError("complete run has no bounded published artifact")
     if output.exists():
-        raw = output.read_bytes()
-        if len(raw) > maximum or hashlib.sha256(raw).hexdigest() != digest:
+        size, existing = file_digest(output)
+        if size > maximum or existing != digest:
             raise ValueError(f"existing artifact differs from leader: {output}")
-        return raw
+        return contents(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp-" + uuid.uuid4().hex)
     errors = []
@@ -48,12 +71,15 @@ def retrieve(run: dict, output: Path, maximum: int,
                             raise ValueError("downloaded artifact exceeds its format bound")
                         stream.write(chunk)
                         checksum.update(chunk)
+                        if size % SYNC_BYTES < len(chunk):   # write through: bound dirty pages
+                            stream.flush()
+                            os.fdatasync(stream.fileno())
                     stream.flush()
                     os.fsync(stream.fileno())
                 if checksum.hexdigest() != digest:
                     raise ValueError("downloaded artifact has wrong hash")
                 temporary.replace(output)
-                return output.read_bytes()
+                return contents(output)
             except (OSError, ValueError) as error:
                 errors.append(f"{source}: {error}")
         raise RuntimeError(f"no live verified artifact source: {errors}")

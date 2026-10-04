@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import sqlite3
 import threading
 import time
 import unittest
@@ -263,6 +264,35 @@ class LeaseTests(unittest.TestCase):
 
             with self.assertRaises(PermissionError):
                 handler.dispatch_post("/v1/lease", identity)
+
+    def test_a_leader_stall_does_not_expire_the_leases_it_blocked(self) -> None:
+        """After a gap with no commits, running leases get a full lease to renew in; otherwise
+        an overdue lease expires as usual."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800, lease_seconds=60)
+            handler = object.__new__(leader.make_handler(database))
+            identity = {"node_name": "worker", "session_id": "one"}
+            handler.dispatch_post("/v1/register", identity)
+            queued = handler.dispatch_post("/v1/enqueue", {"specification": {"program": "demo"}})
+            self.assertEqual(handler.dispatch_post("/v1/lease", identity)["job"]["run_id"], queued["run_id"])
+
+            def overdue_then_expire(stalled: bool) -> sqlite3.Row:
+                with leader.session(database) as connection:
+                    connection.execute("UPDATE runs SET lease_expires=? WHERE run_id=?",
+                                       (time.time() - 5, queued["run_id"]))
+                with patch.object(leader, "LAST_COMMIT", [time.time() - (90 if stalled else 1)]):
+                    with leader.session(database) as connection:
+                        leader.expire_leases(connection, time.time())
+                with leader.session(database) as connection:
+                    return connection.execute("SELECT state,lease_expires FROM runs WHERE run_id=?",
+                                              (queued["run_id"],)).fetchone()
+
+            row = overdue_then_expire(stalled=True)
+            self.assertEqual(row["state"], "running")
+            self.assertGreater(row["lease_expires"], time.time() + 50)
+            self.assertNotEqual(overdue_then_expire(stalled=False)["state"], "running")
 
     def test_expiry_reassignment_and_stale_submissions(self) -> None:
         """Reject every old-owner mutation after expiry, including late completion."""
