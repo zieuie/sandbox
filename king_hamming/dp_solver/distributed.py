@@ -62,6 +62,7 @@ FULL_SCAN_TILES = 100_000
 MAX_SCAN_INTERVAL = 30.0
 REFRESH_SECONDS = 10.0
 END_GAME_REFRESH_SECONDS = 3.0
+REFRESH_TILES_PER_SECOND = 1000.0   # a grid of N tiles refreshes at most every N/1000 s
 _last_refresh: dict[str, float] = {}
 _last_scan: dict[str, float] = {}
 
@@ -461,7 +462,8 @@ def advance(connection: sqlite3.Connection, now: float, max_roots: int | None = 
             (run_id,)).fetchone() is not None
 
         # Grid-wide bookkeeping needs every tile of the root, so it runs on a slower cycle.
-        interval = REFRESH_SECONDS if unassigned else END_GAME_REFRESH_SECONDS
+        # The refresh costs time in proportion to the grid, so small roots refresh every pass.
+        interval = min(REFRESH_SECONDS if unassigned else END_GAME_REFRESH_SECONDS, total / REFRESH_TILES_PER_SECOND)
         last = _last_refresh.get(run_id)
         if last is None or not 0 <= now - last < interval:
             _last_refresh[run_id] = now

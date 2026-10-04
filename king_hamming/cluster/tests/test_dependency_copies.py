@@ -103,7 +103,8 @@ class DependencyCopyTests(unittest.TestCase):
         with leader.connect(self.database) as connection:
             self.complete_corner(connection, now)
             distributed._last_refresh.clear()                  # enqueue already ran a first pass
-            with patch.object(distributed, "durable_tiles", wraps=distributed.durable_tiles) as full:
+            with patch.object(distributed, "REFRESH_TILES_PER_SECOND", 1.0), \
+                    patch.object(distributed, "durable_tiles", wraps=distributed.durable_tiles) as full:
                 distributed.advance(connection, now)           # first pass: refresh + frontier
                 self.assertEqual(full.call_count, 1)
                 self.assertEqual(self.tile(connection, 0, 1)["state"], "queued")
