@@ -278,7 +278,8 @@ svg.spark { width: 100%; height: 34px; display: block; }
   display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
   padding: 2px 8px; border-radius: 999px; background: var(--soft);
 }
-svg.tile-grid { width: 100%; max-width: 560px; height: auto; display: block; margin: 0 auto; touch-action: manipulation; }
+svg.tile-grid, canvas.tile-grid { width: 100%; max-width: 560px; height: auto; display: block; margin: 0 auto; touch-action: manipulation; }
+canvas.tile-grid { cursor: pointer; }
 rect.tile { stroke: none; }
 rect.tile:hover { stroke: var(--ink); stroke-width: .8; }
 .tile-label { font-size: 4.2px; text-anchor: middle; fill: #fff; pointer-events: none; font-weight: 600; }
@@ -617,7 +618,7 @@ a.open-link { text-decoration: none; color: var(--ink); margin-left: auto; }
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 12px; box-shadow: var(--shadow); min-width: 0;
 }
-svg.tile-grid.focus { width: calc(var(--zoom, 1) * min(100%, 100vh - 150px)); max-width: none; }
+svg.tile-grid.focus, canvas.tile-grid.focus { width: calc(var(--zoom, 1) * min(100%, 100vh - 150px)); max-width: none; }
 .focus-grid.zoomed .focus-scroll { overflow: auto; max-height: calc(100vh - 150px); scrollbar-color: var(--line) transparent; }
 .zoom-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
 .zoom-level { min-width: 2.2em; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }

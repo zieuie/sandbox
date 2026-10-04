@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import unittest
 
 import fixture
@@ -155,6 +156,12 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(work["root_state"], "failed")
 
     def test_results(self) -> None:
+        # Certificates are checked off the build: "checking" first, then the outcome, kept on disk.
+        first = self.build()["results"]
+        checking = {(item["p"], item["r"]): item for item in first["fields"]}[(13, 5)]
+        self.assertEqual(checking["matching_attempts"][0]["outcome"], "checking")
+        self.snapshots.wait_for_certificates()
+        self.clock.value += self.snapshots.min_refresh
         results = self.build()["results"]
         fields = {(item["p"], item["r"]): item for item in results["fields"]}
         self.assertEqual(fields[(5, 3)]["status"], "too_big")  # pipeline says field limit
@@ -204,6 +211,49 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual((status["nodes_healthy"], status["nodes_total"]), (2, 3))
         self.assertEqual(status["runs"], {"running": 1, "queued": 0, "waiting": 1})
         self.assertIsNone(status["feeder"])
+
+    def test_browsers_get_a_grid_string_and_tile_detail_on_demand(self) -> None:
+        import json
+        data, body, _ = self.snapshots.get()
+        sent = json.loads(body)
+        for internal, compact in zip(data["roots"], sent["roots"]):
+            self.assertNotIn("cells", compact)
+            self.assertEqual(len(compact["grid"]), compact["rows"] * compact["columns"])
+            for cell in internal["cells"]:
+                self.assertEqual(compact["grid"][cell["r"] * compact["columns"] + cell["c"]],
+                                 snapshot.STATE_CODES[cell["s"]])
+            self.assertEqual({(c["r"], c["c"]) for c in compact["live"]},
+                             {(c["r"], c["c"]) for c in internal["cells"] if c["s"] in snapshot.LIVE_STATES})
+        root = data["roots"][0]
+        columns = json.loads(self.snapshots.root_tiles(root["run_id"])[0])
+        running = next(cell for cell in root["cells"] if cell.get("node"))
+        at = running["r"] * root["columns"] + running["c"]
+        self.assertEqual(columns["machines"][columns["node"][at]], running["node"])
+        self.assertEqual(self.snapshots.tile(root["run_id"], running["r"], running["c"])["run"], running["run"])
+        self.assertIsNone(self.snapshots.root_tiles("no-such-root"))
+        self.assertIsNone(self.snapshots.tile(root["run_id"], 999, 999))
+
+    def test_certificate_checks_survive_a_restart(self) -> None:
+        cache = Path(self.directory.name) / "certificates.json"
+        first = snapshot.Snapshots(self.deployments, "live", clock=self.clock, certificate_cache=cache)
+        first.get()
+        first.wait_for_certificates()
+        self.assertTrue(cache.exists())
+        again = snapshot.Snapshots(self.deployments, "live", clock=self.clock, certificate_cache=cache)
+        fields = {(item["p"], item["r"]): item for item in again.get()[0]["results"]["fields"]}
+        self.assertEqual(fields[(13, 5)]["matching_attempts"][0]["outcome"], "matched")  # no re-hash
+
+    def test_background_refresh_serves_the_stale_snapshot_at_once(self) -> None:
+        live = snapshot.Snapshots(self.deployments, "live", clock=self.clock, background=True)
+        first = live.get()[0]
+        self.clock.value += live.ttl
+        self.assertIs(live.get()[0], first)              # served immediately; a refresh starts
+        deadline = time.monotonic() + 30
+        while live.get()[0] is first and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertIsNot(live.get()[0], first)
+        live.invalidate()                                 # after a command: the next request waits
+        self.assertIsNot(live.get()[0], first)
 
     def test_cache_and_forced_refresh(self) -> None:
         first = self.snapshots.get()[0]

@@ -75,6 +75,10 @@ def build_timeline(connection: sqlite3.Connection, node_names: list[str],
             row.append(end)
         lanes[item["n"]] = max(lanes.get(item["n"], 1), item["lane"] + 1)
 
+    for item in segments:  # whole seconds are plenty on a 24-hour axis, and a third smaller to send
+        item["t0"] = int(item["t0"])
+        if item["t1"] is not None:
+            item["t1"] = int(item["t1"] + 0.999)
     return {"start": start, "end": now,
             "nodes": [{"name": name, "lanes": lanes.get(name, 1)} for name in node_names],
             "segments": segments}

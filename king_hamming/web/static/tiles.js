@@ -1,8 +1,13 @@
 // DP tile grids. The overview shows one small grid per root; clicking a root
 // opens its focus view (#tiles/RUN or #tiles/RUN/ROW,COL) with a large grid,
 // progress and pace, and a details panel for the selected tile.
+//
+// A root arrives as a grid string (one state code per tile, row-major) plus the
+// few tiles in flight; grids are drawn on canvases, so 200,000 tiles are a few
+// elements, not 200,000. The focus view fetches its root's per-tile detail
+// (/api/tiles) and the selected tile's record (/api/tile) on demand.
 import {
-  html, setHTML, field, fmtDuration, fmtInt, fmtTime, pct, shortId, tooltips,
+  api, html, setHTML, field, fmtDuration, fmtInt, fmtTime, pct, shortId, showTooltip, hideTooltip,
 } from './util.js';
 import { button, isOperator } from './command.js';
 
@@ -18,8 +23,13 @@ export const TILE_STATES = {
   cancelled: 'Cancelled',
   unscheduled: 'Never scheduled',
 };
+// Mirrors STATE_CODES in snapshot.py.
+const CODES = {
+  d: 'durable', c: 'complete', r: 'running', p: 'paused', q: 'queued', y: 'ready',
+  b: 'blocked', f: 'failed', x: 'cancelled', u: 'unscheduled',
+};
 const DONE = new Set(['durable', 'complete']);
-const CELL = 10;
+const NUMBER_MARGIN = 28;    // CSS pixels for row/column numbers around the focus grid
 let showFinished = false;
 
 // Zoom for the focus grid, kept across the page's periodic redraws along with the scroll position.
@@ -31,11 +41,158 @@ let focusScroll = { run: null, left: 0, top: 0 };
 const LOUPE_RADIUS = 5;      // tiles on each side of the pointer: an 11 × 11 view
 const LOUPE_CELL = 20;       // pixels per tile in the magnifier
 const LOUPE_BELOW = 14;      // only needed while tiles are drawn smaller than this many pixels
+const LABEL_FROM = 14;       // machine names are drawn on running tiles at least this large
 
-const positions = new WeakMap();
-function cellAt(root, row, column) {
-  if (!positions.has(root)) positions.set(root, new Map(root.cells.map((c) => [`${c.r},${c.c}`, c])));
-  return positions.get(root).get(`${row},${column}`);
+// Per-root detail fetched for the focus view, by run id; refetched when the snapshot changes.
+const details = new Map();   // run_id -> { generated, data }
+const tileRecords = new Map(); // `${run}/${r},${c}` -> { generated, record }
+
+// ----- reading a root --------------------------------------------------------------
+
+const derived = new WeakMap();
+function info(root) {
+  if (!derived.has(root)) {
+    const live = new Map((root.live || []).map((cell) => [`${cell.r},${cell.c}`, cell]));
+    let total = 0;
+    for (const code of root.grid) if (code !== '-') total += 1;
+    derived.set(root, { live, total });
+  }
+  return derived.get(root);
+}
+
+function stateAt(root, r, c) {
+  if (r < 0 || c < 0 || r >= root.rows || c >= root.columns) return null;
+  return CODES[root.grid[r * root.columns + c]] || null;
+}
+
+// What is known about one tile: its state, the in-flight record, and the fetched detail.
+function cellAt(root, r, c) {
+  const s = stateAt(root, r, c);
+  if (!s) return null;
+  const cell = { r, c, s, ...(info(root).live.get(`${r},${c}`) || {}) };
+  const entry = details.get(root.run_id);
+  if (entry) {
+    const d = entry.data;
+    const at = r * root.columns + c;
+    if (d.node[at] >= 0) cell.node = d.machines[d.node[at]];
+    if (d.start[at] >= 0) {
+      cell.t0 = d.base + d.start[at];
+      if (d.took[at] >= 0) cell.t1 = cell.t0 + d.took[at];
+    }
+    cell.rep = d.copies[at];
+    cell.att = d.attempt[at];
+    if (d.gpu[at] === '1') cell.gpu = 1;
+  }
+  return cell;
+}
+
+// ----- drawing ---------------------------------------------------------------------
+
+function colours() {
+  const style = getComputedStyle(document.documentElement);
+  const result = {};
+  Object.keys(TILE_STATES).forEach((key) => { result[key] = style.getPropertyValue(`--t-${key}`).trim(); });
+  result.ink = style.getPropertyValue('--ink').trim() || '#222';
+  result.muted = style.getPropertyValue('--muted').trim() || '#888';
+  return result;
+}
+
+// Geometry of a drawn grid in CSS pixels: where tile (r, c) is and how big.
+function geometry(canvas, root, focus) {
+  const margin = focus ? NUMBER_MARGIN : 0;
+  const width = canvas.clientWidth;
+  const cell = (width - margin) / root.columns;
+  return { margin, cell, width, height: margin + cell * root.rows };
+}
+
+function draw(canvas, root, { focus = false, selected = null } = {}) {
+  const geo = geometry(canvas, root, focus);
+  if (!(geo.cell > 0)) return;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.round(geo.width * ratio);
+  canvas.height = Math.round(geo.height * ratio);
+  const context = canvas.getContext('2d');
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, geo.width, geo.height);
+  const palette = colours();
+  const gap = geo.cell >= 4 ? Math.min(1, geo.cell * 0.1) : 0;
+  const size = geo.cell - gap;
+  // One pass per state keeps fillStyle changes to ten.
+  const byState = new Map();
+  for (let at = 0; at < root.grid.length; at += 1) {
+    const state = CODES[root.grid[at]];
+    if (!state) continue;
+    if (!byState.has(state)) byState.set(state, []);
+    byState.get(state).push(at);
+  }
+  byState.forEach((indices, state) => {
+    context.fillStyle = palette[state];
+    for (const at of indices) {
+      const r = Math.floor(at / root.columns);
+      const c = at - r * root.columns;
+      context.fillRect(geo.margin + c * geo.cell + gap / 2, geo.margin + r * geo.cell + gap / 2, size, size);
+    }
+  });
+  if (geo.cell >= LABEL_FROM) {
+    context.fillStyle = '#fff';
+    context.font = `600 ${Math.max(8, Math.floor(geo.cell * 0.4))}px system-ui, sans-serif`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    for (const cell of root.live || []) {
+      if (cell.s !== 'running' || !cell.node) continue;
+      context.fillText(cell.node.slice(0, 3), geo.margin + (cell.c + 0.5) * geo.cell, geo.margin + (cell.r + 0.5) * geo.cell);
+    }
+  }
+  if (focus) {
+    context.fillStyle = palette.muted;
+    context.font = '11px system-ui, sans-serif';
+    const step = [1, 2, 5, 10, 20, 50, 100].find((k) => k * geo.cell >= 24) || 200;
+    context.textAlign = 'center';
+    context.textBaseline = 'bottom';
+    for (let k = 0; k < root.columns; k += step) context.fillText(String(k), geo.margin + (k + 0.5) * geo.cell, geo.margin - 4);
+    context.textAlign = 'right';
+    context.textBaseline = 'middle';
+    for (let k = 0; k < root.rows; k += step) context.fillText(String(k), geo.margin - 4, geo.margin + (k + 0.5) * geo.cell);
+  }
+  if (selected) {
+    context.strokeStyle = palette.ink;
+    context.lineWidth = Math.max(1.5, geo.cell * 0.12);
+    context.strokeRect(geo.margin + selected.c * geo.cell, geo.margin + selected.r * geo.cell, geo.cell, geo.cell);
+  }
+}
+
+// The tile under the pointer, or null.
+function hit(canvas, root, event, focus) {
+  const geo = geometry(canvas, root, focus);
+  const box = canvas.getBoundingClientRect();
+  const x = event.clientX - box.left - geo.margin;
+  const y = event.clientY - box.top - geo.margin;
+  if (x < 0 || y < 0) return null;
+  const c = Math.floor(x / geo.cell);
+  const r = Math.floor(y / geo.cell);
+  return stateAt(root, r, c) ? { r, c, cell: geo.cell } : null;
+}
+
+// Redraw every grid canvas in `container` now and whenever its width changes. One observer at a
+// time: the page re-renders every poll, and an observer keeps its old canvases alive.
+let gridObserver = null;
+function attachGrids(container, roots, options) {
+  const canvases = [...container.querySelectorAll('canvas.tile-grid')];
+  const redraw = (canvas) => draw(canvas, roots[Number(canvas.dataset.root)], options(canvas));
+  canvases.forEach(redraw);
+  if (gridObserver) gridObserver.disconnect();
+  gridObserver = new ResizeObserver((entries) => entries.forEach((entry) => {
+    if (entry.target.isConnected) redraw(entry.target);
+  }));
+  canvases.forEach((canvas) => gridObserver.observe(canvas));
+}
+
+function canvasFor(root, index, focus = false) {
+  // The width/height attributes give the canvas its aspect ratio until it is drawn.
+  const margin = focus ? NUMBER_MARGIN : 0;
+  return html`<canvas class="tile-grid${focus ? ' focus' : ''}" data-root="${index}"
+    width="${root.columns * 10 + margin}" height="${root.rows * 10 + margin}" role="img"
+    aria-label="${field(root.p, root.r)} tile grid"></canvas>`;
 }
 
 // The tiles around `centre`, drawn large; the window slides to stay inside the grid.
@@ -45,30 +202,46 @@ function loupe(root, centre, selected) {
   const left = Math.max(0, Math.min(centre.c - LOUPE_RADIUS, root.columns - size));
   const rows = Math.min(size, root.rows);
   const columns = Math.min(size, root.columns);
+  const live = info(root).live;
   const cells = [];
   for (let r = top; r < top + rows; r += 1) {
     for (let c = left; c < left + columns; c += 1) {
-      const cell = cellAt(root, r, c);
-      if (!cell) continue;
+      const s = stateAt(root, r, c);
+      if (!s) continue;
       const x = (c - left) * LOUPE_CELL;
       const y = (r - top) * LOUPE_CELL;
       const mark = r === centre.r && c === centre.c ? ' centre'
         : selected && selected.r === r && selected.c === c ? ' selected' : '';
-      cells.push(html`<rect class="t-${cell.s}${mark}" x="${x + 1}" y="${y + 1}" width="${LOUPE_CELL - 2}"
-        height="${LOUPE_CELL - 2}" rx="2.5"></rect>${cell.s === 'running' && cell.node
-        ? html`<text class="loupe-label" x="${x + LOUPE_CELL / 2}" y="${y + LOUPE_CELL / 2 + 3}">${cell.node.slice(0, 3)}</text>` : ''}`);
+      const running = live.get(`${r},${c}`);
+      cells.push(html`<rect class="t-${s}${mark}" x="${x + 1}" y="${y + 1}" width="${LOUPE_CELL - 2}"
+        height="${LOUPE_CELL - 2}" rx="2.5"></rect>${s === 'running' && running && running.node
+        ? html`<text class="loupe-label" x="${x + LOUPE_CELL / 2}" y="${y + LOUPE_CELL / 2 + 3}">${running.node.slice(0, 3)}</text>` : ''}`);
     }
   }
   return html`<svg class="loupe" viewBox="0 0 ${columns * LOUPE_CELL} ${rows * LOUPE_CELL}"
     width="${columns * LOUPE_CELL}" height="${rows * LOUPE_CELL}" aria-hidden="true">${cells}</svg>`;
 }
 
+function tileLines(root, c) {
+  const lines = [html`<b>${field(root.p, root.r)} tile ${c.r},${c.c}</b> · ${TILE_STATES[c.s] || c.s}`];
+  if (c.node) lines.push(html`machine ${c.node}`);
+  if (c.s === 'running' && c.total) lines.push(html`${c.phase} · ${pct(c.done / c.total)}`);
+  if (c.t0) lines.push(html`started ${fmtTime(c.t0)}${c.t1 ? html` · took ${fmtDuration(c.t1 - c.t0)}` : ''}${c.gpu ? html` · <span class="gpu-tag">GPU</span>` : ''}`);
+  if (c.run) lines.push(html`run ${shortId(c.run)}`);
+  if (c.att || c.rep !== undefined) {
+    lines.push(html`attempt ${c.att || 1}${c.rep !== undefined ? html` · ${c.rep} live cop${c.rep === 1 ? 'y' : 'ies'}` : ''}`);
+  }
+  if (c.err) lines.push(html`<span class="error-text">${c.err}</span>`);
+  return lines;
+}
+
 // Details for a hovered tile: a magnifier when the grid is drawn too small to read, then the facts.
-function tileTip(root, c, target, selected, footer = '') {
-  const drawn = target.getBoundingClientRect().width;
+function tileTip(root, c, drawn, selected, footer = '') {
   const lines = tileLines(root, c).map((line, i) => html`${i ? html`<br>` : ''}${line}`);
   return html`${drawn < LOUPE_BELOW ? loupe(root, c, selected) : ''}<div>${lines}${footer}</div>`;
 }
+
+// ----- summaries -------------------------------------------------------------------
 
 function rootActions(root) {
   const run = { run_id: root.run_id };
@@ -87,48 +260,23 @@ function rootActions(root) {
   return buttons.length ? html`<div class="cmd-row">${buttons}</div>` : '';
 }
 
-function tileLines(root, c) {
-  const lines = [html`<b>${field(root.p, root.r)} tile ${c.r},${c.c}</b> · ${TILE_STATES[c.s] || c.s}`];
-  if (c.node) lines.push(html`machine ${c.node}`);
-  if (c.s === 'running' && c.total) lines.push(html`${c.phase} · ${pct(c.done / c.total)}`);
-  if (c.t0) lines.push(html`started ${fmtTime(c.t0)}${c.t1 ? html` · took ${fmtDuration(c.t1 - c.t0)}` : ''}${c.gpu ? html` · <span class="gpu-tag">GPU</span>` : ''}`);
-  if (c.run) lines.push(html`run ${shortId(c.run)} · attempt ${c.att || 1} · ${c.rep} live cop${c.rep === 1 ? 'y' : 'ies'}`);
-  if (c.err) lines.push(html`<span class="error-text">${c.err}</span>`);
-  return lines;
-}
-
-// Grid SVG. In focus mode it gets row/column numbers, longer machine labels and
-// a selection outline; `margin` is the space for the numbers, in cell units.
-function grid(root, index, { focus = false, selected = null } = {}) {
-  const margin = focus ? 3 : 0;
-  const offset = margin * CELL;
-  const step = root.columns > 60 ? 10 : 5;
-  const cells = root.cells.map((c, i) => {
-    const x = offset + c.c * CELL;
-    const y = offset + c.r * CELL;
-    const label = c.s === 'running' && c.node
-      ? html`<text class="tile-label" x="${x + CELL / 2}" y="${y + CELL / 2 + 1.4}">${c.node.slice(0, focus ? 3 : 2)}</text>` : '';
-    const isSelected = selected && selected.r === c.r && selected.c === c.c;
-    return html`<rect class="tile t-${c.s}${isSelected ? ' selected' : ''}" x="${x + 0.5}" y="${y + 0.5}"
-      width="${CELL - 1}" height="${CELL - 1}" rx="1.2" data-root="${index}" data-cell="${i}"></rect>${label}`;
-  });
-  const numbers = [];
-  if (focus) {
-    for (let k = 0; k < Math.max(root.rows, root.columns); k += step) {
-      if (k < root.columns) numbers.push(html`<text class="grid-number" x="${offset + k * CELL + CELL / 2}" y="${offset - 6}">${k}</text>`);
-      if (k < root.rows) numbers.push(html`<text class="grid-number" x="${offset - 4}" y="${offset + k * CELL + CELL / 2 + 2}" text-anchor="end">${k}</text>`);
-    }
-  }
-  const width = offset + root.columns * CELL;
-  const height = offset + root.rows * CELL;
-  return html`<svg class="tile-grid${focus ? ' focus' : ''}" viewBox="0 0 ${width} ${height}" role="img"
-    aria-label="${field(root.p, root.r)} tile grid">${numbers}${cells}</svg>`;
-}
-
 function chips(root) {
   return Object.keys(TILE_STATES)
     .filter((key) => root.counts[key])
     .map((key) => html`<span class="chip"><span class="swatch t-${key}"></span>${fmtInt(root.counts[key])} ${key}</span>`);
+}
+
+// Unfinished tiles per anti-diagonal (row + column), from the grid string.
+function unfinishedByDiagonal(root) {
+  const perDiagonal = new Map();
+  for (let at = 0; at < root.grid.length; at += 1) {
+    const state = CODES[root.grid[at]];
+    if (!state || DONE.has(state)) continue;
+    const r = Math.floor(at / root.columns);
+    const k = r + (at - r * root.columns);
+    perDiagonal.set(k, (perDiagonal.get(k) || 0) + 1);
+  }
+  return perDiagonal;
 }
 
 // Time left from the typical tile, following the wave: tiles on one
@@ -140,17 +288,13 @@ function chips(root) {
 function typicalEstimate(root, machines, roots = []) {
   const typical = typicalTile(root, roots);
   if (!typical || ['complete', 'failed', 'cancelled'].includes(root.state)) return null;
-  const median = typical.seconds;
-  const perDiagonal = new Map();
-  root.cells.forEach((c) => {
-    if (!DONE.has(c.s)) perDiagonal.set(c.r + c.c, (perDiagonal.get(c.r + c.c) || 0) + 1);
-  });
+  const perDiagonal = unfinishedByDiagonal(root);
   if (!perDiagonal.size) return null;
   const width = Math.max(1, machines);
   let steps = 0;
   perDiagonal.forEach((count) => { steps += Math.ceil(count / width); });
   const remaining = [...perDiagonal.values()].reduce((a, b) => a + b, 0);
-  return { seconds: steps * median, remaining, diagonals: perDiagonal.size, machines: width, typical };
+  return { seconds: steps * typical.seconds, remaining, diagonals: perDiagonal.size, machines: width, typical };
 }
 
 // This attempt's typical tile, or (when every finished tile so far was reused
@@ -189,7 +333,7 @@ function recomputedNote(root) {
 
 function rootCard(root, index, machines, roots) {
   const estimate = typicalEstimate(root, machines, roots);
-  const total = root.cells.length;
+  const total = info(root).total;
   const done = root.counts.durable + root.counts.complete;
   const attempt = root.attempt ? `attempt ${root.attempt} of ${root.attempts}` : '';
   return html`<article class="root-card ${root.active ? '' : 'root-finished'}">
@@ -209,31 +353,51 @@ function rootCard(root, index, machines, roots) {
     ${root.orphaned_children ? html`<p class="alert">This root is ${root.state}, but ${root.orphaned_children}
       of its tiles are still running or queued.</p>` : ''}
     ${root.error ? html`<p class="error-text">${root.error}</p>` : ''}
-    <a class="grid-link" href="#tiles/${root.run_id}" aria-label="Open ${field(root.p, root.r)}">${grid(root, index)}</a>
+    <a class="grid-link" href="#tiles/${root.run_id}" aria-label="Open ${field(root.p, root.r)}">${canvasFor(root, index)}</a>
     <div class="card-foot">${rootActions(root)}<a class="cmd small open-link" href="#tiles/${root.run_id}">Open ↗</a></div>
   </article>`;
 }
 
-// Pace and sweep position from the cells' own start/finish times.
-function pace(root, now) {
-  const finished = root.cells.filter((c) => DONE.has(c.s) && c.t1 && c.t0 && c.t1 - c.t0 >= 1);
-  const lastHour = finished.filter((c) => c.t1 > now - 3600).length;
-  const remaining = root.cells.filter((c) => !DONE.has(c.s)).length;
-  const done = new Set(root.cells.filter((c) => DONE.has(c.s)).map((c) => c.r + c.c));
+// Pace and sweep position from the grid and the server's count of tiles finished in the last hour.
+function pace(root) {
+  const unfinished = unfinishedByDiagonal(root);
+  const remaining = [...unfinished.values()].reduce((a, b) => a + b, 0);
   // Swept through diagonal k: every tile with row + column <= k is done.
-  const byDiagonal = new Map();
-  root.cells.forEach((c) => {
-    const k = c.r + c.c;
-    byDiagonal.set(k, (byDiagonal.get(k) ?? true) && DONE.has(c.s));
-  });
   let swept = -1;
-  while (byDiagonal.get(swept + 1)) swept += 1;
-  const running = root.cells.filter((c) => c.s === 'running').map((c) => c.r + c.c);
+  const diagonals = root.rows + root.columns - 1;
+  while (swept + 1 < diagonals && !unfinished.has(swept + 1)) swept += 1;
+  const running = (root.live || []).filter((c) => c.s === 'running').map((c) => c.r + c.c);
+  const lastHour = root.finished_last_hour || 0;
   return {
-    lastHour, remaining, swept, diagonals: root.rows + root.columns - 1,
+    lastHour, remaining, swept, diagonals,
     front: running.length ? [Math.min(...running), Math.max(...running)] : null,
-    eta: lastHour ? (remaining / lastHour) * 3600 : null, any: done.size > 0,
+    eta: lastHour ? (remaining / lastHour) * 3600 : null,
   };
+}
+
+// A thin progress bar without importing bar() styles that use --wc.
+function bar2(fraction) {
+  const width = Math.max(0, Math.min(1, fraction)) * 100;
+  return html`<svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
+    <rect class="bar-track" x="0" y="0" width="100" height="6" rx="3"></rect>
+    <rect class="bar-fill done-fill" x="0" y="0" width="${width.toFixed(2)}" height="6" rx="3"></rect></svg>`;
+}
+
+// ----- focus view ------------------------------------------------------------------
+
+function detailPanel(root, selected, generated) {
+  if (!selected) {
+    return html`<p class="hint">Click a tile to see its details${isOperator() ? ' and actions' : ''}.</p>`;
+  }
+  const entry = tileRecords.get(`${root.run_id}/${selected.r},${selected.c}`);
+  const cell = entry && entry.generated === generated ? entry.record : cellAt(root, selected.r, selected.c);
+  if (!cell) return html`<p class="hint">Tile ${selected.r},${selected.c} is not in this grid.</p>`;
+  return html`<h3>Tile ${cell.r},${cell.c}</h3>
+    <p>${tileLines(root, cell).map((line, i) => html`${i ? html`<br>` : ''}${line}`)}</p>
+    ${cell.run && ['running', 'queued', 'paused'].includes(cell.s) ? html`<div class="cmd-row">
+      ${cell.s === 'paused' ? button('run.resume', { run_id: cell.run }, 'Resume tile', 'small')
+        : button('run.pause', { run_id: cell.run }, 'Pause tile', 'small')}
+      ${button('run.priority', { run_id: cell.run }, 'Priority…', 'small')}</div>` : ''}`;
 }
 
 function focusView(outer, snapshot, roots, root, selected) {
@@ -241,11 +405,11 @@ function focusView(outer, snapshot, roots, root, selected) {
   const container = document.createElement('div');
   outer.replaceChildren(container);
   const index = roots.indexOf(root);
-  const total = root.cells.length;
+  const total = info(root).total;
   const done = root.counts.durable + root.counts.complete;
-  const stats = pace(root, snapshot.generated_at);
+  const stats = pace(root);
   const typical = typicalEstimate(root, healthyMachines(snapshot), roots);
-  const cell = selected && root.cells.find((c) => c.r === selected.r && c.c === selected.c);
+  const generated = snapshot.generated_at;
   const zoomBar = html`<div class="zoom-bar" role="group" aria-label="Zoom">
     <button type="button" class="cmd small" data-zoom="out" ${zoom === ZOOMS[0] ? 'disabled' : ''} title="Zoom out">−</button>
     <span class="zoom-level">${zoom}×</span>
@@ -253,16 +417,6 @@ function focusView(outer, snapshot, roots, root, selected) {
     <button type="button" class="cmd small" data-zoom="fit" ${zoom === 1 ? 'disabled' : ''} title="Fit the whole grid">Fit</button>
     <span class="hint">Hover a tile for a magnified view; zoom to click a single tile.</span>
   </div>`;
-  const detail = cell ? html`
-      <div class="card tile-detail">
-        <h3>Tile ${cell.r},${cell.c}</h3>
-        <p>${tileLines(root, cell).map((line, i) => html`${i ? html`<br>` : ''}${line}`)}</p>
-        ${cell.run && ['running', 'queued', 'paused'].includes(cell.s) ? html`<div class="cmd-row">
-          ${cell.s === 'paused' ? button('run.resume', { run_id: cell.run }, 'Resume tile', 'small')
-            : button('run.pause', { run_id: cell.run }, 'Pause tile', 'small')}
-          ${button('run.priority', { run_id: cell.run }, 'Priority…', 'small')}</div>` : ''}
-      </div>`
-    : html`<div class="card tile-detail"><p class="hint">Click a tile to see its details${isOperator() ? ' and actions' : ''}.</p></div>`;
 
   setHTML(container, html`
     <section class="panel">
@@ -277,7 +431,7 @@ function focusView(outer, snapshot, roots, root, selected) {
         of its tiles are still running or queued.</p>` : ''}
       ${root.error ? html`<p class="error-text">${root.error}</p>` : ''}
       <div class="focus-body">
-        <div class="focus-grid${zoom > 1 ? ' zoomed' : ''}">${zoomBar}<div class="focus-scroll">${grid(root, index, { focus: true, selected })}</div></div>
+        <div class="focus-grid${zoom > 1 ? ' zoomed' : ''}">${zoomBar}<div class="focus-scroll">${canvasFor(root, index, true)}</div></div>
         <aside class="focus-side">
           <div class="card">
             <div class="big-number">${pct(total ? done / total : 0)}</div>
@@ -301,63 +455,79 @@ function focusView(outer, snapshot, roots, root, selected) {
               reconstruction step.</p>
           </div>
           <div class="chips">${chips(root)}</div>
-          ${detail}
+          ${recomputedNote(root)}
+          <div class="card tile-detail">${detailPanel(root, selected, generated)}</div>
         </aside>
       </div>
     </section>`);
 
   // Zoom lives in CSS (a variable on the grid) because the page's content-security policy has no inline styles.
   const scroller = container.querySelector('.focus-scroll');
-  const svg = scroller.querySelector('svg.tile-grid');
-  svg.style.setProperty('--zoom', String(zoom));
-  const viewport = scroller;
+  const canvas = scroller.querySelector('canvas.tile-grid');
+  canvas.style.setProperty('--zoom', String(zoom));
+  attachGrids(container, roots, () => ({ focus: true, selected }));
   if (focusScroll.run === root.run_id) {
-    viewport.scrollLeft = focusScroll.left;
-    viewport.scrollTop = focusScroll.top;
+    scroller.scrollLeft = focusScroll.left;
+    scroller.scrollTop = focusScroll.top;
   }
-  viewport.addEventListener('scroll', () => {
-    focusScroll = { run: root.run_id, left: viewport.scrollLeft, top: viewport.scrollTop };
+  scroller.addEventListener('scroll', () => {
+    focusScroll = { run: root.run_id, left: scroller.scrollLeft, top: scroller.scrollTop };
   }, { passive: true });
 
+  // Per-tile detail for tooltips, and the selected tile's full record, once per snapshot.
+  const entry = details.get(root.run_id);
+  if (!entry || entry.generated !== generated) {
+    api(`/api/tiles?run=${encodeURIComponent(root.run_id)}`).then((data) => {
+      details.set(root.run_id, { generated, data });
+    }).catch(() => {});
+  }
+  if (selected) {
+    const key = `${root.run_id}/${selected.r},${selected.c}`;
+    const known = tileRecords.get(key);
+    if (!known || known.generated !== generated) {
+      api(`/api/tile?run=${encodeURIComponent(root.run_id)}&r=${selected.r}&c=${selected.c}`).then((record) => {
+        tileRecords.set(key, { generated, record });
+        const panel = container.querySelector('.tile-detail');
+        if (panel && container.isConnected) setHTML(panel, detailPanel(root, selected, generated));
+      }).catch(() => {});
+    }
+  }
+
   container.addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-zoom]');
-    if (button) {
+    const zoomButton = event.target.closest('button[data-zoom]');
+    if (zoomButton) {
       const before = zoom;
       const at = ZOOMS.indexOf(zoom);
-      zoom = button.dataset.zoom === 'fit' ? 1
-        : ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, at + (button.dataset.zoom === 'in' ? 1 : -1)))];
+      zoom = zoomButton.dataset.zoom === 'fit' ? 1
+        : ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, at + (zoomButton.dataset.zoom === 'in' ? 1 : -1)))];
       // Keep the middle of what is on screen in the middle after the grid changes size.
       const ratio = zoom / before;
-      const centreX = viewport.scrollLeft + viewport.clientWidth / 2;
-      const centreY = viewport.scrollTop + viewport.clientHeight / 2;
+      const centreX = scroller.scrollLeft + scroller.clientWidth / 2;
+      const centreY = scroller.scrollTop + scroller.clientHeight / 2;
       focusScroll = {
         run: root.run_id,
-        left: Math.max(0, centreX * ratio - viewport.clientWidth / 2),
-        top: Math.max(0, centreY * ratio - viewport.clientHeight / 2),
+        left: Math.max(0, centreX * ratio - scroller.clientWidth / 2),
+        top: Math.max(0, centreY * ratio - scroller.clientHeight / 2),
       };
       focusView(outer, snapshot, roots, root, selected);
       return;
     }
-    const target = event.target.closest('rect.tile');
-    if (!target) return;
-    const c = root.cells[Number(target.dataset.cell)];
-    const same = selected && selected.r === c.r && selected.c === c.c;
-    history.replaceState(null, '', same ? `#tiles/${root.run_id}` : `#tiles/${root.run_id}/${c.r},${c.c}`);
-    focusView(outer, snapshot, roots, root, same ? null : { r: c.r, c: c.c });
+    if (event.target !== canvas) return;
+    const found = hit(canvas, root, event, true);
+    if (!found) return;
+    const same = selected && selected.r === found.r && selected.c === found.c;
+    history.replaceState(null, '', same ? `#tiles/${root.run_id}` : `#tiles/${root.run_id}/${found.r},${found.c}`);
+    focusView(outer, snapshot, roots, root, same ? null : { r: found.r, c: found.c });
   });
-  tooltips(container, 'rect.tile', (target) => {
-    const c = root.cells[Number(target.dataset.cell)];
-    return c ? tileTip(root, c, target, selected) : null;
+  canvas.addEventListener('pointermove', (event) => {
+    const found = hit(canvas, root, event, true);
+    if (!found) { hideTooltip(); return; }
+    showTooltip(event, tileTip(root, cellAt(root, found.r, found.c), found.cell, selected));
   });
+  canvas.addEventListener('pointerleave', hideTooltip);
 }
 
-// A thin progress bar without importing bar() styles that use --wc.
-function bar2(fraction) {
-  const width = Math.max(0, Math.min(1, fraction)) * 100;
-  return html`<svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
-    <rect class="bar-track" x="0" y="0" width="100" height="6" rx="3"></rect>
-    <rect class="bar-fill done-fill" x="0" y="0" width="${width.toFixed(2)}" height="6" rx="3"></rect></svg>`;
-}
+// ----- overview --------------------------------------------------------------------
 
 export function render(container, snapshot, detail) {
   const roots = snapshot.roots;
@@ -383,6 +553,7 @@ export function render(container, snapshot, detail) {
   const finished = roots.filter((r) => !r.active).reverse();
   const legend = Object.entries(TILE_STATES)
     .map(([key, label]) => html`<span class="legend-item"><span class="swatch t-${key}"></span>${label}</span>`);
+  const machines = healthyMachines(snapshot);
 
   setHTML(container, html`
     <section class="panel">
@@ -392,32 +563,40 @@ export function render(container, snapshot, detail) {
           Click a root to open it full size with its pace and per-tile details.</p>
       </div>
       <div class="legend">${legend}</div>
-      ${active.length ? html`<div class="root-grid">${active.map((r) => rootCard(r, roots.indexOf(r), healthyMachines(snapshot), roots))}</div>`
+      ${active.length ? html`<div class="root-grid">${active.map((r) => rootCard(r, roots.indexOf(r), machines, roots))}</div>`
         : html`<p class="empty-note">No DP root is active.</p>`}
       ${finished.length ? html`
         <details class="finished" ${showFinished ? 'open' : ''}>
           <summary>Finished in the last 24 hours (${finished.length})</summary>
-          <div class="root-grid">${finished.map((r) => rootCard(r, roots.indexOf(r), healthyMachines(snapshot), roots))}</div>
+          ${showFinished ? html`<div class="root-grid">${finished.map((r) => rootCard(r, roots.indexOf(r), machines, roots))}</div>` : ''}
         </details>` : ''}
     </section>`);
 
-  const details = container.querySelector('details.finished');
-  if (details) details.addEventListener('toggle', () => { showFinished = details.open; });
+  const finishedSection = container.querySelector('details.finished');
+  if (finishedSection) {
+    // Finished roots are drawn only when opened.
+    finishedSection.addEventListener('toggle', () => {
+      if (showFinished === finishedSection.open) return;
+      showFinished = finishedSection.open;
+      render(container, snapshot, detail);
+    });
+  }
+  attachGrids(container, roots, () => ({}));
 
-  // Clicking a tile in the overview opens the root with that tile selected.
-  container.addEventListener('click', (event) => {
-    const target = event.target.closest('rect.tile');
-    if (!target) return;
-    event.preventDefault();
-    const root = roots[Number(target.dataset.root)];
-    const c = root.cells[Number(target.dataset.cell)];
-    location.hash = `#tiles/${root.run_id}/${c.r},${c.c}`;
-  });
-
-  tooltips(container, 'rect.tile', (target) => {
-    const root = roots[Number(target.dataset.root)];
-    const c = root && root.cells[Number(target.dataset.cell)];
-    if (!c) return null;
-    return tileTip(root, c, target, null, html`<br><i>click to open</i>`);
+  container.querySelectorAll('canvas.tile-grid').forEach((canvas) => {
+    const root = roots[Number(canvas.dataset.root)];
+    canvas.addEventListener('pointermove', (event) => {
+      const found = hit(canvas, root, event, false);
+      if (!found) { hideTooltip(); return; }
+      showTooltip(event, tileTip(root, cellAt(root, found.r, found.c), found.cell, null, html`<br><i>click to open</i>`));
+    });
+    canvas.addEventListener('pointerleave', hideTooltip);
+    // Clicking a tile in the overview opens the root with that tile selected.
+    canvas.addEventListener('click', (event) => {
+      const found = hit(canvas, root, event, false);
+      if (!found) return;
+      event.preventDefault();
+      location.hash = `#tiles/${root.run_id}/${found.r},${found.c}`;
+    });
   });
 }

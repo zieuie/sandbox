@@ -108,6 +108,14 @@ function place(event) {
   tip.style.top = `${y}px`;
 }
 
+// Show the shared tooltip with `content` beside the pointer (for canvas grids, which hit-test
+// themselves instead of using per-element targets).
+export function showTooltip(event, content) {
+  setHTML(tip, content);
+  tip.hidden = false;
+  place(event);
+}
+
 export function tooltips(container, selector, contentFor) {
   const show = (event) => {
     const target = event.target.closest(selector);

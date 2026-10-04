@@ -119,6 +119,61 @@ def node_gpus(node: dict) -> list[dict] | None:
             for item in devices if isinstance(item, dict)]
 
 
+# One character per tile in a root's grid string (row-major); "-" where the grid has no tile.
+STATE_CODES = {"durable": "d", "complete": "c", "running": "r", "paused": "p", "queued": "q", "ready": "y",
+               "blocked": "b", "failed": "f", "cancelled": "x", "unscheduled": "u"}
+LIVE_STATES = {"running", "paused", "queued", "failed", "cancelled"}
+
+
+def wire(snapshot: dict) -> dict:
+    """The snapshot as sent to browsers: each root's per-tile list (18 MB for 200,000 tiles) is
+    replaced by a grid string plus the few tiles in flight; /api/tiles has the rest on demand."""
+    roots = snapshot.get("roots")
+    if not roots:
+        return snapshot
+    sent = []
+    for root in roots:
+        compact = {key: value for key, value in root.items() if key != "cells"}
+        grid = ["-"] * (root["rows"] * root["columns"])
+        live = []
+        for cell in root["cells"]:
+            grid[cell["r"] * root["columns"] + cell["c"]] = STATE_CODES.get(cell["s"], "-")
+            if cell["s"] in LIVE_STATES:
+                live.append({key: cell[key] for key in ("r", "c", "s", "node", "done", "total", "phase", "err")
+                             if key in cell})
+        compact["grid"] = "".join(grid)
+        compact["live"] = live
+        sent.append(compact)
+    return {**snapshot, "roots": sent}
+
+
+def tile_columns(root: dict) -> dict:
+    """Column-wise per-tile detail for one root (see Snapshots.root_tiles)."""
+    size = root["rows"] * root["columns"]
+    machines: list[str] = []
+    index: dict[str, int] = {}
+    node, start, took, copies, attempt, gpu = [-1] * size, [-1] * size, [-1] * size, [0] * size, [0] * size, ["0"] * size
+    base = int(root.get("created") or 0)
+    for cell in root["cells"]:
+        at = cell["r"] * root["columns"] + cell["c"]
+        name = cell.get("node")
+        if name:
+            if name not in index:
+                index[name] = len(machines)
+                machines.append(name)
+            node[at] = index[name]
+        if cell.get("t0"):
+            start[at] = int(cell["t0"]) - base
+            if cell.get("t1"):
+                took[at] = max(0, int(round(cell["t1"] - cell["t0"])))
+        copies[at] = cell.get("rep") or 0
+        attempt[at] = cell.get("att") or 0
+        if cell.get("gpu"):
+            gpu[at] = "1"
+    return {"run_id": root["run_id"], "base": base, "machines": machines, "node": node, "start": start,
+            "took": took, "copies": copies, "attempt": attempt, "gpu": "".join(gpu)}
+
+
 class Snapshots:
     """Cache one snapshot, rebuilt on demand after ttl seconds.
 
@@ -129,19 +184,34 @@ class Snapshots:
 
     def __init__(self, deployments: Path, campaign: str = "continuous-campaign",
                  ttl: float = 15.0, min_refresh: float = 3.0,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, background: bool = False,
+                 certificate_cache: Path | None = None) -> None:
         self.deployments = deployments
         self.campaign = campaign
         self.ttl = ttl
         self.min_refresh = min_refresh
         self.clock = clock
+        # With background=True a stale snapshot is served at once while a thread rebuilds it (a
+        # build takes seconds on a large campaign); only a forced refresh or the first build waits.
+        self.background = background
         self.lock = threading.Lock()
+        self.build_lock = threading.Lock()
+        self.refreshing = False
+        self.dirty = False
         self.encoded: tuple[bytes, bytes] | None = None
+        self.tile_details: dict[str, tuple[bytes, bytes]] = {}
         self.snapshot: dict | None = None
         self.built_at = 0.0
+        self.build_started = 0.0
         self.previous: dict[str, Any] = {}
         self.dp_files: dict[tuple, tuple[dict, str]] = {}
-        self.certificates: dict[tuple, int] = {}
+        # Certificate checks hash whole files (tens of GB): done by a worker thread, kept on disk
+        # across restarts, and shown as "checking" until known, so no build waits for them.
+        self.certificate_cache = certificate_cache
+        self.certificates: dict[tuple, int] = self.load_certificates()
+        self.certificate_queue: dict[tuple, tuple] = {}
+        self.certificate_lock = threading.Lock()
+        self.certificate_worker: threading.Thread | None = None
         self.match_inputs: dict[str, tuple[dict, bytes]] = {}
         self.dependency_cache: dict[tuple, list[tuple[int, int]]] = {}
         self.descriptions: dict[str, dict] = {}
@@ -157,17 +227,73 @@ class Snapshots:
         """Return (snapshot, JSON bytes, gzip bytes), rebuilding when stale."""
         with self.lock:
             age = self.clock() - self.built_at
-            if self.snapshot is None or age >= self.ttl or (force and age >= self.min_refresh):
-                self.snapshot = self.build()
-                body = json.dumps(self.snapshot, separators=(",", ":")).encode()
-                self.encoded = (body, gzip.compress(body, 6))
-                self.built_at = self.clock()
-            return self.snapshot, *self.encoded
+            must_wait = (self.snapshot is None or self.dirty or (force and age >= self.min_refresh) or
+                         (age >= self.ttl and not self.background))
+            if not must_wait:
+                if age >= self.ttl and not self.refreshing:
+                    self.refreshing = True
+                    threading.Thread(target=self.refresh, name="snapshot-refresh", daemon=True).start()
+                return self.snapshot, *self.encoded
+            requested = self.clock()
+        return self.rebuild(requested)
+
+    def rebuild(self, requested: float) -> tuple[dict, bytes, bytes]:
+        """Build now, unless another thread finished a build started after `requested`."""
+        with self.build_lock:
+            with self.lock:
+                if self.snapshot is not None and not self.dirty and self.build_started >= requested:
+                    return self.snapshot, *self.encoded
+                self.dirty = False
+            started = self.clock()
+            snapshot = self.build()
+            body = json.dumps(wire(snapshot), separators=(",", ":")).encode()
+            encoded = (body, gzip.compress(body, 6))
+            with self.lock:
+                self.snapshot, self.encoded = snapshot, encoded
+                self.tile_details = {}
+                self.built_at, self.build_started = self.clock(), started
+                return self.snapshot, *self.encoded
+
+    def refresh(self) -> None:
+        try:
+            self.rebuild(self.clock())
+        finally:
+            with self.lock:
+                self.refreshing = False
 
     def invalidate(self) -> None:
         """Make the next request rebuild (after a command changed something)."""
         with self.lock:
             self.built_at = 0.0
+            self.dirty = True
+
+    def root_tiles(self, run_id: str) -> tuple[bytes, bytes] | None:
+        """Per-tile detail of one DP root for its focus view, as (JSON, gzip); None if not shown.
+
+        Columns follow the root's grid (row-major): machine index, start offset and duration in
+        whole seconds (-1 when unknown), live copies, lease attempt, and a GPU flag string. Run ids
+        and errors are left out; /api/tile returns them for one tile.
+        """
+        snapshot, _, _ = self.get()
+        with self.lock:
+            if run_id in self.tile_details:
+                return self.tile_details[run_id]
+        root = next((item for item in snapshot.get("roots") or [] if item["run_id"] == run_id), None)
+        if root is None:
+            return None
+        body = json.dumps(tile_columns(root), separators=(",", ":")).encode()
+        encoded = (body, gzip.compress(body, 6))
+        with self.lock:
+            self.tile_details[run_id] = encoded
+        return encoded
+
+    def tile(self, run_id: str, row: int, column: int) -> dict | None:
+        """Everything known about one tile (for the selected-tile panel)."""
+        snapshot, _, _ = self.get()
+        root = next((item for item in snapshot.get("roots") or [] if item["run_id"] == run_id), None)
+        if root is None:
+            return None
+        return next((cell for cell in root["cells"] if cell["r"] == row and cell["c"] == column), None)
 
     def age(self) -> float | None:
         return None if self.snapshot is None else self.clock() - self.built_at
@@ -627,6 +753,9 @@ class Snapshots:
                 "columns": 1 + max((cell["c"] for cell in cells), default=-1),
                 "counts": counts,
                 "recomputed": max(0, finished_runs.get(root["run_id"], 0) - counts["durable"] - counts["complete"]),
+                "finished_last_hour": sum(1 for cell in cells if cell["s"] in {"durable", "complete"}
+                                          and cell.get("t1") and cell.get("t0") and cell["t1"] - cell["t0"] >= 1
+                                          and cell["t1"] > now - 3600),
                 "gpu_tiles": sum(1 for cell in cells if cell.get("gpu")),
                 "boundary": boundary or ("clear" if root["state"] not in TERMINAL else None),
                 "median_tile_seconds": statistics.median(durations) if durations else None,
@@ -649,12 +778,65 @@ class Snapshots:
             raise ValueError(f"DP artifact hash mismatch: {path.name}")
         return dp
 
-    def certificate(self, path: Path, artifact_hash: str, dp: dict, digest: bytes) -> int:
+    def certificate(self, path: Path, artifact_hash: str, dp: dict, digest: bytes) -> int | None:
+        """The certificate's status (0 matched, 1 obstructed), or None while it is being checked."""
         stat = path.stat()
         key = (str(path), stat.st_size, stat.st_mtime_ns, artifact_hash)
-        if key not in self.certificates:
-            self.certificates[key] = certificate_status(path, artifact_hash, dp, digest)
-        return self.certificates[key]
+        with self.certificate_lock:
+            if key in self.certificates:
+                outcome = self.certificates[key]
+                if isinstance(outcome, str):
+                    raise ValueError(outcome)
+                return outcome
+            self.certificate_queue.setdefault(key, (path, artifact_hash, dp, digest))
+            if self.certificate_worker is None or not self.certificate_worker.is_alive():
+                self.certificate_worker = threading.Thread(target=self.check_certificates,
+                                                           name="certificate-check", daemon=True)
+                self.certificate_worker.start()
+        return None
+
+    def check_certificates(self) -> None:
+        while True:
+            with self.certificate_lock:
+                if not self.certificate_queue:
+                    self.certificate_worker = None
+                    return
+                key, job = next(iter(self.certificate_queue.items()))
+            try:
+                outcome: int | str = certificate_status(*job)
+            except (OSError, ValueError) as error:
+                outcome = str(error)
+            with self.certificate_lock:
+                self.certificates[key] = outcome
+                self.certificate_queue.pop(key, None)
+                self.save_certificates()
+
+    def wait_for_certificates(self, timeout: float = 60.0) -> None:
+        """Block until queued certificate checks finish (tests, and the dashboard's status command)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.certificate_lock:
+                if not self.certificate_queue:
+                    return
+            time.sleep(0.02)
+        raise TimeoutError("certificate checks did not finish")
+
+    def load_certificates(self) -> dict[tuple, int | str]:
+        if self.certificate_cache is None or not self.certificate_cache.exists():
+            return {}
+        try:
+            entries = json.loads(self.certificate_cache.read_text())
+            return {tuple(entry["key"]): entry["outcome"] for entry in entries}
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}
+
+    def save_certificates(self) -> None:
+        if self.certificate_cache is None:
+            return
+        temporary = self.certificate_cache.with_suffix(".tmp")
+        temporary.write_text(json.dumps([{"key": list(key), "outcome": outcome}
+                                         for key, outcome in self.certificates.items()]))
+        temporary.replace(self.certificate_cache)
 
     def build_results(self, now: float, warnings: list) -> dict:
         fields: dict[tuple[int, int], dict] = {}
@@ -740,8 +922,11 @@ class Snapshots:
                                 path = directory / "results" / name
                             try:
                                 outcome = self.certificate(path, run["artifact_hash"], dp, digest)
-                                attempt["outcome"] = "matched" if outcome == 0 else "obstructed"
-                                entry["outcomes"].add(outcome)
+                                if outcome is None:
+                                    attempt["outcome"] = "checking"
+                                else:
+                                    attempt["outcome"] = "matched" if outcome == 0 else "obstructed"
+                                    entry["outcomes"].add(outcome)
                             except FileNotFoundError:
                                 entry["notes"].append(f"{directory.name}: certificate not collected")
                             except ValueError as error:

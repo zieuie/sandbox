@@ -319,6 +319,23 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
                 self.send_json(HTTPStatus.OK, self.session_info(session))
             elif route == "/api/snapshot":
                 self.send_snapshot(force=False)
+            elif route == "/api/tiles":
+                encoded = snapshots.root_tiles(parse_qs(url.query).get("run", [""])[0])
+                if encoded is None:
+                    self.send_json(HTTPStatus.NOT_FOUND, {"error": "no such DP root on show"})
+                else:
+                    self.send(HTTPStatus.OK, encoded[0], "application/json", encoded[1], cache="no-store")
+            elif route == "/api/tile":
+                query = parse_qs(url.query)
+                try:
+                    cell = snapshots.tile(query.get("run", [""])[0], int(query.get("r", ["-1"])[0]),
+                                          int(query.get("c", ["-1"])[0]))
+                except ValueError:
+                    cell = None
+                if cell is None:
+                    self.send_json(HTTPStatus.NOT_FOUND, {"error": "no such tile on show"})
+                else:
+                    self.send_json(HTTPStatus.OK, cell)
             elif route == "/api/audit":
                 if session["role"] != "operator":
                     self.send_json(HTTPStatus.FORBIDDEN, {"error": "the audit log is for operators"})
@@ -631,7 +648,9 @@ def main() -> int:
               "  python3 king_hamming/web/server.py add-user NAME --role operator", file=sys.stderr)
         return 1
     host, port = arguments.listen
-    snapshots = Snapshots(arguments.deployments, arguments.campaign, ttl=arguments.ttl)
+    snapshots = Snapshots(arguments.deployments, arguments.campaign, ttl=arguments.ttl, background=True,
+                          certificate_cache=arguments.state_dir / "certificates.json")
+    threading.Thread(target=snapshots.get, name="first-snapshot", daemon=True).start()  # warm before any request
     audit = Audit(arguments.state_dir)
     context = Context(arguments.deployments, arguments.campaign, snapshots,
                       Jobs(arguments.state_dir / "jobs"))
