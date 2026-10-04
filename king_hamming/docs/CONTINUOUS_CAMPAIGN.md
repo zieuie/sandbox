@@ -53,12 +53,18 @@ module above.
 
 ## Wired data network
 
-The eight `.101`–`.108` workers and Merlin have permanent `10.203.0.X/24`
-addresses on the same 1 Gb/s switch (`X` is their Wi-Fi address suffix).
-Their wired NetworkManager profiles have no gateway or DNS; Wi-Fi remains the
-default route, SSH fallback, and leader control address. `.152` and `.156` are
-Wi-Fi-only. `.106` has a separate `King Hamming wired` profile so its preexisting
-`evermore-rescue` profile is untouched; the other eight use `Wired connection 1`.
+All eleven machines (the eight `.101`–`.108` workers, Merlin, pellinore `.152`
+and gawain `.156`) have permanent `10.203.0.X/24` addresses on the same 1 Gb/s
+switch (`X` is their Wi-Fi address suffix). Their wired NetworkManager profiles
+have no gateway or DNS; Wi-Fi remains the default route, SSH fallback, and
+leader control address. `.106`, `.152` and `.156` use a separate
+`King Hamming wired` profile (on `.152` and `.156` bound to the USB ASIX
+adapter, `enx…`, with autoconnect priority 10) so the preexisting profiles stay
+untouched; the other seven use `Wired connection 1`.
+
+Measured on 2026-10-04, fetching a 218 MB blob from `.101`'s agent: Wi-Fi gave
+19 MB/s (`.152`) and 26 MB/s (`.156`) with ~7.5 ms ping; the switch gave
+105 MB/s on both with ~1.5 ms ping.
 
 Each wired agent advertises both its public `192.168.4.X` blob URL and a
 `10.203.0.X` URL in private group `kh-switch`. A worker in that group tries
@@ -66,8 +72,7 @@ same-group Ethernet sources first, then public Wi-Fi URLs; a Wi-Fi-only worker
 never receives the isolated Ethernet URL. When at least three healthy wired
 nodes have disk capacity, a Wi-Fi agent is not assigned a copy of an artifact
 already held on the wired network. If wired capacity drops below the artifact's
-replica target, cross-group copying remains possible. Matching and DP compute
-leases may still run on `.152` or `.156`.
+replica target, cross-group copying remains possible.
 
 After a deliberate full-agent quiesce, use `resume-workers` to guard stopped
 dispatch, redeploy the current runtime, recover a verified-absent leader if
@@ -84,7 +89,10 @@ python3 king_hamming/dp_solver/launch_dp.py \
   --state king_hamming/cluster/deployments/continuous-campaign resume-workers
 ```
 
-The manifest already records the full nine-host mapping. `resume-workers`
+The manifest already records the full eleven-host mapping. To add one host
+while the campaign is busy, add its entry to `private_networks` in the manifest
+and run `upgrade-worker-rolling --host` for it; `set-storage-addresses` refuses
+while any lease is active. `resume-workers`
 leaves dispatch stopped; resume the campaign and its feeder separately after
 checking all agent registrations and storage validation.
 
