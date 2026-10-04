@@ -199,6 +199,15 @@ def matching_admitted(dp: dict, settings: dict) -> tuple[bool, str]:
     return True, "admitted"
 
 
+def note_gpu_blocker(record: dict, dp: dict, settings: dict, nodes, plan: dict | None) -> None:
+    """Record why no GPU can take this field (shown on the dashboard), or clear it when one can."""
+    reason = None if plan is not None else gpu_policy.blocker(dp, settings, list(nodes))
+    if reason:
+        record["matching_gpu_blocker"] = reason
+    else:
+        record.pop("matching_gpu_blocker", None)
+
+
 def plan_matching(dp: dict, settings: dict, nodes, policy=None) -> dict | None:
     """Prefer one fenced GPU when a live node can hold the field; else the configured policy."""
     gpu = gpu_policy.plan(dp, settings, list(nodes))
@@ -237,6 +246,7 @@ def matchable_backlog(pipeline: dict, nodes=(), policy=None) -> int:
             record["matching_plan"] = plan
             admitted, reason = plan["admitted"], plan["reason"]
         record["matching_admission"] = reason
+        note_gpu_blocker(record, dp, settings, nodes, plan)
         if admitted:
             ready += 1
     return ready
@@ -404,6 +414,7 @@ def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
             record["matching_plan"] = plan
             admitted, reason = plan["admitted"], plan["reason"]
         record["matching_admission"] = reason
+        note_gpu_blocker(record, dp, settings, nodes, plan)
         if not admitted:
             counts["inadmissible"] += 1
             continue

@@ -138,6 +138,7 @@ def build_feeder(state: Path, watcher: LogWatcher, roots: list[dict] | None, now
             "admission": record.get("matching_admission"),
             "engine": engine_label(plan),
             "gpu_bytes": gpu_bytes(record.get("q"), record.get("requests")),
+            "gpu_blocker": record.get("matching_gpu_blocker"),
             "notes": [text for text in (
                 record.get("matching_failure") and f"matching gave up: {record['matching_failure']}",
                 record.get("candidate_exhausted") and "every primitive polynomial tried") if text],

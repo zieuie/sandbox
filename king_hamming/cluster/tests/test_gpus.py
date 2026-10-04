@@ -243,6 +243,24 @@ class GPUBlockTests(unittest.TestCase):
         self.assertIsNone(gpu_policy.plan(dp, {}, [self.node("small", SMALL, ram=64 * MIB)]))
         self.assertIsNone(gpu_policy.plan(dp, {}, [{**self.node("small", SMALL), "state": "unavailable"}]))
 
+    def test_blocker_names_the_limit_that_binds(self) -> None:
+        from campaigns import gpu_policy
+        from gpu_block_match_solver import adapter
+        from matching_solver.artifacts import load_dp
+        dp, _ = load_dp(EXAMPLE)
+        self.assertIsNone(gpu_policy.blocker(dp, {}, [self.node("small", SMALL)]))   # block mode takes it
+        self.assertIsNone(gpu_policy.blocker(dp, {"gpu_matching": False}, [self.node("small", SMALL)]))
+        self.assertEqual(gpu_policy.blocker(dp, {}, [self.node("cpu", SMALL) | {"gpus_json": "[]"}]),
+                         "no machine with a GPU is online")
+        self.assertIn("of host RAM; the largest GPU machine has",
+                      gpu_policy.blocker(dp, {}, [self.node("small", SMALL, ram=64 * MIB)]))
+        self.assertIn("block matching is turned off",
+                      gpu_policy.blocker(dp, {"gpu_block_matching": False}, [self.node("small", SMALL)]))
+        with unittest.mock.patch.object(adapter, "MAX_Q", dp["q"] - 1):
+            self.assertIsNone(gpu_policy.plan(dp, {}, [self.node("small", SMALL)]))
+            self.assertEqual(gpu_policy.blocker(dp, {}, [self.node("small", SMALL)]),
+                             f"q = {dp['q']:,} is above the block matcher's limit of {dp['q'] - 1:,}")
+
     def test_fields_above_2_32_go_to_block_mode_on_a_host_with_the_ram(self) -> None:
         from campaigns import gpu_policy
         from gpu_block_match_solver.adapter import GPUBlockMatchingAdapter, host_bytes

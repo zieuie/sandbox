@@ -250,6 +250,8 @@ function waiting(snapshot) {
   const settings = feeder.settings;
   const gpu = largestGpu(snapshot);
   const gpuNote = (f) => {
+    // The feeder's own reason names the limit that binds (block mode lifts the whole-field size).
+    if (f.gpu_blocker) return ` · GPU: ${f.gpu_blocker}`;
     if (!f.gpu_bytes) return '';
     if (gpu === null) return ` · needs ${fmtBytes(f.gpu_bytes)} on a GPU (GPUs not reported yet)`;
     if (!gpu.usable) return ` · needs ${fmtBytes(f.gpu_bytes)} on a GPU; no GPU machine is online`;
