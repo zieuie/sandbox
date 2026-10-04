@@ -970,13 +970,16 @@ class Snapshots:
     def field_status(entry: dict) -> str:
         if 0 in entry["outcomes"]:
             return "matched"
+        if any(attempt.get("outcome") == "checking" for attempt in entry["matching_attempts"]):
+            return "checking"  # a finished matching whose certificate is being hashed
         if any(attempt["active"] for attempt in entry["matching_attempts"]):
             return "matching"
         if 1 in entry["outcomes"]:
             return "obstructed"
         if entry["metrics"] is not None:
             admission = entry["admission"]
-            if admission and admission not in {"admitted", "waiting for nodes"}:
+            # "admitted: single GPU" and "admitted: GPU blocks" are admitted too.
+            if admission and not admission.startswith("admitted") and admission != "waiting for nodes":
                 return "too_big"
             return "awaiting_matching"
         if any(attempt["active"] for attempt in entry["dp_attempts"]):

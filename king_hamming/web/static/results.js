@@ -8,6 +8,7 @@ export const STATUS = {
   matched: { label: 'Matched', glyph: '^' },
   obstructed: { label: 'Hall obstruction', glyph: '*' },
   matching: { label: 'Matching running', glyph: '' },
+  checking: { label: 'Matched, certificate being checked', glyph: '' },
   awaiting_matching: { label: 'DP done, matching pending', glyph: '' },
   too_big: { label: 'DP done, too big to match', glyph: '' },
   dp_running: { label: 'DP running', glyph: '' },

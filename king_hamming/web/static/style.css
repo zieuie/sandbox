@@ -145,7 +145,7 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 /* outcome colours, used by cells, swatches and badges */
 .st-matched { --c: var(--st-matched); }
 .st-obstructed { --c: var(--st-obstructed); }
-.st-matching { --c: var(--st-matching); }
+.st-matching, .st-checking { --c: var(--st-matching); }
 .st-awaiting_matching { --c: var(--st-awaiting); }
 .st-too_big { --c: var(--st-too-big); }
 .st-dp_running { --c: var(--st-dp-running); }

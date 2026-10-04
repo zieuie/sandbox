@@ -160,6 +160,7 @@ class SnapshotTests(unittest.TestCase):
         first = self.build()["results"]
         checking = {(item["p"], item["r"]): item for item in first["fields"]}[(13, 5)]
         self.assertEqual(checking["matching_attempts"][0]["outcome"], "checking")
+        self.assertEqual(checking["status"], "checking")
         self.snapshots.wait_for_certificates()
         self.clock.value += self.snapshots.min_refresh
         results = self.build()["results"]
@@ -254,6 +255,12 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNot(live.get()[0], first)
         live.invalidate()                                 # after a command: the next request waits
         self.assertIsNot(live.get()[0], first)
+
+    def test_gpu_admitted_fields_are_awaiting_matching_not_too_big(self) -> None:
+        entry = {"outcomes": set(), "matching_attempts": [], "dp_attempts": [], "metrics": {"q": 1},
+                 "admission": "admitted: GPU blocks"}
+        self.assertEqual(snapshot.Snapshots.field_status(entry), "awaiting_matching")
+        self.assertEqual(snapshot.Snapshots.field_status({**entry, "admission": "field limit"}), "too_big")
 
     def test_cache_and_forced_refresh(self) -> None:
         first = self.snapshots.get()[0]
