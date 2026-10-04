@@ -105,6 +105,28 @@ class PushedCopyTests(unittest.TestCase):
             self.assertIsNone(self.poll("b"))
             self.assertEqual(scan.call_count, 2)
 
+    def test_empty_revalidation_poll_needs_no_writer_lock(self) -> None:
+        blocker = leader.connect(self.database)
+        blocker.execute("BEGIN IMMEDIATE")       # a writer holds the lock for the whole poll
+        try:
+            with mock.patch.object(leader, "writer_session", side_effect=AssertionError("took the writer lock")):
+                reply = self.handler.dispatch_post(
+                    "/v1/revalidation-batch", {"node_name": "b", "session_id": self.sessions["b"]})
+        finally:
+            blocker.rollback()
+            blocker.close()
+        self.assertEqual(reply["records"], [])
+
+    def test_pending_revalidation_still_reaches_the_writer_path(self) -> None:
+        with leader.connect(self.database) as connection:
+            connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created,size) VALUES(?,3,?,5)",
+                               (self.digest, time.time()))
+            connection.execute("INSERT INTO node_revalidation(node_name,kind,digest,created) VALUES('b','artifact',?,?)",
+                               (self.digest, time.time()))
+        reply = self.handler.dispatch_post("/v1/revalidation-batch",
+                                           {"node_name": "b", "session_id": self.sessions["b"]})
+        self.assertEqual([item["digest"] for item in reply["records"]], [self.digest])
+
 
 if __name__ == "__main__":
     unittest.main()

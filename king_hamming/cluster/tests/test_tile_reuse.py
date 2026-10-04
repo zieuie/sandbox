@@ -289,7 +289,7 @@ class TileReuseTests(unittest.TestCase):
                                    "VALUES(?,?,?,?)", (digest, name, f"http://{name}/blob", now))
             connection.execute("UPDATE runs SET state='complete',artifact_hash=? WHERE run_id=?",
                                (digest, second))
-            distributed.advance(connection, now + 32)
+            distributed.advance(connection, now + 32 + distributed.REFRESH_SECONDS)  # grid-wide cycle
             self.assertIsNone(connection.execute(
                 "SELECT failures FROM distributed_tile_retries WHERE parent_run_id=? AND row=0 AND column=0",
                 (root,)).fetchone())

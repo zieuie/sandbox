@@ -230,6 +230,40 @@ class SupervisionTests(unittest.TestCase):
             self.assertGreater(len(requests), 1)
             self.assertEqual(result["progress"]["done"], 0)
 
+    def test_progress_reports_are_thinned_but_the_important_ones_get_through(self) -> None:
+        """A solver reporting every 50 ms sends the leader a few reports, not hundreds."""
+
+        with tempfile.TemporaryDirectory(prefix="kh-progress-test-") as directory:
+            script = Path(directory) / "chatty.py"
+            script.write_text(
+                "import json, sys, time\n"
+                "def say(**r):\n"
+                "    print(json.dumps(r), flush=True)\n"
+                "for i in range(60):\n"
+                "    say(done=i, total=100, checkpoint_done=0, phase='computing', units='cells', heartbeat=True)\n"
+                "    time.sleep(0.05)\n"
+                "say(done=60, total=100, checkpoint_done=0, phase='reconstructing', units='cells', heartbeat=True)\n"
+                "say(done=100, total=100, checkpoint_done=100, phase='computing', units='cells', heartbeat=True)\n"
+            )
+            sent: list[dict] = []
+
+            def leader_stub(base: str, route: str, value: dict[str, object]) -> dict[str, object]:
+                if route == "/v1/progress":
+                    sent.append(value)
+                return {"stop_requested": False}
+
+            command = [sys.executable, str(ROOT / "affinity_exec.py"),
+                       "--cpus", str(min(os.sched_getaffinity(0))), "--", sys.executable, str(script)]
+            with patch.object(agent, "request_json", side_effect=leader_stub), \
+                    patch.object(agent, "PROGRESS_SPACING_SECONDS", 1.0):
+                result = agent.supervise_solver(command, "unused", {"run_id": "r", "lease_token": "t"}, 0.5, 2)
+            self.assertEqual(result["return_code"], 0)
+            self.assertLessEqual(len(sent), 8)
+            self.assertEqual(sent[0]["done"], 0)
+            self.assertIn("reconstructing", [item["phase"] for item in sent], "a phase change goes at once")
+            self.assertEqual(sent[-1]["done"], 100, "finished work goes at once")
+            self.assertEqual(result["progress"]["done"], 100, "the latest report is kept for completion")
+
     # Snapshot copying must not block campaign control or the independent C heartbeat.
     def test_stop_while_snapshot_is_being_captured(self) -> None:
         """Stop a real C solver during its immutable-boundary pause, then acknowledge safely."""

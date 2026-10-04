@@ -73,7 +73,7 @@ class DependencyCopyTests(unittest.TestCase):
             distributed.advance(connection, now)
             self.assertEqual(self.tile(connection, 0, 0)["run_id"], old, "a short absence keeps the tile")
             connection.execute("UPDATE nodes SET last_heartbeat=? WHERE node_name='a'", (now - 700,))
-            distributed.advance(connection, now)
+            distributed.advance(connection, now + distributed.REFRESH_SECONDS)  # grid-wide cycle
             again = self.tile(connection, 0, 0)
             self.assertNotEqual(again["run_id"], old)
             self.assertEqual(again["state"], "queued")
@@ -94,6 +94,37 @@ class DependencyCopyTests(unittest.TestCase):
             self.assertEqual(connection.execute(
                 "SELECT failures FROM distributed_tile_retries WHERE parent_run_id=? AND row=0 AND column=1",
                 (self.root,)).fetchone()[0], 0)
+
+
+    def test_passes_between_refreshes_read_only_the_frontier(self) -> None:
+        """Ready tiles are created without the grid-wide durable scan, which runs on its own cycle."""
+        from unittest.mock import patch
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            self.complete_corner(connection, now)
+            distributed._last_refresh.clear()                  # enqueue already ran a first pass
+            with patch.object(distributed, "durable_tiles", wraps=distributed.durable_tiles) as full:
+                distributed.advance(connection, now)           # first pass: refresh + frontier
+                self.assertEqual(full.call_count, 1)
+                self.assertEqual(self.tile(connection, 0, 1)["state"], "queued")
+                connection.execute("UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? "
+                                   "AND (row,column)=(0,1)", (self.root,))
+                distributed.advance(connection, now + 1)       # between refreshes
+                self.assertEqual(full.call_count, 1)
+                self.assertEqual(self.tile(connection, 0, 1)["state"], "queued")
+                distributed.advance(connection, now + distributed.REFRESH_SECONDS + 1)
+                self.assertEqual(full.call_count, 2)
+
+    def test_tiles_beyond_the_next_wave_are_never_examined(self) -> None:
+        now = time.time()
+        with leader.connect(self.database) as connection:
+            self.complete_corner(connection, now)
+            distributed.advance(connection, now)
+            created = {(row[0], row[1]) for row in connection.execute(
+                "SELECT row,column FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NOT NULL",
+                (self.root,))}
+            self.assertTrue(created)
+            self.assertLessEqual(max(row + column for row, column in created), 1)
 
 
 if __name__ == "__main__":

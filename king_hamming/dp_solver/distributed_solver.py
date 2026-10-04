@@ -176,13 +176,14 @@ def fetch(record: dict, arguments, cache: Path) -> Path:
     """Fetch and hash-check the blob a descriptor names, fencing long transfers; return its local path."""
 
     last_check=0.0
+    spacing=2.0
     if REPORTER is not None:
         REPORTER.total+=record["size"]
 
     def check() -> None:
         """Check cancellation and periodically fence long transfers against lease loss."""
 
-        nonlocal last_check
+        nonlocal last_check, spacing
         if REPORTER is not None:
             download_root = (arguments.shared_cache_root if arguments.shared_cache_root
                              else cache/"blobs")
@@ -191,9 +192,12 @@ def fetch(record: dict, arguments, cache: Path) -> Path:
                 REPORTER.done=min(REPORTER.total,REPORTER.base+partial.stat().st_size)
         if STOP:
             raise InterruptedError("tile transfer stopped")
-        if time.monotonic()-last_check>=2:
+        if time.monotonic()-last_check>=spacing:
             response=leader_request(arguments,"/v1/run-control",{"run_id":arguments.run_id,"lease_token":arguments.lease_token})
             last_check=time.monotonic()
+            # Each check is a leader write that also renews the lease; a sixth of the lease
+            # keeps it safe while sparing the leader a request every two seconds per fetch.
+            spacing=min(5.0,max(1.0,float(response.get("lease_seconds",12))/6))
             if response["stop_requested"]:
                 raise InterruptedError("campaign stopped")
 

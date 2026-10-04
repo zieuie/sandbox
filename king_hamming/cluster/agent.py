@@ -626,6 +626,9 @@ def replicate_once(
     return True
 
 
+# At most one solver progress report per this many seconds is sent to the leader.
+PROGRESS_SPACING_SECONDS = float(os.environ.get("KH_PROGRESS_SECONDS", "5"))
+
 # How many objects the last collection pass handled; a full batch means more are waiting.
 GC_STATS = {"batch": 0}
 GC_FULL_BATCH = 64
@@ -798,11 +801,14 @@ def supervise_solver(
     stderr_tail = bytearray()
     latest: dict[str, Any] = {"done": 0, "total": 0, "checkpoint_done": 0}
 
+    next_report = 0.0
+    last_report_key: tuple | None = None
+
     # Forward genuine solver reports without synthesizing solver heartbeat data.
     def forward_line(line: bytes) -> None:
         """Validate a solver JSON line and forward its status to the leader."""
 
-        nonlocal latest, pending_snapshot
+        nonlocal latest, pending_snapshot, next_report, last_report_key
         if len(line) > 1024 * 1024:
             raise ValueError("solver progress record exceeds 1 MiB")
 
@@ -839,6 +845,18 @@ def supervise_solver(
             return
 
         latest = progress
+
+        # Kernels report about once a second, and each report is a leader write. The leader
+        # needs one every few seconds to see the solver alive (it flags 30 s of silence), so
+        # forward at most one per PROGRESS_SPACING_SECONDS, but at once when the phase, message
+        # or total changes or the work is finished. The latest report is kept for completion.
+        total = progress.get("total")
+        key = (progress.get("phase"), progress.get("message"), progress.get("units"), total)
+        finished = type(total) is int and total > 0 and progress.get("done") == total
+        moment = time.monotonic()
+        if key == last_report_key and not finished and moment < next_report:
+            return
+        last_report_key, next_report = key, moment + PROGRESS_SPACING_SECONDS
 
         try:
             request_json(

@@ -703,6 +703,14 @@ def make_handler(
                         raise ValueError("solver has no tile inputs")
                     return adapter.inputs(connection, row, request, now)
 
+            if route == "/v1/revalidation-batch":
+                # Almost every poll finds nothing pending; that needs no writer lock.
+                with session(database) as connection:
+                    node = recovery.require_node(connection, request)
+                    if connection.execute("SELECT 1 FROM node_revalidation WHERE node_name=? LIMIT 1",
+                                          (node["node_name"],)).fetchone() is None:
+                        return {"mode": node["storage_validation_mode"], "records": []}
+
             if route == "/v1/replication":
                 # Searching tens of thousands of tile artifacts must not hold
                 # the one SQLite writer lock needed by leases and heartbeats.

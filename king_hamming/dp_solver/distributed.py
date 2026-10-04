@@ -52,13 +52,17 @@ MAX_BAND_BYTES = 2 * 1024**3
 TILE_RETRY_LIMIT = 3
 TILE_RETRY_BASE_SECONDS = 30
 TILE_RETRY_MAX_SECONDS = 300
-# A pass over one root reads all of its tiles inside the leader's write transaction
-# (about 7 microseconds per tile on the four-root campaign database). Roots beyond
-# FULL_SCAN_TILES are therefore rescanned at most every tiles/FULL_SCAN_TILES seconds,
-# up to MAX_SCAN_INTERVAL, which keeps the lock's average use at the level of one
-# 10,000-tile root. Ready tiles are already queued, so a few seconds' delay idles nothing.
-FULL_SCAN_TILES = 10_000
+# A scheduling pass looks only at a root's open frontier (see advance), so it costs the
+# same however large the grid is until the root has FULL_SCAN_TILES tiles; beyond that
+# its frontier queries are themselves spaced out, tiles/FULL_SCAN_TILES seconds apart up
+# to MAX_SCAN_INTERVAL. Ready tiles are already queued, so a few seconds' delay idles
+# nothing. Grid-wide work (progress totals, the reconstruction trigger, recomputing lost
+# tiles) runs every REFRESH_SECONDS, or every pass once no tile is left to create.
+FULL_SCAN_TILES = 100_000
 MAX_SCAN_INTERVAL = 30.0
+REFRESH_SECONDS = 10.0
+END_GAME_REFRESH_SECONDS = 3.0
+_last_refresh: dict[str, float] = {}
 _last_scan: dict[str, float] = {}
 
 
@@ -343,6 +347,29 @@ def recompute_lost_tiles(connection: sqlite3.Connection, parent_run_id: str, now
     return len(lost)
 
 
+def durable_among(connection: sqlite3.Connection, parent_run_id: str, coordinates, now: float,
+                  lease_seconds: float, copies: int = 2) -> set[tuple[int, int]]:
+    """Return the given (row, column) tiles of parent that are complete with enough live replicas."""
+
+    found: set[tuple[int, int]] = set()
+    wanted = list(dict.fromkeys(coordinates))
+    for start in range(0, len(wanted), 300):
+        chunk = wanted[start:start + 300]
+        values = ",".join("(?,?)" for _ in chunk)
+        arguments = [value for key in chunk for value in key] + [parent_run_id, now - lease_seconds, copies]
+        found.update((row[0], row[1]) for row in connection.execute(
+            f"WITH want(row,column) AS (VALUES {values}) "
+            # CROSS JOIN fixes the order: from the few wanted coordinates outward. Left to
+            # itself the planner started from the 200,000-row replicas table (about 1 s).
+            "SELECT t.row,t.column FROM want w "
+            "CROSS JOIN distributed_tiles t ON t.row=w.row AND t.column=w.column AND t.parent_run_id=? "
+            "CROSS JOIN runs child ON child.run_id=t.child_run_id AND child.state='complete' "
+            "CROSS JOIN replicas replica ON replica.artifact_hash=child.artifact_hash "
+            "CROSS JOIN nodes node ON node.node_name=replica.node_name AND node.last_heartbeat>? "
+            "GROUP BY t.row,t.column HAVING COUNT(*)>=?", arguments))
+    return found
+
+
 def retry_reconstruction(connection: sqlite3.Connection, run: sqlite3.Row,
                          specification: dict[str, Any], now: float) -> dict[str, Any]:
     """Requeue a failed root's reconstruction without making new tile rows or artifacts."""
@@ -422,41 +449,62 @@ def advance(connection: sqlite3.Connection, now: float, max_roots: int | None = 
         specification = json.loads(parent["specification"])
         arguments = specification["arguments"]
         p, r, side = arguments["p"], arguments["r"], int(arguments.get("tile_side", 4096))
+        run_id = parent["run_id"]
+        count = (dp_estimate(specification)["budget"] + side - 1) // side
         reuse_tiles(connection, parent, now)
-        recompute_lost_tiles(connection, parent["run_id"], now)
-        # Only these columns: fetching every child's whole row (r.*) was half of a pass.
-        rows = connection.execute(
-            "SELECT t.row,t.column,t.child_run_id,r.state,r.error FROM distributed_tiles t "
-            "LEFT JOIN runs r ON r.run_id=t.child_run_id "
-            "WHERE t.parent_run_id=? ORDER BY t.row,t.column", (parent["run_id"],),
-        ).fetchall()
         lease = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
-        durable = durable_tiles(connection, parent["run_id"], now, lease, dependency_copies(connection))
+        copies = dependency_copies(connection)
+        total = count * count
         budget = math.isqrt(parent["progress_total"])
-        done = sum(min(side, budget - row * side) * min(side, budget - column * side)
-                   for row, column in durable)
-        message = f"{len(durable)}/{len(rows)} replicated tiles"
-        if done != parent["progress_done"] or message != parent["progress_message"]:
-            connection.execute("UPDATE runs SET progress_done=?,progress_checkpoint_done=?,"
-                               "last_progress_at=CASE WHEN progress_done<? THEN ? ELSE last_progress_at END,"
-                               "progress_message=? WHERE run_id=?",
-                               (done, done, done, now, message, parent["run_id"]))
+        unassigned = connection.execute(
+            "SELECT 1 FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NULL LIMIT 1",
+            (run_id,)).fetchone() is not None
+
+        # Grid-wide bookkeeping needs every tile of the root, so it runs on a slower cycle.
+        interval = REFRESH_SECONDS if unassigned else END_GAME_REFRESH_SECONDS
+        last = _last_refresh.get(run_id)
+        if last is None or not 0 <= now - last < interval:
+            _last_refresh[run_id] = now
+            recompute_lost_tiles(connection, run_id, now)
+            durable = durable_tiles(connection, run_id, now, lease, copies)
+            done = sum(min(side, budget - row * side) * min(side, budget - column * side)
+                       for row, column in durable)
+            message = f"{len(durable)}/{total} replicated tiles"
+            if done != parent["progress_done"] or message != parent["progress_message"]:
+                connection.execute("UPDATE runs SET progress_done=?,progress_checkpoint_done=?,"
+                                   "last_progress_at=CASE WHEN progress_done<? THEN ? ELSE last_progress_at END,"
+                                   "progress_message=? WHERE run_id=?",
+                                   (done, done, done, now, message, run_id))
+            connection.execute(
+                "DELETE FROM distributed_tile_retries WHERE parent_run_id=? AND EXISTS "
+                "(SELECT 1 FROM distributed_tiles t JOIN runs child ON child.run_id=t.child_run_id "
+                "WHERE t.parent_run_id=distributed_tile_retries.parent_run_id "
+                "AND t.row=distributed_tile_retries.row AND t.column=distributed_tile_retries.column "
+                "AND child.state='complete')", (run_id,))
+            if len(durable) == total:
+                connection.execute("UPDATE runs SET state='queued',progress_phase='reconstructing' WHERE run_id=?", (run_id,))
+                continue
+
         retries = {(retry["row"], retry["column"]): retry for retry in connection.execute(
             "SELECT row,column,failures,next_retry FROM distributed_tile_retries WHERE parent_run_id=?",
-            (parent["run_id"],))}
+            (run_id,))}
+
+        # Failed tiles are found through the (parent, state) index, not by reading the grid.
         exhausted = None
-        for row in rows:
-            if row["state"] != "failed":
-                continue
-            key = (parent["run_id"], row["row"], row["column"])
-            prior = retries.get((row["row"], row["column"]))
+        for failed in connection.execute(
+                "SELECT t.row,t.column,t.child_run_id,r.error FROM runs r "
+                "JOIN distributed_tiles t ON t.child_run_id=r.run_id "
+                "WHERE r.parent_run_id=? AND r.state='failed'", (run_id,)).fetchall():
+            row, column = failed["row"], failed["column"]
+            key = (run_id, row, column)
+            prior = retries.get((row, column))
             # A tile whose input copy went offline did nothing wrong; retry it without
             # spending one of its attempts, once the input is back or recomputed.
-            input_missing = any(predecessor not in durable for predecessor in
-                                predecessor_coordinates(p, side, row["row"], row["column"]))
+            predecessors = list(predecessor_coordinates(p, side, row, column))
+            input_missing = len(durable_among(connection, run_id, predecessors, now, lease, copies)) < len(predecessors)
             failures = (prior["failures"] if prior else 0) + (0 if input_missing else 1)
             if failures > TILE_RETRY_LIMIT:
-                exhausted = row
+                exhausted = failed
                 break
             delay = min(TILE_RETRY_MAX_SECONDS, TILE_RETRY_BASE_SECONDS * 2 ** max(0, failures - 1))
             connection.execute(
@@ -464,40 +512,41 @@ def advance(connection: sqlite3.Connection, now: float, max_roots: int | None = 
                 "VALUES(?,?,?,?,?) ON CONFLICT(parent_run_id,row,column) DO UPDATE SET "
                 "failures=excluded.failures,next_retry=excluded.next_retry",
                 (*key, failures, now + delay))
-            retries[(row["row"], row["column"])] = {"failures": failures, "next_retry": now + delay}
+            retries[(row, column)] = {"failures": failures, "next_retry": now + delay}
             connection.execute(
                 "UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? AND row=? AND column=? "
-                "AND child_run_id=?", (*key, row["child_run_id"]))
+                "AND child_run_id=?", (*key, failed["child_run_id"]))
         if exhausted is not None:
             connection.execute("UPDATE runs SET state='failed',finished=?,error=?,progress_phase='failed' WHERE run_id=?",
                                (now, f"tile {exhausted['row']},{exhausted['column']} failed repeatedly: "
-                                f"{exhausted['error']}", parent["run_id"]))
+                                f"{exhausted['error']}", run_id))
             continue
-        connection.execute(
-            "DELETE FROM distributed_tile_retries WHERE parent_run_id=? AND EXISTS "
-            "(SELECT 1 FROM distributed_tiles t JOIN runs child ON child.run_id=t.child_run_id "
-            "WHERE t.parent_run_id=distributed_tile_retries.parent_run_id "
-            "AND t.row=distributed_tile_retries.row AND t.column=distributed_tile_retries.column "
-            "AND child.state='complete')", (parent["run_id"],))
-        if len(durable) == len(rows):
-            connection.execute("UPDATE runs SET state='queued',progress_phase='reconstructing' WHERE run_id=?", (parent["run_id"],))
+
+        # A tile is ready only when its predecessors are durable, and every tile has a
+        # predecessor in the wave just before it, so no tile beyond one wave past the
+        # newest assigned tile can be ready: examine only that frontier.
+        newest = connection.execute(
+            "SELECT MAX(row+column) FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NOT NULL",
+            (run_id,)).fetchone()[0]
+        frontier = [(row[0], row[1]) for row in connection.execute(
+            "SELECT row,column FROM distributed_tiles WHERE parent_run_id=? AND child_run_id IS NULL "
+            "AND row+column<=?", (run_id, (-1 if newest is None else newest) + 1))]
+        frontier = [key for key in frontier
+                    if key not in retries or now >= retries[key]["next_retry"]]
+        if not frontier:
             continue
-        for row in rows:
-            if row["child_run_id"]:
+        needed = {key: list(predecessor_coordinates(p, side, *key)) for key in frontier}
+        durable = durable_among(connection, run_id, [pred for preds in needed.values() for pred in preds],
+                                now, lease, copies)
+        for key in sorted(frontier):
+            if any(pred not in durable for pred in needed[key]):
                 continue
-            retry = retries.get((row["row"], row["column"]))
-            if retry is not None and now < retry["next_retry"]:
-                continue
-            target_row, target_column = row["row"], row["column"]
-            if any(key not in durable for key in predecessor_coordinates(p, side, target_row, target_column)):
-                continue
-            target = tile(p,r,side,target_row,target_column)
-            child_specification_value = child_specification(parent, target.row, target.column)
+            child_specification_value = child_specification(parent, *key)
             child = str(uuid.uuid4())
             connection.execute("INSERT INTO runs(run_id,calculation_id,specification,state,priority,from_scratch,created,estimated_seconds,parent_run_id) VALUES(?,?,?,'queued',?,0,?,?,?)",
-                               (child,calculation_id(child_specification_value),canonical_json(child_specification_value).decode(),parent["priority"],now,parent["estimated_seconds"],parent["run_id"]))
+                               (child,calculation_id(child_specification_value),canonical_json(child_specification_value).decode(),parent["priority"],now,parent["estimated_seconds"],run_id))
             connection.execute("UPDATE distributed_tiles SET child_run_id=? WHERE parent_run_id=? AND row=? AND column=?",
-                               (child,parent["run_id"],target.row,target.column))
+                               (child,run_id,*key))
 
 
 AFFINITY_MAX_WAIT_SECONDS = 900
