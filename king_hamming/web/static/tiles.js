@@ -22,6 +22,54 @@ const DONE = new Set(['durable', 'complete']);
 const CELL = 10;
 let showFinished = false;
 
+// Zoom for the focus grid, kept across the page's periodic redraws along with the scroll position.
+const ZOOMS = [1, 2, 3, 4, 6, 8];
+let zoom = 1;
+let focusScroll = { run: null, left: 0, top: 0 };
+
+// Hovering a tile that is drawn small shows a magnified neighbourhood next to the details.
+const LOUPE_RADIUS = 5;      // tiles on each side of the pointer: an 11 × 11 view
+const LOUPE_CELL = 20;       // pixels per tile in the magnifier
+const LOUPE_BELOW = 14;      // only needed while tiles are drawn smaller than this many pixels
+
+const positions = new WeakMap();
+function cellAt(root, row, column) {
+  if (!positions.has(root)) positions.set(root, new Map(root.cells.map((c) => [`${c.r},${c.c}`, c])));
+  return positions.get(root).get(`${row},${column}`);
+}
+
+// The tiles around `centre`, drawn large; the window slides to stay inside the grid.
+function loupe(root, centre, selected) {
+  const size = LOUPE_RADIUS * 2 + 1;
+  const top = Math.max(0, Math.min(centre.r - LOUPE_RADIUS, root.rows - size));
+  const left = Math.max(0, Math.min(centre.c - LOUPE_RADIUS, root.columns - size));
+  const rows = Math.min(size, root.rows);
+  const columns = Math.min(size, root.columns);
+  const cells = [];
+  for (let r = top; r < top + rows; r += 1) {
+    for (let c = left; c < left + columns; c += 1) {
+      const cell = cellAt(root, r, c);
+      if (!cell) continue;
+      const x = (c - left) * LOUPE_CELL;
+      const y = (r - top) * LOUPE_CELL;
+      const mark = r === centre.r && c === centre.c ? ' centre'
+        : selected && selected.r === r && selected.c === c ? ' selected' : '';
+      cells.push(html`<rect class="t-${cell.s}${mark}" x="${x + 1}" y="${y + 1}" width="${LOUPE_CELL - 2}"
+        height="${LOUPE_CELL - 2}" rx="2.5"></rect>${cell.s === 'running' && cell.node
+        ? html`<text class="loupe-label" x="${x + LOUPE_CELL / 2}" y="${y + LOUPE_CELL / 2 + 3}">${cell.node.slice(0, 3)}</text>` : ''}`);
+    }
+  }
+  return html`<svg class="loupe" viewBox="0 0 ${columns * LOUPE_CELL} ${rows * LOUPE_CELL}"
+    width="${columns * LOUPE_CELL}" height="${rows * LOUPE_CELL}" aria-hidden="true">${cells}</svg>`;
+}
+
+// Details for a hovered tile: a magnifier when the grid is drawn too small to read, then the facts.
+function tileTip(root, c, target, selected, footer = '') {
+  const drawn = target.getBoundingClientRect().width;
+  const lines = tileLines(root, c).map((line, i) => html`${i ? html`<br>` : ''}${line}`);
+  return html`${drawn < LOUPE_BELOW ? loupe(root, c, selected) : ''}<div>${lines}${footer}</div>`;
+}
+
 function rootActions(root) {
   const run = { run_id: root.run_id };
   const terminal = ['complete', 'failed', 'cancelled'].includes(root.state);
@@ -153,7 +201,7 @@ function rootCard(root, index, machines, roots) {
     ${root.orphaned_children ? html`<p class="alert">This root is ${root.state}, but ${root.orphaned_children}
       of its tiles are still running or queued.</p>` : ''}
     ${root.error ? html`<p class="error-text">${root.error}</p>` : ''}
-    <a class="grid-link" href="#tiles/${root.run_id}" title="Open ${field(root.p, root.r)}">${grid(root, index)}</a>
+    <a class="grid-link" href="#tiles/${root.run_id}" aria-label="Open ${field(root.p, root.r)}">${grid(root, index)}</a>
     <div class="card-foot">${rootActions(root)}<a class="cmd small open-link" href="#tiles/${root.run_id}">Open ↗</a></div>
   </article>`;
 }
@@ -190,6 +238,13 @@ function focusView(outer, snapshot, roots, root, selected) {
   const stats = pace(root, snapshot.generated_at);
   const typical = typicalEstimate(root, healthyMachines(snapshot), roots);
   const cell = selected && root.cells.find((c) => c.r === selected.r && c.c === selected.c);
+  const zoomBar = html`<div class="zoom-bar" role="group" aria-label="Zoom">
+    <button type="button" class="cmd small" data-zoom="out" ${zoom === ZOOMS[0] ? 'disabled' : ''} title="Zoom out">−</button>
+    <span class="zoom-level">${zoom}×</span>
+    <button type="button" class="cmd small" data-zoom="in" ${zoom === ZOOMS[ZOOMS.length - 1] ? 'disabled' : ''} title="Zoom in">+</button>
+    <button type="button" class="cmd small" data-zoom="fit" ${zoom === 1 ? 'disabled' : ''} title="Fit the whole grid">Fit</button>
+    <span class="hint">Hover a tile for a magnified view; zoom to click a single tile.</span>
+  </div>`;
   const detail = cell ? html`
       <div class="card tile-detail">
         <h3>Tile ${cell.r},${cell.c}</h3>
@@ -214,7 +269,7 @@ function focusView(outer, snapshot, roots, root, selected) {
         of its tiles are still running or queued.</p>` : ''}
       ${root.error ? html`<p class="error-text">${root.error}</p>` : ''}
       <div class="focus-body">
-        <div class="focus-grid">${grid(root, index, { focus: true, selected })}</div>
+        <div class="focus-grid${zoom > 1 ? ' zoomed' : ''}">${zoomBar}<div class="focus-scroll">${grid(root, index, { focus: true, selected })}</div></div>
         <aside class="focus-side">
           <div class="card">
             <div class="big-number">${pct(total ? done / total : 0)}</div>
@@ -243,7 +298,38 @@ function focusView(outer, snapshot, roots, root, selected) {
       </div>
     </section>`);
 
+  // Zoom lives in CSS (a variable on the grid) because the page's content-security policy has no inline styles.
+  const scroller = container.querySelector('.focus-scroll');
+  const svg = scroller.querySelector('svg.tile-grid');
+  svg.style.setProperty('--zoom', String(zoom));
+  const viewport = scroller;
+  if (focusScroll.run === root.run_id) {
+    viewport.scrollLeft = focusScroll.left;
+    viewport.scrollTop = focusScroll.top;
+  }
+  viewport.addEventListener('scroll', () => {
+    focusScroll = { run: root.run_id, left: viewport.scrollLeft, top: viewport.scrollTop };
+  }, { passive: true });
+
   container.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-zoom]');
+    if (button) {
+      const before = zoom;
+      const at = ZOOMS.indexOf(zoom);
+      zoom = button.dataset.zoom === 'fit' ? 1
+        : ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, at + (button.dataset.zoom === 'in' ? 1 : -1)))];
+      // Keep the middle of what is on screen in the middle after the grid changes size.
+      const ratio = zoom / before;
+      const centreX = viewport.scrollLeft + viewport.clientWidth / 2;
+      const centreY = viewport.scrollTop + viewport.clientHeight / 2;
+      focusScroll = {
+        run: root.run_id,
+        left: Math.max(0, centreX * ratio - viewport.clientWidth / 2),
+        top: Math.max(0, centreY * ratio - viewport.clientHeight / 2),
+      };
+      focusView(outer, snapshot, roots, root, selected);
+      return;
+    }
     const target = event.target.closest('rect.tile');
     if (!target) return;
     const c = root.cells[Number(target.dataset.cell)];
@@ -253,7 +339,7 @@ function focusView(outer, snapshot, roots, root, selected) {
   });
   tooltips(container, 'rect.tile', (target) => {
     const c = root.cells[Number(target.dataset.cell)];
-    return c ? html`${tileLines(root, c).map((line, i) => html`${i ? html`<br>` : ''}${line}`)}` : null;
+    return c ? tileTip(root, c, target, selected) : null;
   });
 }
 
@@ -324,6 +410,6 @@ export function render(container, snapshot, detail) {
     const root = roots[Number(target.dataset.root)];
     const c = root && root.cells[Number(target.dataset.cell)];
     if (!c) return null;
-    return html`${tileLines(root, c).map((line, i) => html`${i ? html`<br>` : ''}${line}`)}<br><i>click to open</i>`;
+    return tileTip(root, c, target, null, html`<br><i>click to open</i>`);
   });
 }

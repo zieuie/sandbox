@@ -302,6 +302,10 @@ details.finished summary { cursor: pointer; color: var(--muted); padding: 8px 0;
 
 @media (max-width: 640px) {
   .top { padding: 8px 12px; }
+.tooltip svg.loupe { display: block; margin: 0 0 6px; border-radius: 4px; background: rgb(255 255 255 / 8%); }
+.tooltip svg.loupe rect.centre { stroke: var(--panel); stroke-width: 3; }
+.tooltip svg.loupe rect.selected { stroke: var(--panel); stroke-width: 1.6; stroke-dasharray: 3 2; }
+.loupe-label { font-size: 8px; text-anchor: middle; fill: #fff; font-weight: 600; pointer-events: none; }
   main { padding: 12px; }
   .refresh-box { margin-left: 0; width: 100%; justify-content: space-between; }
   .node-grid, .root-grid { grid-template-columns: 1fr; }
@@ -610,7 +614,10 @@ a.open-link { text-decoration: none; color: var(--ink); margin-left: auto; }
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 12px; box-shadow: var(--shadow); min-width: 0;
 }
-svg.tile-grid.focus { max-width: min(100%, calc(100vh - 150px)); }
+svg.tile-grid.focus { width: calc(var(--zoom, 1) * min(100%, 100vh - 150px)); max-width: none; }
+.focus-grid.zoomed .focus-scroll { overflow: auto; max-height: calc(100vh - 150px); scrollbar-color: var(--line) transparent; }
+.zoom-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.zoom-level { min-width: 2.2em; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
 .grid-number { font-size: 6px; fill: var(--muted); text-anchor: middle; }
 rect.tile.selected { stroke: var(--ink); stroke-width: 1.4; }
 .focus-side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 80px; }
