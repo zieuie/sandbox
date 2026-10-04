@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import threading
 import uuid
 
 import topology
@@ -47,52 +48,98 @@ def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
 
 
-def select_candidate(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
-                     lease_seconds: float, grace_seconds: float,
-                     disk_floor_bytes: int = 0) -> dict | None:
-    """Find a useful copy using a reader; no global writer lock is required."""
-    # Only the two waiting DP roots need urgent second copies. Starting from
-    # their children avoids evaluating JSON and replica counts for every old,
-    # retired artifact in the database on each worker poll.
-    row = connection.execute(
+# Finding artifacts that need copies means counting live replicas across the replicas
+# table, about half a second of leader CPU. Every polling node used to run that scan,
+# and a node that found work polled again at once, so the leader spent nearly all of one
+# core on it (measured: 90% of its CPU). One scan now serves every node: it lists up to
+# CANDIDATE_LIMIT artifacts, urgent ones first, and each poll walks that list with cheap
+# indexed checks. A new copy's next hop is also pushed at completion (push_next_copy), so
+# the list is only the backstop for what a push missed.
+CANDIDATE_LIMIT = 200
+CANDIDATE_CACHE_SECONDS = 30.0
+_candidates: dict[str, tuple[float, list[dict]]] = {}
+_candidate_lock = threading.Lock()
+
+
+def scan_candidates(connection: sqlite3.Connection, now: float, lease_seconds: float,
+                    grace_seconds: float) -> list[dict]:
+    """Return up to CANDIDATE_LIMIT artifacts short of copies, waiting roots' urgent ones first."""
+
+    # Only the waiting DP roots need urgent second copies. Starting from their children
+    # avoids evaluating replica counts for every old, retired artifact on each scan.
+    rows = connection.execute(
         "SELECT a.artifact_hash,a.size,a.target_replicas FROM runs parent "
         "JOIN runs child ON child.parent_run_id=parent.run_id AND child.state='complete' "
         "JOIN artifacts a ON a.artifact_hash=child.artifact_hash "
         "WHERE parent.state='waiting' "
         "AND json_extract(parent.specification,'$.program')='dp_distributed' "
-        "AND NOT EXISTS (SELECT 1 FROM replicas own WHERE own.artifact_hash=a.artifact_hash "
-        "AND own.node_name=?) "
-        "AND NOT EXISTS (SELECT 1 FROM replica_transfers t WHERE t.artifact_hash=a.artifact_hash "
-        "AND t.expires>?) "
         "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
         "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)=1 "
         "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
         "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)<a.target_replicas "
-        "ORDER BY a.created,a.artifact_hash LIMIT 1",
-        (node["node_name"], now, now - lease_seconds, now - grace_seconds),
-    ).fetchone()
-    if row is None:
-        # Background work starts from indexed replicas, never from the many
-        # retained artifact rows whose bytes have intentionally been retired.
-        row = connection.execute(
-            "SELECT a.artifact_hash,a.size,a.target_replicas FROM replicas source "
-            "JOIN nodes sender ON sender.node_name=source.node_name "
-            "JOIN artifacts a ON a.artifact_hash=source.artifact_hash "
-            "WHERE sender.last_heartbeat>? "
-            "AND NOT EXISTS (SELECT 1 FROM replicas own WHERE own.artifact_hash=a.artifact_hash "
-            "AND own.node_name=?) "
-            "AND NOT EXISTS (SELECT 1 FROM replica_transfers t WHERE t.artifact_hash=a.artifact_hash "
-            "AND t.expires>?) "
-            "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
-            "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)<a.target_replicas "
-            "GROUP BY a.artifact_hash "
-            "ORDER BY (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
-            "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?),a.created LIMIT 1",
-            (now - lease_seconds, node["node_name"], now, now - grace_seconds,
-             now - lease_seconds),
-        ).fetchone()
+        "ORDER BY a.created,a.artifact_hash LIMIT ?",
+        (now - lease_seconds, now - grace_seconds, CANDIDATE_LIMIT),
+    ).fetchall()
+    found = [dict(row) for row in rows]
+    if len(found) < CANDIDATE_LIMIT:
+        # Background work starts from indexed replicas, never from the many retained
+        # artifact rows whose bytes have intentionally been retired.
+        seen = {entry["artifact_hash"] for entry in found}
+        for row in connection.execute(
+                "SELECT a.artifact_hash,a.size,a.target_replicas FROM replicas source "
+                "JOIN nodes sender ON sender.node_name=source.node_name "
+                "JOIN artifacts a ON a.artifact_hash=source.artifact_hash "
+                "WHERE sender.last_heartbeat>? "
+                "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
+                "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)<a.target_replicas "
+                "GROUP BY a.artifact_hash "
+                "ORDER BY (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
+                "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?),a.created LIMIT ?",
+                (now - lease_seconds, now - grace_seconds, now - lease_seconds, CANDIDATE_LIMIT)):
+            if row["artifact_hash"] not in seen:
+                found.append(dict(row))
+                if len(found) >= CANDIDATE_LIMIT:
+                    break
+    return found
+
+
+def cached_candidates(connection: sqlite3.Connection, now: float, lease_seconds: float,
+                      grace_seconds: float) -> list[dict]:
+    """Return the shared candidate list, rescanning at most every CANDIDATE_CACHE_SECONDS."""
+
+    key = next((row[2] for row in connection.execute("PRAGMA database_list") if row[1] == "main"), "")
+    with _candidate_lock:
+        taken, rows = _candidates.get(key, (float("-inf"), []))
+        if not 0 <= now - taken < CANDIDATE_CACHE_SECONDS:
+            rows = scan_candidates(connection, now, lease_seconds, grace_seconds)
+            _candidates[key] = (now, rows)
+        return rows
+
+
+def select_candidate(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
+                     lease_seconds: float, grace_seconds: float,
+                     disk_floor_bytes: int = 0) -> dict | None:
+    """Find a useful copy for node from the shared candidate list; no writer lock is required."""
+
+    row = None
+    for entry in cached_candidates(connection, now, lease_seconds, grace_seconds):
+        digest = entry["artifact_hash"]
+        if connection.execute("SELECT 1 FROM replicas WHERE artifact_hash=? AND node_name=?",
+                              (digest, node["node_name"])).fetchone():
+            continue
+        if connection.execute("SELECT 1 FROM replica_transfers WHERE artifact_hash=? AND expires>?",
+                              (digest, now)).fetchone():
+            continue
+        live = connection.execute(
+            "SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
+            "WHERE r.artifact_hash=? AND n.last_heartbeat>?", (digest, now - grace_seconds)).fetchone()[0]
+        if live >= entry["target_replicas"]:
+            continue
+        row = entry
+        break
     if row is None:
         return None
+
     # An isolated Wi-Fi agent must not claim a copy that three healthy members
     # of the producer's private LAN could keep entirely on that faster LAN.
     # If that LAN loses capacity, cross-group replication becomes eligible again.

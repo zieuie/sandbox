@@ -25,6 +25,8 @@ class PushedCopyTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.addCleanup(replication._idle_until.clear)
+        self.addCleanup(replication._candidates.clear)
+        replication._candidates.clear()
         self.database = Path(temporary.name) / "leader.sqlite"
         leader.initialize(self.database, 1800)
         self.handler = object.__new__(leader.make_handler(self.database))
@@ -126,6 +128,61 @@ class PushedCopyTests(unittest.TestCase):
         reply = self.handler.dispatch_post("/v1/revalidation-batch",
                                            {"node_name": "b", "session_id": self.sessions["b"]})
         self.assertEqual([item["digest"] for item in reply["records"]], [self.digest])
+
+    def test_one_scan_serves_every_node_for_the_cache_period(self) -> None:
+        self.produce("a")
+        with leader.connect(self.database) as connection:
+            connection.execute("DELETE FROM replica_transfers")
+        with mock.patch.object(replication, "scan_candidates", wraps=replication.scan_candidates) as scan:
+            for name in ("b", "c", "wifi"):
+                replication._idle_until.clear()
+                self.poll(name)
+            self.assertEqual(scan.call_count, 1)
+            with leader.connect(self.database) as connection:
+                connection.execute("DELETE FROM replica_transfers")   # no pending assignment to return
+            replication._candidates.clear()
+            replication._idle_until.clear()
+            self.poll("b")
+            self.assertEqual(scan.call_count, 2)
+
+    def test_listed_artifact_is_skipped_once_it_has_enough_copies_or_a_transfer(self) -> None:
+        self.produce("a")
+        with leader.connect(self.database) as connection:
+            connection.execute("DELETE FROM replica_transfers")
+            now = time.time()
+            with mock.patch.object(replication, "TRANSFER_SECONDS", 90.0):
+                connection.execute(
+                    "INSERT INTO replica_transfers(artifact_hash,node_name,session_id,token,created,expires) "
+                    "VALUES(?,?,?,?,?,?)", (self.digest, "c", self.sessions["c"], "t" * 36, now, now + 90))
+        replication._candidates.clear()
+        self.assertIsNone(self.poll("b"), "someone is already copying it")
+        with leader.connect(self.database) as connection:
+            connection.execute("DELETE FROM replica_transfers")
+            connection.execute("INSERT INTO replicas(artifact_hash,node_name,location,created) VALUES(?,?,?,?)",
+                               (self.digest, "c", "http://x/" + self.digest, time.time()))
+            connection.execute("INSERT INTO replicas(artifact_hash,node_name,location,created) VALUES(?,?,?,?)",
+                               (self.digest, "wifi", "http://y/" + self.digest, time.time()))
+        replication._idle_until.clear()
+        self.assertIsNone(self.poll("b"), "three copies exist")
+
+    def test_urgent_single_copy_artifact_of_a_waiting_root_is_listed_first(self) -> None:
+        # Older background artifact with one copy, and a newer single-copy tile of a waiting root.
+        now = time.time()
+        old, tile = "d" * 64, "e" * 64
+        spec = {"program": "dp_distributed", "arguments": {"p": 5, "r": 3, "tile_side": 7, "threads": 1}}
+        root = self.handler.dispatch_post("/v1/enqueue", {"specification": spec})["run_id"]
+        with leader.connect(self.database) as connection:
+            child = connection.execute("SELECT child_run_id FROM distributed_tiles WHERE parent_run_id=? "
+                                       "AND child_run_id IS NOT NULL LIMIT 1", (root,)).fetchone()[0]
+            for digest, created in ((old, now - 1000), (tile, now)):
+                connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created,size) VALUES(?,3,?,5)",
+                                   (digest, created))
+                connection.execute("INSERT INTO replicas(artifact_hash,node_name,location,created) VALUES(?,?,?,?)",
+                                   (digest, "a", "http://a/" + digest, now))
+            connection.execute("UPDATE runs SET state='complete',artifact_hash=? WHERE run_id=?", (tile, child))
+            listed = replication.scan_candidates(connection, now, 60.0, 600.0)
+        self.assertEqual(listed[0]["artifact_hash"], tile)
+        self.assertIn(old, [entry["artifact_hash"] for entry in listed])
 
 
 if __name__ == "__main__":

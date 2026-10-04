@@ -78,6 +78,7 @@ class PrivateNetworkTests(unittest.TestCase):
             connection.execute("UPDATE nodes SET storage_free_bytes=0 WHERE node_name='c'")
         # An empty scan holds the node's next scan for a while; this checks the scan itself.
         replication._idle_until.clear()
+        replication._candidates.clear()
         task = handler.dispatch_post("/v1/replication", request)["replication"]
         self.assertEqual(task["artifact_hash"], self.digest)
 

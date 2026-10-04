@@ -50,9 +50,11 @@ class LeaderCase(unittest.TestCase):
         # These tests change state between polls and expect each poll to scan afresh;
         # the hold after an empty scan is covered in test_replication_push.
         replication._idle_until.clear()
-        hold = mock.patch.object(replication, "IDLE_SCAN_SECONDS", 0.0)
-        hold.start()
-        self.addCleanup(hold.stop)
+        replication._candidates.clear()
+        for name in ("IDLE_SCAN_SECONDS", "CANDIDATE_CACHE_SECONDS"):
+            hold = mock.patch.object(replication, name, 0.0)
+            hold.start()
+            self.addCleanup(hold.stop)
         self.now = time.time()
         with leader.connect(self.database) as connection:
             connection.execute("UPDATE nodes SET last_heartbeat=?", (self.now,))

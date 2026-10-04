@@ -24,6 +24,7 @@ from common import calculation_id, canonical_json
 from blob_store import valid_digest
 from checkpoints import DEFAULT_MAX_BYTES
 import recovery
+import sampler
 import retention
 import replication
 import adapters
@@ -1687,6 +1688,7 @@ def main() -> int:
         daemon=True,
     )
     reaper.start()
+    sampling = sampler.start_if_requested(arguments.database.with_name("leader.profile"))
 
     try:
         server.serve_forever()
