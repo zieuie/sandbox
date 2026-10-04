@@ -23,7 +23,7 @@ def locations(connection: sqlite3.Connection, digest: str, requester: str | None
             group = row[0]
     sources = connection.execute(
         "SELECT r.location,n.private_address,n.private_group FROM replicas r "
-        "JOIN nodes n USING(node_name) WHERE r.artifact_hash=? "
+        "JOIN nodes n USING(node_name) WHERE r.artifact_hash=? AND r.verified=1 "
         "AND n.last_heartbeat>? ORDER BY n.node_name",
         (digest, live_after),
     ).fetchall()

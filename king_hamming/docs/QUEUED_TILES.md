@@ -32,7 +32,8 @@ protocol. Uncommitted tiles are replayed under fresh private leases. Ordinary
 engine failures get one retry, preferring another worker for 30 seconds; repeated
 engine failure fails visibly. Missing/corrupt primary replicas fall back to other
 live sources. Restarted agents revalidate their retained CAS files before
-reclaiming replica ownership. This handles simultaneous agent restart without
+their replica claims are trusted as sources again; meanwhile the claims are
+kept, marked unverified. This handles simultaneous agent restart without
 silently trusting a missing disk.
 
 The root index and child history remain in SQLite across leader restart. Normal

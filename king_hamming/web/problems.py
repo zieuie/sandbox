@@ -14,6 +14,7 @@ from logs import LogWatcher
 
 EVENT_WINDOW = 7 * 24 * 3600
 RECENT_LOG_WINDOW = 3600
+REVALIDATION_STALL_SECONDS = 3600
 
 
 def label(field) -> str:
@@ -72,9 +73,9 @@ def current_conditions(snapshot: dict, connection: sqlite3.Connection, now: floa
             found.append(item("critical", f"clear_hold:{root['p']},{root['r']}",
                               f"{label([root['p'], root['r']])}: {hold['would_clear']} of {hold['finished']} finished "
                               "tiles look lost, so none are being recomputed",
-                              "Their copies are missing from the leader's records, but a fleet-wide worker restart "
-                              "does that too. Check that the workers have finished revalidating; if the copies "
-                              "really are gone, raise the tile_clear_max_fraction setting to let them recompute.",
+                              "No live worker is recorded as holding their copies. Check that the workers that "
+                              "made them are up; if the copies really are gone, raise the "
+                              "tile_clear_max_fraction setting to let them recompute.",
                               hold["time"], "#tiles"))
         stuck = [cell for cell in root["cells"] if cell["s"] == "cancelled"]
         if root["state"] not in {"complete", "failed", "cancelled"} and stuck:
@@ -156,6 +157,19 @@ def current_conditions(snapshot: dict, connection: sqlite3.Connection, now: floa
         found.append(item("warning", "replicas", "A completed result has too few live copies",
                           f"artifact {row['artifact_hash'][:12]}: {row['live']} of {row['target_replicas']}",
                           None, "#fleet"))
+
+    # A restarted worker's copies count as present while it re-checks its disk; a check that
+    # never finishes would hide real losses from replication and the lost-tile rule.
+    for row in connection.execute(
+            "SELECT v.node_name,COUNT(*) AS pending,MIN(v.created) AS since FROM node_revalidation v "
+            "JOIN nodes n USING(node_name) WHERE n.last_heartbeat>? GROUP BY v.node_name "
+            "HAVING MIN(v.created)<?", (now - lease_seconds, now - REVALIDATION_STALL_SECONDS)):
+        found.append(item("warning", f"revalidation:{row['node_name']}",
+                          f"{row['node_name']} has been re-checking its stored copies for "
+                          f"{int((now - row['since']) // 60)} minutes",
+                          f"{row['pending']} copies are still unverified. They count as present, so nothing "
+                          "re-copies or recomputes them while the check runs. Look at the worker's log.",
+                          row["since"], "#fleet"))
 
     # Repeated leader errors in the last hour, from what the dashboard has seen.
     recent: dict[str, list[dict]] = {}

@@ -81,13 +81,13 @@ class DependencyCopyTests(unittest.TestCase):
                              "waiting")
 
     def test_a_copy_awaiting_revalidation_is_not_a_lost_copy(self) -> None:
-        """An agent restart deletes its replica rows until it revalidates its disk; a fleet-wide
-        upgrade must not make every finished tile look lost."""
+        """An agent restart marks its replica rows unverified until it revalidates its disk; a
+        fleet-wide upgrade must not make every finished tile look lost."""
         now = time.time()
         with leader.connect(self.database) as connection:
             old = self.complete_corner(connection, now, finished=now - 700)
             digest = connection.execute("SELECT artifact_hash FROM runs WHERE run_id=?", (old,)).fetchone()[0]
-            connection.execute("DELETE FROM replicas WHERE artifact_hash=?", (digest,))
+            connection.execute("UPDATE replicas SET verified=0 WHERE artifact_hash=?", (digest,))
             connection.execute("INSERT INTO node_revalidation(node_name,kind,digest,created) VALUES('a','artifact',?,?)",
                                (digest, now - 60))
             connection.execute("UPDATE nodes SET last_heartbeat=? WHERE node_name='a'", (now - 5,))

@@ -140,9 +140,9 @@ def excess_plan(connection: sqlite3.Connection, node: str, now: float, limit: in
     """Choose up to limit artifacts for node to drop because enough healthy machines hold them.
 
     A copy is surplus when more than target_replicas healthy nodes (heartbeat within
-    the lease window) hold it. Holders are ranked by free disk, least first, and the
-    first surplus-many are the ones to drop, so at least target copies always remain
-    on healthy machines. Each chosen replica is removed from the index immediately,
+    the lease window) hold verified copies of it; unverified copies neither count nor
+    go. Holders are ranked by free disk, least first, and the first surplus-many are
+    the ones to drop, so at least target copies always remain on healthy machines. Each chosen replica is removed from the index immediately,
     so no reader is sent to it, and queued in artifact_trim for the agent to delete.
     """
 
@@ -151,12 +151,12 @@ def excess_plan(connection: sqlite3.Connection, node: str, now: float, limit: in
     # node drops its copy exactly when its rank is within the surplus. One query, so the limit
     # applies to copies this node is actually chosen to drop, however far down the table they are.
     chosen = [row[0] for row in connection.execute(
-        "WITH mine AS (SELECT artifact_hash FROM replicas WHERE node_name=? AND created<?), "
+        "WITH mine AS (SELECT artifact_hash FROM replicas WHERE node_name=? AND created<? AND verified=1), "
         "ranked AS (SELECT x.artifact_hash,x.node_name,"
         "ROW_NUMBER() OVER (PARTITION BY x.artifact_hash ORDER BY n.storage_free_bytes,n.node_name) AS place,"
         "COUNT(*) OVER (PARTITION BY x.artifact_hash) AS holders "
         "FROM replicas x JOIN nodes n ON n.node_name=x.node_name "
-        "WHERE n.last_heartbeat>? AND x.artifact_hash IN (SELECT artifact_hash FROM mine)) "
+        "WHERE n.last_heartbeat>? AND x.verified=1 AND x.artifact_hash IN (SELECT artifact_hash FROM mine)) "
         "SELECT ranked.artifact_hash FROM ranked JOIN artifacts a USING(artifact_hash) "
         "WHERE ranked.node_name=? AND ranked.place<=ranked.holders-a.target_replicas LIMIT ?",
         (node, now - MIN_TRIM_AGE_SECONDS, healthy, node, limit))]

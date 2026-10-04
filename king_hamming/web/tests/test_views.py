@@ -149,6 +149,19 @@ class ViewTests(unittest.TestCase):
         root = next(item for item in built["roots"] if item["run_id"] == "root-5-3")
         self.assertGreaterEqual(root["recomputed"], 0)
 
+    def test_a_long_storage_recheck_is_a_problem(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            for created, digest in ((NOW - 5400, "a" * 64), (NOW - 60, "b" * 64)):
+                connection.execute("INSERT INTO node_revalidation(node_name,kind,digest,created) "
+                                   "VALUES('dp-101','artifact',?,?)", (digest, created))
+            # A silent node's stalled check is already reported as the node being down.
+            connection.execute("INSERT INTO node_revalidation(node_name,kind,digest,created) "
+                               "VALUES('dp-108','artifact',?,?)", ("c" * 64, NOW - 5400))
+        groups = {entry["group"]: entry for entry in self.build()["problems"]["active"]}
+        self.assertIn("for 90 minutes", groups["revalidation:dp-101"]["title"])
+        self.assertIn("2 copies", groups["revalidation:dp-101"]["detail"])
+        self.assertNotIn("revalidation:dp-108", groups)
+
     def test_problem_events(self) -> None:
         with sqlite3.connect(self.database) as connection:
             connection.execute("UPDATE runs SET state='failed',finished=?,error='tile 0,1: timed out' "

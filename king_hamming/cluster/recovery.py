@@ -71,6 +71,9 @@ def initialize(connection: sqlite3.Connection, lease_seconds: float, max_bytes: 
                   "storage_validation_mode": "TEXT NOT NULL DEFAULT 'verified'",
                   "slots_json": "TEXT NOT NULL DEFAULT '[]'"},
         "artifacts": {"size": "INTEGER"},
+        # 0 while a restarted agent has not yet re-proved this copy on its disk (see /v1/register).
+        "replicas": {"verified": "INTEGER NOT NULL DEFAULT 1"},
+        "checkpoint_replicas": {"verified": "INTEGER NOT NULL DEFAULT 1"},
     }
 
     for table, fields in additions.items():
@@ -91,6 +94,24 @@ def initialize(connection: sqlite3.Connection, lease_seconds: float, max_bytes: 
         "UPDATE runs SET state='queued', node_name=NULL, lease_token=NULL, "
         "progress_phase='recovering' WHERE state='running' AND lease_expires IS NULL"
     )
+
+
+def restore_unverified_claims(connection: sqlite3.Connection) -> None:
+    """Turn revalidation entries left by older leaders back into unverified claims.
+
+    Leaders before the verified column deleted a restarted agent's claims and kept only the
+    revalidation queue. Run after every table and column exists.
+    """
+
+    connection.execute(
+        "INSERT OR IGNORE INTO replicas(artifact_hash,node_name,location,created,verified) "
+        "SELECT v.digest,v.node_name,rtrim(n.address,'/')||'/blobs/'||v.digest,v.created,0 "
+        "FROM node_revalidation v JOIN nodes n USING(node_name) JOIN artifacts a ON a.artifact_hash=v.digest "
+        "WHERE v.kind='artifact'")
+    connection.execute(
+        "INSERT OR IGNORE INTO checkpoint_replicas(manifest_hash,node_name,created,verified) "
+        "SELECT v.digest,v.node_name,v.created,0 FROM node_revalidation v "
+        "JOIN checkpoints c ON c.manifest_hash=v.digest WHERE v.kind='checkpoint' AND c.retired_at IS NULL")
 
 
 # Read numeric leader settings through one consistent conversion path.
@@ -174,7 +195,7 @@ def sources(connection: sqlite3.Connection, digest: str, now: float) -> list[dic
     cutoff = now - setting(connection, "lease_seconds")
     return [dict(row) for row in connection.execute(
         "SELECT n.node_name,n.address FROM checkpoint_replicas r JOIN nodes n USING(node_name) "
-        "WHERE r.manifest_hash=? AND n.last_heartbeat>? ORDER BY n.node_name", (digest, cutoff),
+        "WHERE r.manifest_hash=? AND r.verified=1 AND n.last_heartbeat>? ORDER BY n.node_name", (digest, cutoff),
     )]
 
 
@@ -318,7 +339,7 @@ def add_status(connection: sqlite3.Connection, runs: list[dict[str, Any]], now: 
     live_copies = {row["manifest_hash"]: row["copies"] for row in connection.execute(
         f"SELECT r.manifest_hash,COUNT(*) AS copies FROM checkpoint_replicas r "
         f"JOIN nodes n USING(node_name) JOIN checkpoints c USING(manifest_hash) "
-        f"WHERE c.run_id IN ({placeholders}) AND n.last_heartbeat>? GROUP BY r.manifest_hash",
+        f"WHERE c.run_id IN ({placeholders}) AND r.verified=1 AND n.last_heartbeat>? GROUP BY r.manifest_hash",
         [*identifiers, cutoff],
     )}
     for run in runs:
@@ -334,7 +355,7 @@ def add_status(connection: sqlite3.Connection, runs: list[dict[str, Any]], now: 
         run["last_replicated_at"] = None if row is None else row["durable_at"]
 
 
-# A restarted agent must prove its retained disk content before regaining old replica claims.
+# A restarted agent must prove its retained disk content before its old claims count as verified.
 def revalidation(connection: sqlite3.Connection, node: str, now: float) -> dict[str, Any] | None:
     """Return one useful retained-content validation task without scanning the whole queue."""
 
@@ -360,7 +381,7 @@ def revalidation(connection: sqlite3.Connection, node: str, now: float) -> dict[
             artifact=connection.execute("SELECT artifact_hash,size FROM artifacts WHERE artifact_hash=?",(row["digest"],)).fetchone()
             if artifact is not None:
                 return {"kind":"revalidate_artifact",**dict(artifact)}
-        connection.execute("DELETE FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?",(node,row["kind"],row["digest"]))
+        drop_unverified(connection, node, row["kind"], row["digest"])
 
 
 def revalidation_batch(connection: sqlite3.Connection, node: str, limit: int = 512) -> list[dict[str, Any]]:
@@ -398,8 +419,19 @@ def revalidation_batch(connection: sqlite3.Connection, node: str, limit: int = 5
                 result.append({"kind": "checkpoint", "digest": row["digest"],
                                "members": members})
                 continue
-        connection.execute(
-            "DELETE FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?",
-            (node, row["kind"], row["digest"]),
-        )
+        drop_unverified(connection, node, row["kind"], row["digest"])
     return result
+
+
+def drop_unverified(connection: sqlite3.Connection, node: str, kind: str, digest: str) -> None:
+    """End node's pending check of digest; a claim it did not re-prove is forgotten with it.
+
+    A copy proved in the meantime was re-recorded as verified and stays.
+    """
+
+    connection.execute("DELETE FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?", (node, kind, digest))
+    if kind == "artifact":
+        connection.execute("DELETE FROM replicas WHERE node_name=? AND artifact_hash=? AND verified=0", (node, digest))
+    else:
+        connection.execute("DELETE FROM checkpoint_replicas WHERE node_name=? AND manifest_hash=? AND verified=0",
+                           (node, digest))

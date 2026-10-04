@@ -81,10 +81,12 @@ class TileSafeguardTests(unittest.TestCase):
             before = self.referenced(connection)
         from unittest.mock import patch
         with patch.object(leader.time, "time", return_value=self.now):
-            for name in NODES:          # a new session each: replica rows deleted, revalidation queued
+            for name in NODES:          # a new session each: replica rows unverified, revalidation queued
                 self.register(name)
         with leader.connect(self.database) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM replicas").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM replicas WHERE verified=1").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM replicas").fetchone()[0],
+                             len(self.cells) * len(NODES), "a restart keeps every claim")
             self.assertGreater(connection.execute("SELECT COUNT(*) FROM node_revalidation").fetchone()[0], 100)
             self.beat(connection, self.now)
             distributed._last_refresh.clear()

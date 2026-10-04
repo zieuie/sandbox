@@ -280,7 +280,7 @@ def retire_finished_tiles(connection: sqlite3.Connection, now: float, force: boo
         "WITH done AS (SELECT p.calculation_id AS calc FROM runs p WHERE p.parent_run_id IS NULL "
         "AND p.state='complete' AND p.artifact_hash IS NOT NULL AND p.finished<=? "
         "AND (SELECT COUNT(*) FROM replicas x JOIN nodes n USING(node_name) "
-        "WHERE x.artifact_hash=p.artifact_hash AND n.last_heartbeat>?)>=2) "
+        "WHERE x.artifact_hash=p.artifact_hash AND x.verified=1 AND n.last_heartbeat>?)>=2) "
         "SELECT c.artifact_hash FROM runs c JOIN runs p ON p.run_id=c.parent_run_id "
         "WHERE c.artifact_hash IS NOT NULL AND c.state='complete' "
         "AND json_extract(c.specification,'$.program')='dp_tile' "
@@ -300,7 +300,7 @@ def retire_finished_tiles(connection: sqlite3.Connection, now: float, force: boo
     return len(packets)
 
 
-# Durable means complete with at least two replicas on live nodes, read in one query.
+# Durable means complete with at least two verified replicas on live nodes, read in one query.
 def durable_tiles(connection: sqlite3.Connection, parent_run_id: str, now: float,
                   lease_seconds: float, copies: int = 2) -> set[tuple[int, int]]:
     """Return the (row, column) of parent's complete tiles with at least copies live replicas."""
@@ -308,7 +308,7 @@ def durable_tiles(connection: sqlite3.Connection, parent_run_id: str, now: float
     return {(row[0], row[1]) for row in connection.execute(
         "SELECT t.row,t.column FROM distributed_tiles t "
         "JOIN runs child ON child.run_id=t.child_run_id "
-        "JOIN replicas replica ON replica.artifact_hash=child.artifact_hash "
+        "JOIN replicas replica ON replica.artifact_hash=child.artifact_hash AND replica.verified=1 "
         "JOIN nodes node ON node.node_name=replica.node_name "
         "WHERE t.parent_run_id=? AND child.state='complete' "
         "AND node.last_heartbeat>? GROUP BY t.row,t.column HAVING COUNT(*)>=?",
@@ -337,19 +337,16 @@ def recompute_lost_tiles(connection: sqlite3.Connection, parent_run_id: str, now
 
     grace = retention_module.number(connection, "replica_grace_seconds",
                                     retention_module.DEFAULT_REPLICA_GRACE_SECONDS)
-    # A restarted agent's replica rows are deleted and re-added as it revalidates its disk (minutes
-    # to hours for a big store), so a missing row is not a lost copy while a live node still has the
-    # artifact queued for revalidation. A fleet-wide worker upgrade once cleared 87% of a root's
-    # finished tiles this way, and the cluster recomputed them.
+    # A restarted agent's copy is unverified until it re-checks its disk (minutes to hours for a big
+    # store), and an unverified copy on a live node is not a lost one. Leaders once deleted those
+    # claims instead, and a fleet-wide worker upgrade cleared 87% of a root's finished tiles.
     lost = connection.execute(
         "SELECT t.row,t.column,t.child_run_id FROM distributed_tiles t "
         "JOIN runs child ON child.run_id=t.child_run_id "
         "WHERE t.parent_run_id=? AND child.state='complete' AND child.finished<? "
         "AND NOT EXISTS (SELECT 1 FROM replicas r JOIN nodes n USING(node_name) "
-        "WHERE r.artifact_hash=child.artifact_hash AND n.last_heartbeat>?) "
-        "AND NOT EXISTS (SELECT 1 FROM node_revalidation v JOIN nodes vn ON vn.node_name=v.node_name "
-        "WHERE v.kind='artifact' AND v.digest=child.artifact_hash AND vn.last_heartbeat>?)",
-        (parent_run_id, now - grace, now - grace, now - grace)).fetchall()
+        "WHERE r.artifact_hash=child.artifact_hash AND n.last_heartbeat>?)",
+        (parent_run_id, now - grace, now - grace)).fetchall()
     # Circuit breaker. Clearing finished work is the one destructive step the scheduler takes on
     # its own, and it rests on bookkeeping (replica rows, heartbeats) that can be wrong in bulk.
     # A pass that would clear more than a small share of a root's finished tiles clears nothing
@@ -383,8 +380,7 @@ def restore_cleared_tiles(connection: sqlite3.Connection, parent_run_id: str) ->
 
     Repairs the damage described in recompute_lost_tiles: the child runs completed, their blobs
     are on disk and registered again, but the tile row was cleared. Only tiles still without a
-    child are touched; the newest finished child with a replica (or one awaiting revalidation)
-    wins. Returns how many tiles were restored. Run inside a write transaction.
+    child are touched; the newest finished child with a replica (verified or not) wins. Returns how many tiles were restored. Run inside a write transaction.
     """
 
     empty = {(row[0], row[1]) for row in connection.execute(
@@ -395,8 +391,7 @@ def restore_cleared_tiles(connection: sqlite3.Connection, parent_run_id: str) ->
     best: dict[tuple[int, int], tuple[float, str]] = {}
     for child in connection.execute(
             "SELECT c.run_id,c.finished,c.specification FROM runs c WHERE c.parent_run_id=? AND c.state='complete' "
-            "AND c.artifact_hash IS NOT NULL AND (EXISTS (SELECT 1 FROM replicas r WHERE r.artifact_hash=c.artifact_hash) "
-            "OR EXISTS (SELECT 1 FROM node_revalidation v WHERE v.kind='artifact' AND v.digest=c.artifact_hash))",
+            "AND c.artifact_hash IS NOT NULL AND EXISTS (SELECT 1 FROM replicas r WHERE r.artifact_hash=c.artifact_hash)",
             (parent_run_id,)):
         arguments = json.loads(child["specification"]).get("arguments", {})
         key = (arguments.get("row"), arguments.get("column"))
@@ -425,7 +420,7 @@ def durable_among(connection: sqlite3.Connection, parent_run_id: str, coordinate
             "SELECT t.row,t.column FROM want w "
             "CROSS JOIN distributed_tiles t ON t.row=w.row AND t.column=w.column AND t.parent_run_id=? "
             "CROSS JOIN runs child ON child.run_id=t.child_run_id AND child.state='complete' "
-            "CROSS JOIN replicas replica ON replica.artifact_hash=child.artifact_hash "
+            "CROSS JOIN replicas replica ON replica.artifact_hash=child.artifact_hash AND replica.verified=1 "
             "CROSS JOIN nodes node ON node.node_name=replica.node_name AND node.last_heartbeat>? "
             "GROUP BY t.row,t.column HAVING COUNT(*)>=?", arguments))
     return found

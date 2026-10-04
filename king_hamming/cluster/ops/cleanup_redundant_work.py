@@ -99,7 +99,7 @@ def main():
         rows = database.execute(
             "SELECT r.run_id, r.artifact_hash, a.size, COUNT(p.node_name) "
             "FROM runs r JOIN artifacts a ON a.artifact_hash=r.artifact_hash "
-            "LEFT JOIN replicas p ON p.artifact_hash=r.artifact_hash "
+            "LEFT JOIN replicas p ON p.artifact_hash=r.artifact_hash AND p.verified=1 "
             "WHERE r.state='complete' GROUP BY r.run_id"
         )
         completed = {run_id: (digest, size) for run_id, digest, size, copies in rows

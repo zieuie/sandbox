@@ -472,6 +472,7 @@ def initialize(
         recovery.initialize(connection, lease_seconds, max_checkpoint_bytes)
         retention.initialize(connection, checkpoint_keep)
         replication.initialize(connection)
+        recovery.restore_unverified_claims(connection)
         connection.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('disk_floor_bytes',?)",
                            (str(DEFAULT_DISK_FLOOR_BYTES),))
         adapters.initialize(connection)
@@ -628,7 +629,7 @@ def make_handler(
                         "WITH root_artifacts AS (SELECT DISTINCT artifact_hash FROM runs "
                         "WHERE parent_run_id IS NULL AND artifact_hash IS NOT NULL) "
                         "SELECT a.artifact_hash,a.target_replicas,"
-                        "SUM(CASE WHEN n.last_heartbeat>? THEN 1 ELSE 0 END) AS replicas,"
+                        "SUM(CASE WHEN n.last_heartbeat>? AND r.verified=1 THEN 1 ELSE 0 END) AS replicas,"
                         "COUNT(r.node_name) AS indexed_replicas FROM root_artifacts root "
                         "JOIN artifacts a USING(artifact_hash) LEFT JOIN replicas r USING(artifact_hash) "
                         "LEFT JOIN nodes n USING(node_name) GROUP BY a.artifact_hash "
@@ -933,6 +934,10 @@ def make_handler(
                             recovery.retire(connection, active, now, "reserved partner incarnation changed")
 
                         # Revalidate storage after a restart; disk contents may have disappeared.
+                        # The claims stay, marked unverified, so readers can tell "not yet
+                        # re-checked" from "gone": deleting them once made every upgrade look
+                        # like mass loss (finished tiles recomputed, copies re-replicated).
+                        # Anything that reads bytes from a copy still uses verified ones only.
                         connection.execute(
                             "INSERT OR IGNORE INTO node_revalidation(node_name,kind,digest,created) SELECT node_name,'artifact',artifact_hash,? FROM replicas WHERE node_name=?",
                             (now, request["node_name"]),
@@ -941,8 +946,8 @@ def make_handler(
                             "INSERT OR IGNORE INTO node_revalidation(node_name,kind,digest,created) SELECT node_name,'checkpoint',manifest_hash,? FROM checkpoint_replicas WHERE node_name=?",
                             (now, request["node_name"]),
                         )
-                        connection.execute("DELETE FROM replicas WHERE node_name=?", (request["node_name"],))
-                        connection.execute("DELETE FROM checkpoint_replicas WHERE node_name=?", (request["node_name"],))
+                        connection.execute("UPDATE replicas SET verified=0 WHERE node_name=?", (request["node_name"],))
+                        connection.execute("UPDATE checkpoint_replicas SET verified=0 WHERE node_name=?", (request["node_name"],))
 
                     validation_mode = (existing["storage_validation_mode"]
                                        if route == "/v1/heartbeat" and existing is not None
@@ -1026,10 +1031,7 @@ def make_handler(
                                 f"{node['address'].rstrip('/')}/blobs/{digest}", now))
                         elif valid:
                             recovery.acknowledge(connection, digest, node["node_name"], now)
-                        connection.execute(
-                            "DELETE FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?",
-                            (node["node_name"], kind, digest),
-                        )
+                        recovery.drop_unverified(connection, node["node_name"], kind, digest)
                     remaining = connection.execute(
                         "SELECT COUNT(*) FROM node_revalidation WHERE node_name=?",
                         (node["node_name"],),
@@ -1038,6 +1040,11 @@ def make_handler(
                         connection.execute(
                             "UPDATE nodes SET storage_validation_mode='verified' WHERE node_name=?",
                             (node["node_name"],))
+                        # Nothing is left to check, so no claim of this node may stay unverified.
+                        connection.execute("DELETE FROM replicas WHERE node_name=? AND verified=0",
+                                           (node["node_name"],))
+                        connection.execute("DELETE FROM checkpoint_replicas WHERE node_name=? AND verified=0",
+                                           (node["node_name"],))
                     return {"ok": True, "remaining": remaining}
 
                 if route == "/v1/gc-plan":
@@ -1088,8 +1095,7 @@ def make_handler(
                     node = recovery.require_node(connection, request)
                     if request["kind"] not in {"artifact", "checkpoint"} or not valid_digest(request["digest"]):
                         raise ValueError("invalid retained-content acknowledgment")
-                    connection.execute("DELETE FROM node_revalidation WHERE node_name=? AND kind=? AND digest=?",
-                                       (node["node_name"], request["kind"], request["digest"]))
+                    recovery.drop_unverified(connection, node["node_name"], request["kind"], request["digest"])
                     return {"ok": True}
 
                 if route == "/v1/blob-bad":

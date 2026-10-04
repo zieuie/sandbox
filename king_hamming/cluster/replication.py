@@ -61,6 +61,10 @@ _candidates: dict[str, tuple[float, list[dict]]] = {}
 _candidate_lock = threading.Lock()
 
 
+# Copy counts include unverified claims (a restarted agent's copies it has not re-checked yet):
+# re-copying everything a restarted node holds would only make surplus for retention to trim.
+# If a check fails the claim is deleted and the artifact becomes short again. Sources are
+# always verified copies.
 def scan_candidates(connection: sqlite3.Connection, now: float, lease_seconds: float,
                     grace_seconds: float) -> list[dict]:
     """Return up to CANDIDATE_LIMIT artifacts short of copies, waiting roots' urgent ones first."""
@@ -89,7 +93,7 @@ def scan_candidates(connection: sqlite3.Connection, now: float, lease_seconds: f
                 "SELECT a.artifact_hash,a.size,a.target_replicas FROM replicas source "
                 "JOIN nodes sender ON sender.node_name=source.node_name "
                 "JOIN artifacts a ON a.artifact_hash=source.artifact_hash "
-                "WHERE sender.last_heartbeat>? "
+                "WHERE sender.last_heartbeat>? AND source.verified=1 "
                 "AND (SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
                 "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)<a.target_replicas "
                 "GROUP BY a.artifact_hash "
@@ -145,7 +149,7 @@ def select_candidate(connection: sqlite3.Connection, node: sqlite3.Row, now: flo
     # If that LAN loses capacity, cross-group replication becomes eligible again.
     source_groups = [record[0] for record in connection.execute(
         "SELECT DISTINCT n.private_group FROM replicas r JOIN nodes n USING(node_name) "
-        "WHERE r.artifact_hash=? AND n.private_group<>'' AND n.last_heartbeat>?",
+        "WHERE r.artifact_hash=? AND r.verified=1 AND n.private_group<>'' AND n.last_heartbeat>?",
         (row["artifact_hash"], now - lease_seconds),
     )]
     if source_groups and node["private_group"] not in source_groups:
@@ -189,7 +193,7 @@ def reserve_candidate(connection: sqlite3.Connection, node: sqlite3.Row,
         return None
     source_groups = [record[0] for record in connection.execute(
         "SELECT DISTINCT n.private_group FROM replicas r JOIN nodes n USING(node_name) "
-        "WHERE r.artifact_hash=? AND n.private_group<>'' AND n.last_heartbeat>?",
+        "WHERE r.artifact_hash=? AND r.verified=1 AND n.private_group<>'' AND n.last_heartbeat>?",
         (digest, now - lease_seconds),
     )]
     if source_groups and node["private_group"] not in source_groups:
@@ -239,12 +243,13 @@ def push_next_copy(connection: sqlite3.Connection, digest: str, now: float,
     )
     if connection.execute("SELECT 1 FROM replica_transfers WHERE artifact_hash=?", (digest,)).fetchone():
         return None
-    holders = {row[0]: (row[1], row[2]) for row in connection.execute(
-        "SELECT r.node_name,n.last_heartbeat,n.private_group FROM replicas r "
+    holders = {row[0]: (row[1], row[2], row[3]) for row in connection.execute(
+        "SELECT r.node_name,n.last_heartbeat,n.private_group,r.verified FROM replicas r "
         "JOIN nodes n USING(node_name) WHERE r.artifact_hash=?", (digest,))}
-    if sum(heartbeat > now - grace_seconds for heartbeat, _ in holders.values()) >= artifact[0]:
+    if sum(heartbeat > now - grace_seconds for heartbeat, _, _ in holders.values()) >= artifact[0]:
         return None
-    source_groups = {group for heartbeat, group in holders.values() if heartbeat > now - lease_seconds}
+    source_groups = {group for heartbeat, group, verified in holders.values()
+                     if verified and heartbeat > now - lease_seconds}
     if not source_groups:
         return None
     pending = dict(connection.execute(
