@@ -176,13 +176,25 @@ function hit(canvas, root, event, focus) {
 // Redraw every grid canvas in `container` now and whenever its width changes. One observer at a
 // time: the page re-renders every poll, and an observer keeps its old canvases alive.
 let gridObserver = null;
+const drawnWidth = new WeakMap();
 function attachGrids(container, roots, options) {
   const canvases = [...container.querySelectorAll('canvas.tile-grid')];
-  const redraw = (canvas) => draw(canvas, roots[Number(canvas.dataset.root)], options(canvas));
+  const redraw = (canvas) => {
+    // The layout box comes from CSS alone (width, and this aspect ratio), so resizing the pixel
+    // buffer while drawing can never change it and re-trigger the observer.
+    const root = roots[Number(canvas.dataset.root)];
+    const margin = canvas.classList.contains('focus') ? NUMBER_MARGIN : 0;
+    const width = canvas.clientWidth || 1;
+    canvas.style.aspectRatio = `${width} / ${margin + ((width - margin) / root.columns) * root.rows}`;
+    drawnWidth.set(canvas, canvas.clientWidth);
+    draw(canvas, root, options(canvas));
+  };
   canvases.forEach(redraw);
   if (gridObserver) gridObserver.disconnect();
   gridObserver = new ResizeObserver((entries) => entries.forEach((entry) => {
-    if (entry.target.isConnected) redraw(entry.target);
+    const canvas = entry.target;
+    // Redraw only for a real width change (window resize, zoom), never for our own redraws.
+    if (canvas.isConnected && Math.abs(canvas.clientWidth - (drawnWidth.get(canvas) || 0)) >= 1) redraw(canvas);
   }));
   canvases.forEach((canvas) => gridObserver.observe(canvas));
 }
