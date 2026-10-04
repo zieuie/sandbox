@@ -314,5 +314,34 @@ class DPTileGPUAdmissionTests(unittest.TestCase):
             self.assertTrue(distributed_solver.gpu_fits(127, cube, 0))
 
 
+class DPTileGPUWaitTests(unittest.TestCase):
+    """How long a tile waits for the GPU follows what its CPUs would cost."""
+
+    def wait(self, p: int, r: int, side: int, row: int, column: int, threads: int = 2) -> float:
+        from dp_solver import distributed_solver
+        from dp_solver.tiles import tile
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KH_GPU_DP_WAIT_SECONDS", None)
+            return distributed_solver.gpu_wait_seconds(p, tile(p, r, side, row, column), threads)
+
+    def test_heavy_tiles_wait_long_for_the_gpu_and_light_ones_barely_at_all(self) -> None:
+        heavy = self.wait(29, 7, 4096, 30, 30)          # about 1,380 s on two CPUs
+        self.assertGreater(heavy, 600)
+        self.assertLessEqual(heavy, 900)
+        self.assertLess(self.wait(5, 13, 1024, 16, 16), 2.0)       # well under a second on the CPU
+        medium = self.wait(7, 13, 4096, 30, 30)          # about 16 s
+        self.assertTrue(4 < medium < 12, medium)
+
+    def test_more_threads_shorten_the_wait_and_an_explicit_setting_wins(self) -> None:
+        from dp_solver import distributed_solver
+        from dp_solver.tiles import tile
+        rectangle = tile(23, 7, 4096, 20, 20)
+        two = self.wait(23, 7, 4096, 20, 20, 2)
+        eight = self.wait(23, 7, 4096, 20, 20, 8)
+        self.assertAlmostEqual(two / eight, 4, delta=0.5)
+        with unittest.mock.patch.dict(os.environ, {"KH_GPU_DP_WAIT_SECONDS": "7"}):
+            self.assertEqual(distributed_solver.gpu_wait_seconds(23, rectangle, 2), 7.0)
+
+
 if __name__ == "__main__":
     unittest.main()

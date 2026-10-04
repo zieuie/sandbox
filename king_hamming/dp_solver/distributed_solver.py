@@ -324,6 +324,27 @@ def gpu_fits(p: int, rectangle, device: int = 0) -> bool:
     return rectangle.halo_bytes+rectangle.value_bytes//2+p**3*24+32*1024**2<=limit
 
 
+# CPU seconds per cell, per transition (p^3 of them) and per thread, measured on live tiles:
+# 23^7 604 s, 29^7 1378 s, 31^7 1632 s, 7^13 16 s on two threads (5.6e-9 to 6.7e-9).
+CPU_SECONDS_PER_VISIT = 6.5e-9
+MIN_GPU_WAIT_SECONDS = 1.0
+MAX_GPU_WAIT_SECONDS = 900.0
+
+
+# A fixed 120 s wait suited neither end: a heavy tile that gave up then spent up to 25 minutes on
+# the CPU (30x slower than the GPU it had nearly reached), while a light tile idled for two
+# minutes for a GPU that its own CPUs would beat. Waiting is worth it only while it costs less
+# than the CPU run it avoids, so wait up to half the CPU estimate, within sane bounds.
+def gpu_wait_seconds(p: int, rectangle, threads: int) -> float:
+    """Return how long this tile should wait for the GPU before computing on its CPUs."""
+
+    configured=os.environ.get("KH_GPU_DP_WAIT_SECONDS")
+    if configured:
+        return float(configured)
+    cpu_seconds=(rectangle.value_bytes//8)*p**3*CPU_SECONDS_PER_VISIT/max(1,threads)
+    return min(MAX_GPU_WAIT_SECONDS,max(MIN_GPU_WAIT_SECONDS,cpu_seconds/2))
+
+
 # Compute an immutable tile from peer artifacts, leaving whole-calculation state on no worker.
 def compute(arguments, specification: dict) -> None:
     """Assemble one admitted halo, invoke the exact pinned C kernel and pack its complete output."""
@@ -384,11 +405,13 @@ def compute(arguments, specification: dict) -> None:
     # The GPU kernel's output is byte-identical to kh_dp_tile, so it is an opportunistic
     # accelerator: wait briefly for this host's GPU, otherwise compute on the leased CPUs.
     computed=False
+    limit=0.0
     device=int(os.environ.get("KH_GPU_DEVICE","0"))
     if (GPU_TILE.exists() and os.environ.get("KH_DISABLE_GPU_DP")!="1" and gpu_fits(p,rectangle,device) and
             not gpus.recently_unavailable(device)):
         lock=gpus.DeviceLock(device)
-        acquired=lock.acquire(float(os.environ.get("KH_GPU_DP_WAIT_SECONDS","120")),lambda: STOP,skip_long=True)
+        limit=gpu_wait_seconds(p,rectangle,threads)
+        acquired=lock.acquire(limit,lambda: STOP,skip_long=True)
         lap("gpu_wait")
         if acquired:
             try:
@@ -427,7 +450,7 @@ def compute(arguments, specification: dict) -> None:
     cells=rectangle.value_bytes//8
     mode="none" if not counts["band"]+counts["packet"] else "bands" if not counts["packet"] else "packets" if not counts["band"] else "mixed"
     print(json.dumps({"done":cells,"total":cells,"checkpoint_done":cells,"units":"cells","phase":"complete","heartbeat":True,
-                      "engine":"gpu" if computed else "cpu","input_mode":mode,
+                      "engine":"gpu" if computed else "cpu","gpu_wait_limit":round(limit,1),"input_mode":mode,
                       "input_bytes":fetched["band"]+fetched["packet"],"input_band_bytes":fetched["band"],
                       "bands_published":published,**timings}),flush=True)
 
