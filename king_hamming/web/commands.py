@@ -193,8 +193,9 @@ def dispatch(context: Context, params: dict, target: str) -> Plan:
     stop = target == "stopped"
     plan = Plan(
         title="Stop dispatch" if stop else "Resume dispatch",
-        summary=("No new work is handed out. Running work stops at its next checkpoint and "
-                 "returns to the queue; nothing is lost." if stop else
+        summary=("No new work is handed out, and running work is asked to stop right now: it returns "
+                 "to the queue and restarts from its last checkpoint (a tile in progress restarts from "
+                 "the beginning). Use Drain dispatch instead to let running work finish." if stop else
                  "The leader starts handing out queued work again."),
         facts={"state": state, "running": running},
         action=lambda: context.leader("/v1/control", {"state": target}),
@@ -204,6 +205,44 @@ def dispatch(context: Context, params: dict, target: str) -> Plan:
         plan.blockers.append(f"Dispatch is already {target}.")
     if stop and running:
         plan.warnings.append(f"{len(running)} running lease(s) will be asked to stop.")
+    return plan
+
+
+def dispatch_status(context: Context) -> dict:
+    """What dispatch is doing now: its state and how much work is still in flight."""
+
+    with context.database() as connection:
+        state = connection.execute("SELECT value FROM settings WHERE key='campaign_state'").fetchone()[0]
+        counts = dict(connection.execute(
+            "SELECT state, COUNT(*) FROM runs WHERE state IN ('running','stopping','queued') GROUP BY state").fetchall())
+        stop_requested = connection.execute(
+            "SELECT COUNT(*) FROM runs WHERE state='running' AND stop_requested=1").fetchone()[0]
+    active = counts.get("running", 0) + counts.get("stopping", 0)
+    return {"state": state, "running": counts.get("running", 0), "stopping": counts.get("stopping", 0),
+            "queued": counts.get("queued", 0), "stop_requested": stop_requested,
+            "draining": state == "stopped" and active > 0, "idle": state == "stopped" and active == 0}
+
+
+def drain(context: Context, params: dict) -> Plan:
+    status = dispatch_status(context)
+    active = status["running"] + status["stopping"]
+
+    def action() -> dict:
+        from dp_solver.launch_dp import drain_dispatch  # same transaction the launcher's drain uses
+        return {"campaign_state": "stopped", "still_running": drain_dispatch(context.state / "leader.sqlite")}
+
+    plan = Plan(
+        title="Drain dispatch",
+        summary=("No new work is handed out, but running tiles are left alone to finish and publish. "
+                 "Once nothing is running the cluster is idle and an upgrade can proceed. Resume dispatch "
+                 "to undo it."),
+        facts={"state": status["state"], "running": status["running"], "stopping": status["stopping"]},
+        action=action,
+        changes=[{"label": "Dispatch", "before": status["state"], "after": "stopped (running work finishes)"}])
+    if status["state"] == "stopped":
+        plan.blockers.append("Dispatch is already stopped.")
+    if active:
+        plan.warnings.append(f"{active} run(s) are in flight; they will finish on their own.")
     return plan
 
 
@@ -909,6 +948,7 @@ def cancel_job(context: Context, params: dict) -> Plan:
 
 
 COMMANDS: dict[str, Callable[[Context, dict], Plan]] = {
+    "dispatch.drain": drain,
     "dispatch.stop": lambda c, p: dispatch(c, p, "stopped"),
     "dispatch.resume": lambda c, p: dispatch(c, p, "running"),
     "run.pause": lambda c, p: run_control(c, p, "pause"),

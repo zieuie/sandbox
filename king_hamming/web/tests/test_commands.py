@@ -74,6 +74,27 @@ class CommandTests(unittest.TestCase):
         entry = self.audit()[-1]
         self.assertEqual((entry["command"], entry["outcome"], entry["user"]), ("dispatch.stop", "ok", "tester"))
 
+    def test_drain_stops_new_work_without_asking_running_work_to_stop(self) -> None:
+        status, _, preview = self.preview("dispatch.drain")
+        self.assertEqual((status, preview["confirm_text"], preview["blockers"]), (200, None, []))
+        self.assertEqual(preview["warnings"], ["1 run(s) are in flight; they will finish on their own."])
+        status, _, reply = self.run_command("dispatch.drain")
+        self.assertEqual((status, reply["result"]), (200, {"campaign_state": "stopped", "still_running": 1}))
+        self.assertEqual(self.leader.calls, [])        # the leader's stop route would abort running tiles
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT value FROM settings WHERE key='campaign_state'").fetchone()[0], "stopped")
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM runs WHERE state='running' AND stop_requested=1").fetchone()[0], 0)
+        self.assertEqual(self.preview("dispatch.drain")[2]["blockers"], ["Dispatch is already stopped."])
+        status, _, jobs = self.client.json("/api/jobs")
+        self.assertEqual(status, 200)
+        self.assertTrue(jobs["dispatch"]["draining"])
+        self.assertFalse(jobs["dispatch"]["idle"])
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("UPDATE runs SET state='complete' WHERE state IN ('running','stopping')")
+        self.assertTrue(self.client.json("/api/jobs")[2]["dispatch"]["idle"])
+
     def test_stale_preview_is_refused_with_a_fresh_one(self) -> None:
         fingerprint = self.preview("dispatch.stop")[2]["fingerprint"]
         with sqlite3.connect(self.database) as connection:

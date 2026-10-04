@@ -204,6 +204,9 @@ table.mini tr.error-row td { color: var(--bad); border-bottom: 1px solid var(--l
 .state-complete { color: var(--ok); }
 .state-failed, .state-cancelled { color: var(--bad); }
 .state-running, .state-waiting, .state-queued { color: var(--accent); }
+.state-idle { color: var(--ok); }
+.state-draining { color: var(--warn); }
+.state-unknown { color: var(--muted); }
 
 /* ----- fleet ----- */
 .node-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }

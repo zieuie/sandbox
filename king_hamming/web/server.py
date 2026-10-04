@@ -19,6 +19,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+import sqlite3
 from pathlib import Path
 import re
 import socket
@@ -31,7 +32,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from snapshot import HOST_NAMES, ROOT, Snapshots  # first: sets up the import path
 from audit import Audit  # noqa: E402
 from auth import DEFAULT_STATE, ROLES, SESSION_SECONDS, Auth, check_password  # noqa: E402
-from commands import CommandError, CommandService, Context  # noqa: E402
+from commands import CommandError, CommandService, Context, dispatch_status  # noqa: E402
 import disk  # noqa: E402
 from jobs import Jobs, git_state  # noqa: E402
 
@@ -330,8 +331,12 @@ def make_handler(config: Config) -> type[BaseHTTPRequestHandler]:
                     rollout_value = json.loads(rollout.read_text()) if rollout.exists() else None
                 except ValueError:
                     rollout_value = None
+                try:
+                    dispatch_value = dispatch_status(context)
+                except (sqlite3.Error, OSError, TypeError):
+                    dispatch_value = None
                 self.send_json(HTTPStatus.OK, {"jobs": context.jobs.list(), "git": git_state(ROOT),
-                                               "rollout": rollout_value})
+                                               "rollout": rollout_value, "dispatch": dispatch_value})
             else:
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 

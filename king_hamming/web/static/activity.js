@@ -21,6 +21,23 @@ function jobCard(job) {
   </li>`;
 }
 
+// One line on what dispatch is doing, so a drain can be watched until the cluster is idle.
+function dispatchSummary(dispatch) {
+  if (!dispatch) return { tone: 'unknown', text: 'Dispatch state is unavailable.' };
+  const inFlight = dispatch.running + dispatch.stopping;
+  const queued = `${dispatch.queued} queued`;
+  if (dispatch.state === 'running') {
+    return { tone: 'running', text: `Running: ${dispatch.running} in flight, ${queued}.` };
+  }
+  if (dispatch.idle) {
+    return { tone: 'idle', text: `Stopped and idle: nothing is running, ${queued}. Safe to upgrade.` };
+  }
+  const aborting = dispatch.stop_requested || dispatch.stopping;
+  return { tone: 'draining', text: aborting
+    ? `Stopped: ${inFlight} run(s) still winding down after a stop request, ${queued}.`
+    : `Draining: no new work; ${inFlight} run(s) finishing on their own, ${queued}.` };
+}
+
 function auditRow(entry) {
   const what = entry.action === 'command'
     ? (entry.title || entry.command)
@@ -47,6 +64,7 @@ async function draw(container) {
   const git = data.git || {};
   const rollout = data.rollout;
   const operator = isOperator();
+  const dispatchLine = dispatchSummary(data.dispatch);
   setHTML(container, html`
     <section class="panel">
       <div class="panel-head">
@@ -54,19 +72,29 @@ async function draw(container) {
         <p class="hint">Process jobs run detached from the dashboard and keep going if it restarts.
           Only one job runs at a time.</p>
       </div>
+      <div class="card dispatch-card">
+        <h3>Dispatch <span class="state state-${dispatchLine.tone}">${data.dispatch ? data.dispatch.state : 'unknown'}</span></h3>
+        <p>${dispatchLine.text}</p>
+        ${operator ? html`<div class="cmd-row">
+          ${button('dispatch.drain', {}, 'Drain dispatch')}
+          ${button('dispatch.stop', {}, 'Stop dispatch…', 'danger')}
+          ${button('dispatch.resume', {}, 'Resume dispatch')}
+        </div>
+        <p class="hint"><b>Drain</b> hands out no new work and lets running tiles finish (use it before an
+          upgrade). <b>Stop</b> also tells running tiles to quit now; they restart later from the beginning.
+          <b>Resume</b> undoes either.</p>` : ''}
+      </div>
       ${operator ? html`<div class="card">
         <h3>Processes</h3>
         <div class="cmd-row">
           ${button('process.ensure_feeder', {}, 'Start feeder')}
           ${button('process.restart_feeder', {}, 'Restart feeder')}
-          ${button('dispatch.stop', {}, 'Stop dispatch')}
-          ${button('dispatch.resume', {}, 'Resume dispatch')}
           ${button('process.upgrade_workers', {}, 'Upgrade workers…', 'danger')}
           ${button('process.upgrade_leader', {}, 'Upgrade leader…', 'danger')}
         </div>
         <p class="hint">Upgrades deploy your working tree at <b>${git.head || '?'}</b>
           (${git.subject || 'unknown commit'})${git.dirty && git.dirty.length ? html` with <b>${git.dirty.length}</b> uncommitted change(s)` : ''}.
-          They need every run idle: stop dispatch first and wait.</p>
+          They need every run idle: drain dispatch first and wait until it reads idle.</p>
         ${rollout ? html`<p class="hint">Last rollout: stage <b>${rollout.stage}</b>, started ${fmtTime(rollout.started)}.
           ${rollout.recovery ? html`<br>Recovery: ${rollout.recovery}` : ''}</p>` : ''}
       </div>` : ''}
@@ -83,11 +111,11 @@ async function draw(container) {
     </section>`);
   container.querySelectorAll('.job-log').forEach((pre) => { pre.scrollTop = pre.scrollHeight; });
   clearTimeout(pollTimer);
-  if (running) {
-    pollTimer = setTimeout(() => {
-      if (lastContainer === container && container.isConnected && !document.hidden) draw(container);
-    }, 3000);
-  }
+  // Quickly while a job runs or a drain is finishing; slowly otherwise, so the status stays current.
+  const draining = data.dispatch && data.dispatch.draining;
+  pollTimer = setTimeout(() => {
+    if (lastContainer === container && container.isConnected && !document.hidden) draw(container);
+  }, running || draining ? 3000 : 15000);
 }
 
 export function render(container) {
