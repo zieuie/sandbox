@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT.parent))
 
 import agent
 import leader
+import replication
 import topology
 
 
@@ -75,6 +76,8 @@ class PrivateNetworkTests(unittest.TestCase):
         self.assertIsNone(handler.dispatch_post("/v1/replication", request)["replication"])
         with leader.connect(self.database) as connection:
             connection.execute("UPDATE nodes SET storage_free_bytes=0 WHERE node_name='c'")
+        # An empty scan holds the node's next scan for a while; this checks the scan itself.
+        replication._idle_until.clear()
         task = handler.dispatch_post("/v1/replication", request)["replication"]
         self.assertEqual(task["artifact_hash"], self.digest)
 

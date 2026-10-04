@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import uuid
 
@@ -21,6 +22,23 @@ CREATE INDEX IF NOT EXISTS replica_transfers_node ON replica_transfers(node_name
 """
 
 TRANSFER_SECONDS = 90.0
+# Copies are pushed when they are needed, so a node whose full scan found nothing
+# waits this long before scanning again; each scan costs the leader about 0.5 s.
+IDLE_SCAN_SECONDS = 15.0
+_idle_until: dict[str, float] = {}
+
+
+def scan_allowed(node_name: str, now: float) -> bool:
+    """Return whether node_name may run the full candidate scan now."""
+
+    until = _idle_until.get(node_name)
+    return until is None or not 0 <= until - now <= IDLE_SCAN_SECONDS
+
+
+def scan_found_nothing(node_name: str, now: float) -> None:
+    """Hold node_name's next full scan for IDLE_SCAN_SECONDS."""
+
+    _idle_until[node_name] = now + IDLE_SCAN_SECONDS
 
 
 def initialize(connection: sqlite3.Connection) -> None:
@@ -147,6 +165,82 @@ def reserve_candidate(connection: sqlite3.Connection, node: sqlite3.Row,
     )
     return {"artifact_hash": digest, "size": row["size"], "kind": "artifact",
             "locations": locations, "location": locations[0], "transfer_token": token}
+
+
+# Copies used to wait until an idle agent found them by scanning, and every agent's
+# scan returned the same oldest artifact: second copies trailed completion by about
+# five minutes. The leader now names the next copy's node when a copy lands, and
+# that node's next poll finds it with one indexed lookup.
+def push_next_copy(connection: sqlite3.Connection, digest: str, now: float,
+                   lease_seconds: float, grace_seconds: float,
+                   disk_floor_bytes: int = 0) -> str | None:
+    """Reserve digest's next needed copy for one chosen live node; return that node or None.
+
+    Callers hold the writer transaction. A copy already reserved, enough live copies,
+    or no live source or eligible node leaves things to the background scan.
+    """
+
+    artifact = connection.execute(
+        "SELECT target_replicas FROM artifacts WHERE artifact_hash=?", (digest,)).fetchone()
+    if artifact is None:
+        return None
+    connection.execute(
+        "DELETE FROM replica_transfers WHERE artifact_hash=? AND (expires<=? OR NOT EXISTS "
+        "(SELECT 1 FROM nodes n WHERE n.node_name=replica_transfers.node_name "
+        "AND n.session_id=replica_transfers.session_id AND n.last_heartbeat>?))",
+        (digest, now, now - lease_seconds),
+    )
+    if connection.execute("SELECT 1 FROM replica_transfers WHERE artifact_hash=?", (digest,)).fetchone():
+        return None
+    holders = {row[0]: (row[1], row[2]) for row in connection.execute(
+        "SELECT r.node_name,n.last_heartbeat,n.private_group FROM replicas r "
+        "JOIN nodes n USING(node_name) WHERE r.artifact_hash=?", (digest,))}
+    if sum(heartbeat > now - grace_seconds for heartbeat, _ in holders.values()) >= artifact[0]:
+        return None
+    source_groups = {group for heartbeat, group in holders.values() if heartbeat > now - lease_seconds}
+    if not source_groups:
+        return None
+    pending = dict(connection.execute(
+        "SELECT node_name,COUNT(*) FROM replica_transfers WHERE expires>? GROUP BY node_name", (now,)))
+    candidates = [row for row in connection.execute(
+        "SELECT node_name,session_id,private_group FROM nodes n WHERE last_heartbeat>? "
+        "AND (storage_free_bytes IS NULL OR storage_free_bytes<0 OR storage_free_bytes>=?) "
+        "AND NOT EXISTS (SELECT 1 FROM node_dispatch_pauses pause WHERE pause.node_name=n.node_name)",
+        (now - lease_seconds, disk_floor_bytes)) if row[0] not in holders]
+    if not candidates:
+        return None
+    # Keep copies on a producer's private LAN when it has room, as the scan does.
+    shared = [row for row in candidates if row[2] and row[2] in source_groups]
+    pool = shared or candidates
+    name, session_id, _ = min(pool, key=lambda row: (
+        pending.get(row[0], 0), hashlib.sha256((digest + row[0]).encode()).digest()))
+    connection.execute(
+        "INSERT INTO replica_transfers(artifact_hash,node_name,session_id,token,created,expires) "
+        "VALUES(?,?,?,?,?,?)",
+        (digest, name, session_id, str(uuid.uuid4()), now, now + TRANSFER_SECONDS),
+    )
+    return name
+
+
+def pending_assignment(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
+                       lease_seconds: float) -> dict | None:
+    """Return a copy already reserved for this node's session, in the scan's reply shape."""
+
+    row = connection.execute(
+        "SELECT t.artifact_hash,t.token,a.size FROM replica_transfers t "
+        "JOIN artifacts a ON a.artifact_hash=t.artifact_hash "
+        "WHERE t.node_name=? AND t.session_id=? AND t.expires>? "
+        "AND NOT EXISTS (SELECT 1 FROM replicas own WHERE own.artifact_hash=t.artifact_hash "
+        "AND own.node_name=t.node_name) ORDER BY t.created LIMIT 1",
+        (node["node_name"], node["session_id"], now),
+    ).fetchone()
+    if row is None:
+        return None
+    locations = topology.locations(connection, row[0], node["node_name"], now - lease_seconds)
+    if not locations:
+        return None
+    return {"artifact_hash": row[0], "size": row[2], "kind": "artifact",
+            "locations": locations, "location": locations[0], "transfer_token": row[1]}
 
 
 def assign(connection: sqlite3.Connection, node: sqlite3.Row, now: float,

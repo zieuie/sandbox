@@ -83,7 +83,8 @@ class DPAdapter(SolverAdapter):
             ).fetchall()
             if not rows:
                 continue
-            durable = distributed.durable_tiles(connection, run["run_id"], now, lease_seconds)
+            durable = distributed.durable_tiles(connection, run["run_id"], now, lease_seconds,
+                                                distributed.dependency_copies(connection))
             counts = {"durable": len(durable), "running": 0, "ready": 0,
                       "blocked": 0, "failed": 0, "boundary": "none"}
             boundary = None

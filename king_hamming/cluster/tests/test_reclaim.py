@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT.parent))
 
 import agent
 import leader
+import replication
 import retention
 from dp_solver import distributed
 from test_integration import find_run, request_json, wait_until
@@ -46,6 +47,12 @@ class LeaderCase(unittest.TestCase):
         for name in self.NODES:
             self.handler.dispatch_post("/v1/register", {"node_name": name, "address": f"http://{name}:8042"})
         retention._last_trim_scan.clear()
+        # These tests change state between polls and expect each poll to scan afresh;
+        # the hold after an empty scan is covered in test_replication_push.
+        replication._idle_until.clear()
+        hold = mock.patch.object(replication, "IDLE_SCAN_SECONDS", 0.0)
+        hold.start()
+        self.addCleanup(hold.stop)
         self.now = time.time()
         with leader.connect(self.database) as connection:
             connection.execute("UPDATE nodes SET last_heartbeat=?", (self.now,))

@@ -124,6 +124,10 @@ def connect(database: Path, timeout: float = 30.0) -> sqlite3.Connection:
     connection = sqlite3.connect(database, timeout=timeout)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
+    # In WAL mode NORMAL never corrupts the database; a power cut may only lose the
+    # last few commits (recomputed tiles, renewed leases). FULL put an fsync, about
+    # 7 ms and at times 500 ms on merlin's busy disk, inside every writer lock hold.
+    connection.execute("PRAGMA synchronous=NORMAL")
     return connection
 
 
@@ -169,6 +173,14 @@ def disk_floor(connection) -> int:
     """Return the free-space floor in bytes (setting disk_floor_bytes; 0 turns the rule off)."""
 
     return int(retention.number(connection, "disk_floor_bytes", DEFAULT_DISK_FLOOR_BYTES))
+
+
+def push_copy(connection, digest: str, now: float, lease_seconds: float) -> None:
+    """Reserve digest's next needed copy for a chosen node (see replication.push_next_copy)."""
+
+    grace = max(lease_seconds, retention.number(
+        connection, "replica_grace_seconds", retention.DEFAULT_REPLICA_GRACE_SECONDS))
+    replication.push_next_copy(connection, digest, now, lease_seconds, grace, disk_floor(connection))
 
 
 def low_disk(node, floor: int) -> bool:
@@ -698,15 +710,22 @@ def make_handler(
                     floor = disk_floor(connection)
                     if low_disk(node, floor):
                         return {"replication": None}
+                    assigned = replication.pending_assignment(
+                        connection, node, now, recovery.setting(connection, "lease_seconds"))
+                    if assigned is not None:
+                        return {"replication": assigned}
                     checkpoint = recovery.replication(connection, node["node_name"], now)
                     if checkpoint is not None:
                         return {"replication": checkpoint}
+                    if not replication.scan_allowed(node["node_name"], now):
+                        return {"replication": None}
                     grace = max(recovery.setting(connection, "lease_seconds"), retention.number(
                         connection, "replica_grace_seconds", retention.DEFAULT_REPLICA_GRACE_SECONDS))
                     candidate = replication.select_candidate(
                         connection, node, now, recovery.setting(connection, "lease_seconds"),
                         grace, floor)
                 if candidate is None:
+                    replication.scan_found_nothing(node["node_name"], now)
                     return {"replication": None}
                 with writer_session(database, route, scheduler) as connection:
                     now = time.time()
@@ -1074,6 +1093,7 @@ def make_handler(
                     )
                     if token is not None:
                         replication.release(connection, node, request["artifact_hash"], token)
+                    push_copy(connection, request["artifact_hash"], now, lease_seconds)
                     return {"ok": True}
 
                 if route == "/v1/lease":
@@ -1483,6 +1503,7 @@ def make_handler(
                                 now,
                             ),
                         )
+                        push_copy(connection, request["artifact_hash"], now, lease_seconds)
                     elif route == "/v1/fail":
                         failure_kind = request.get("failure_kind", "engine_failure")
                         if failure_kind not in {"engine_failure", "stop_failure"}:

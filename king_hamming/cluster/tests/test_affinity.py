@@ -101,7 +101,7 @@ class AffinityTests(unittest.TestCase):
             items = [(run, {"program": "dp_tile", "arguments": {"parent_run_id": self.parent, "row": row, "column": column}}, now)
                      for run, (row, column) in ((self.right, (0, 1)), (self.below, (1, 0)))]
             items.append(("other", {"program": "demo", "arguments": {}}, now))
-            self.assertEqual(distributed.locality_scores(connection, "a", items, now), {self.right: 3, self.below: 1})
+            self.assertEqual(distributed.locality_scores(connection, "a", items, now), {self.right: 3, self.below: 2})
             self.assertEqual(distributed.locality_scores(connection, "b", items, now), {self.right: 2, self.below: 1})
             self.assertEqual(distributed.locality_scores(connection, "c", items, now), {})
 

@@ -295,8 +295,8 @@ def retire_finished_tiles(connection: sqlite3.Connection, now: float, force: boo
 
 # Durable means complete with at least two replicas on live nodes, read in one query.
 def durable_tiles(connection: sqlite3.Connection, parent_run_id: str, now: float,
-                  lease_seconds: float) -> set[tuple[int, int]]:
-    """Return the (row, column) of parent's tiles whose results have two live replicas."""
+                  lease_seconds: float, copies: int = 2) -> set[tuple[int, int]]:
+    """Return the (row, column) of parent's complete tiles with at least copies live replicas."""
 
     return {(row[0], row[1]) for row in connection.execute(
         "SELECT t.row,t.column FROM distributed_tiles t "
@@ -304,8 +304,43 @@ def durable_tiles(connection: sqlite3.Connection, parent_run_id: str, now: float
         "JOIN replicas replica ON replica.artifact_hash=child.artifact_hash "
         "JOIN nodes node ON node.node_name=replica.node_name "
         "WHERE t.parent_run_id=? AND child.state='complete' "
-        "AND node.last_heartbeat>? GROUP BY t.row,t.column HAVING COUNT(*)>=2",
-        (parent_run_id, now - lease_seconds))}
+        "AND node.last_heartbeat>? GROUP BY t.row,t.column HAVING COUNT(*)>=?",
+        (parent_run_id, now - lease_seconds, copies))}
+
+
+# Waiting for a second copy before successors could start held every tile wave for
+# the replication queue (about five minutes). A successor can read the one live copy;
+# if a tile's only copies disappear, recompute_lost_tiles recomputes it instead.
+DEFAULT_DEPENDENCY_REPLICAS = 1
+
+
+def dependency_copies(connection: sqlite3.Connection) -> int:
+    """Live copies a finished tile needs before successors may use it (setting dependency_replicas)."""
+
+    return max(1, int(retention_module.number(connection, "dependency_replicas",
+                                              DEFAULT_DEPENDENCY_REPLICAS)))
+
+
+def recompute_lost_tiles(connection: sqlite3.Connection, parent_run_id: str, now: float) -> int:
+    """Clear complete tiles whose every copy has been out of reach past the replica grace; return how many.
+
+    A brief Wi-Fi drop or agent restart stays within the grace and keeps the tile.
+    A cleared tile is queued again once its own predecessors are available.
+    """
+
+    grace = retention_module.number(connection, "replica_grace_seconds",
+                                    retention_module.DEFAULT_REPLICA_GRACE_SECONDS)
+    lost = connection.execute(
+        "SELECT t.row,t.column,t.child_run_id FROM distributed_tiles t "
+        "JOIN runs child ON child.run_id=t.child_run_id "
+        "WHERE t.parent_run_id=? AND child.state='complete' AND child.finished<? "
+        "AND NOT EXISTS (SELECT 1 FROM replicas r JOIN nodes n USING(node_name) "
+        "WHERE r.artifact_hash=child.artifact_hash AND n.last_heartbeat>?)",
+        (parent_run_id, now - grace, now - grace)).fetchall()
+    for row, column, child in lost:
+        connection.execute("UPDATE distributed_tiles SET child_run_id=NULL WHERE parent_run_id=? AND row=? "
+                           "AND column=? AND child_run_id=?", (parent_run_id, row, column, child))
+    return len(lost)
 
 
 def retry_reconstruction(connection: sqlite3.Connection, run: sqlite3.Row,
@@ -321,7 +356,8 @@ def retry_reconstruction(connection: sqlite3.Connection, run: sqlite3.Row,
         "LEFT JOIN runs child ON child.run_id=t.child_run_id WHERE t.parent_run_id=?",
         (run["run_id"],)).fetchone()
     lease = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
-    if not total or complete != total or len(durable_tiles(connection, run["run_id"], now, lease)) != total:
+    if not total or complete != total or len(durable_tiles(connection, run["run_id"], now, lease,
+                                                         dependency_copies(connection))) != total:
         raise ValueError("reconstruction retry requires every original tile to be complete and durable")
     budget = dp_estimate(specification)["budget"]
     connection.execute(
@@ -387,12 +423,15 @@ def advance(connection: sqlite3.Connection, now: float, max_roots: int | None = 
         arguments = specification["arguments"]
         p, r, side = arguments["p"], arguments["r"], int(arguments.get("tile_side", 4096))
         reuse_tiles(connection, parent, now)
+        recompute_lost_tiles(connection, parent["run_id"], now)
+        # Only these columns: fetching every child's whole row (r.*) was half of a pass.
         rows = connection.execute(
-            "SELECT t.row,t.column,t.child_run_id,r.* FROM distributed_tiles t LEFT JOIN runs r ON r.run_id=t.child_run_id "
+            "SELECT t.row,t.column,t.child_run_id,r.state,r.error FROM distributed_tiles t "
+            "LEFT JOIN runs r ON r.run_id=t.child_run_id "
             "WHERE t.parent_run_id=? ORDER BY t.row,t.column", (parent["run_id"],),
         ).fetchall()
         lease = float(connection.execute("SELECT value FROM settings WHERE key='lease_seconds'").fetchone()[0])
-        durable = durable_tiles(connection, parent["run_id"], now, lease)
+        durable = durable_tiles(connection, parent["run_id"], now, lease, dependency_copies(connection))
         budget = math.isqrt(parent["progress_total"])
         done = sum(min(side, budget - row * side) * min(side, budget - column * side)
                    for row, column in durable)
@@ -411,11 +450,15 @@ def advance(connection: sqlite3.Connection, now: float, max_roots: int | None = 
                 continue
             key = (parent["run_id"], row["row"], row["column"])
             prior = retries.get((row["row"], row["column"]))
-            failures = (prior["failures"] if prior else 0) + 1
+            # A tile whose input copy went offline did nothing wrong; retry it without
+            # spending one of its attempts, once the input is back or recomputed.
+            input_missing = any(predecessor not in durable for predecessor in
+                                predecessor_coordinates(p, side, row["row"], row["column"]))
+            failures = (prior["failures"] if prior else 0) + (0 if input_missing else 1)
             if failures > TILE_RETRY_LIMIT:
                 exhausted = row
                 break
-            delay = min(TILE_RETRY_MAX_SECONDS, TILE_RETRY_BASE_SECONDS * 2 ** (failures - 1))
+            delay = min(TILE_RETRY_MAX_SECONDS, TILE_RETRY_BASE_SECONDS * 2 ** max(0, failures - 1))
             connection.execute(
                 "INSERT INTO distributed_tile_retries(parent_run_id,row,column,failures,next_retry) "
                 "VALUES(?,?,?,?,?) ON CONFLICT(parent_run_id,row,column) DO UPDATE SET "
@@ -460,15 +503,18 @@ def advance(connection: sqlite3.Connection, now: float, max_roots: int | None = 
 AFFINITY_MAX_WAIT_SECONDS = 900
 
 
-# Row affinity: the node that finished a tile's left neighbour is the natural one to run it next.
+# Affinity: a tile's successors read its edge bands, which live only on the node that
+# produced it. Inputs already on the node fetched in a median 0.8 s against 3.2 s
+# (p90 2.0 s against 15.7 s) for tiles with any remote input.
 def locality_scores(connection: sqlite3.Connection, node_name: str, items: list, now: float) -> dict[str, int]:
     """Score queued tiles for node_name; higher means more predecessor data is already on its disk.
 
-    Left neighbour produced here scores 3, merely stored here 2; an upper
-    neighbour stored here adds 1. A tile that has waited longer than
-    AFFINITY_MAX_WAIT_SECONDS scores above all of them, so preference can delay a
-    tile by at most that long. The scores are only a tie-break among tiles of one
-    root and priority; they never change which roots or phases are served first.
+    A neighbour this node produced (its bands are here) adds 3 when it is the left one,
+    2 the upper, 1 the diagonal, keeping a node moving along its row; one whose packet
+    is merely stored here adds 2 (left) or 1 (upper). A tile that has waited
+    longer than AFFINITY_MAX_WAIT_SECONDS scores above all of them, so preference can
+    delay a tile by at most that long. The scores are only a tie-break among tiles of
+    one root and priority; they never change which roots or phases are served first.
     """
 
     wanted = {}
@@ -479,21 +525,22 @@ def locality_scores(connection: sqlite3.Connection, node_name: str, items: list,
         if now - created > float(os.environ.get("KH_ROW_AFFINITY_WAIT", AFFINITY_MAX_WAIT_SECONDS)):
             wanted[run_id] = None
             continue
-        row, column = arguments["row"], arguments["column"]
-        wanted[run_id] = (arguments["parent_run_id"], row, column)
-    scores = {run_id: 5 for run_id, key in wanted.items() if key is None}
+        wanted[run_id] = (arguments["parent_run_id"], arguments["row"], arguments["column"])
+    scores = {run_id: 7 for run_id, key in wanted.items() if key is None}
+    # (up, left) offset -> (score if produced here, score if only the packet is stored here)
+    weights = {(0, 1): (3, 2), (1, 0): (2, 1), (1, 1): (1, 0)}
+    offsets = tuple(weights)
     neighbours = []
-    for run_id, key in wanted.items():
+    for key in wanted.values():
         if key is None:
             continue
         parent, row, column = key
-        if column > 0:
-            neighbours.append((parent, row, column - 1))
-        if row > 0:
-            neighbours.append((parent, row - 1, column))
+        neighbours.extend((parent, row - up, column - left) for up, left in offsets
+                          if row - up >= 0 and column - left >= 0)
     held = {}
+    neighbours = list(dict.fromkeys(neighbours))
     for start in range(0, len(neighbours), 300):
-        chunk = list(dict.fromkeys(neighbours[start:start + 300]))
+        chunk = neighbours[start:start + 300]
         values = ",".join("(?,?,?)" for _ in chunk)
         for parent, row, column, producer, stored in connection.execute(
                 f"WITH want(parent,row,column) AS (VALUES {values}) "
@@ -508,10 +555,9 @@ def locality_scores(connection: sqlite3.Connection, node_name: str, items: list,
             continue
         parent, row, column = key
         score = 0
-        produced, stored = held.get((parent, row, column - 1), (False, False)) if column > 0 else (False, False)
-        score += 3 if produced else 2 if stored else 0
-        _, up = held.get((parent, row - 1, column), (False, False)) if row > 0 else (False, False)
-        score += 1 if up else 0
+        for (up, left), (if_produced, if_stored) in weights.items():
+            produced, stored = held.get((parent, row - up, column - left), (False, False))
+            score += if_produced if produced else if_stored if stored else 0
         if score:
             scores[run_id] = score
     return scores
