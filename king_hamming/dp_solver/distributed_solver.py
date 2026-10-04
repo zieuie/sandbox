@@ -360,9 +360,11 @@ ASSIST_MIN_SECONDS = 120.0
 
 
 def assist_plan(p: int, rectangle, lease_cpus: list[int]) -> list[int] | None:
-    """Return the CPUs a CPU-assist run would use, or None when assisting is off or not worth it."""
+    """Return the CPUs a CPU-assist run would use, or None when assisting is off or not worth it.
 
-    if os.environ.get("KH_CPU_ASSIST","1")=="0":
+    Assist is opt-in (KH_CPU_ASSIST=1): in a live 5-minute window one tile of 353 used it."""
+
+    if os.environ.get("KH_CPU_ASSIST","0")!="1":      # off unless KH_CPU_ASSIST=1: it has not shown a measurable gain
         return None
     try:
         node=sorted({int(item) for item in os.environ.get("KH_NODE_CPUS","").split(",") if item})

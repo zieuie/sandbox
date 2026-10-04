@@ -27,9 +27,8 @@ from test_recovery import Cluster
 
 class AssistPlanTests(unittest.TestCase):
     def plan(self, p, r, side, row, column, lease, node, **environment):
-        values = {"KH_NODE_CPUS": ",".join(map(str, node)), **environment}
+        values = {"KH_NODE_CPUS": ",".join(map(str, node)), "KH_CPU_ASSIST": "1", **environment}
         with mock.patch.dict(os.environ, values):
-            os.environ.pop("KH_CPU_ASSIST", None) if "KH_CPU_ASSIST" not in environment else None
             return distributed_solver.assist_plan(p, tile(p, r, side, row, column), lease)
 
     def test_light_tiles_are_left_to_the_ordinary_rule(self) -> None:
@@ -45,6 +44,9 @@ class AssistPlanTests(unittest.TestCase):
     def test_no_assist_when_off_unknown_or_no_wider_than_the_lease(self) -> None:
         node = [0, 1, 2, 3]
         self.assertIsNone(self.plan(29, 7, 4096, 30, 30, [0, 1], node, KH_CPU_ASSIST="0"))
+        with mock.patch.dict(os.environ, {"KH_NODE_CPUS": "0,1,2,3"}):
+            os.environ.pop("KH_CPU_ASSIST", None)           # the default is off
+            self.assertIsNone(distributed_solver.assist_plan(29, tile(29, 7, 4096, 30, 30), [0, 1]))
         self.assertIsNone(self.plan(29, 7, 4096, 30, 30, [0, 1], []))
         self.assertIsNone(self.plan(29, 7, 4096, 30, 30, [0, 1], [0, 1]))
         with mock.patch.dict(os.environ, {"KH_NODE_CPUS": "x,y"}):
@@ -75,7 +77,7 @@ class AssistClusterTests(unittest.TestCase):
             root = Path(temporary)
             locks = root / "locks"
             locks.mkdir()
-            environment = {"KH_DISABLE_GPU_DP": "0", "KH_GPU_LOCK_DIR": str(locks), "KH_CPU_ASSIST_SLOTS": "2",
+            environment = {"KH_DISABLE_GPU_DP": "0", "KH_GPU_LOCK_DIR": str(locks), "KH_CPU_ASSIST": "1", "KH_CPU_ASSIST_SLOTS": "2",
                            "KH_CPU_ASSIST_MIN_SECONDS": "0"}   # these tiles are tiny
             with mock.patch.dict(os.environ, environment), mock.patch.object(gpus, "LOCK_DIRECTORY", locks):
                 holder = gpus.DeviceLock(0)
