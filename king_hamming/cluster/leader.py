@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS resource_usage_samples (
 );
 CREATE INDEX IF NOT EXISTS resource_samples_identity
 ON resource_usage_samples(lease_token,component,shard_index,recorded DESC);
+CREATE INDEX IF NOT EXISTS resource_samples_recorded ON resource_usage_samples(recorded);
 CREATE TABLE IF NOT EXISTS gpu_usage_samples (
     node_name TEXT NOT NULL,
     gpu_index INTEGER NOT NULL,
@@ -173,6 +174,10 @@ def disk_floor(connection) -> int:
     """Return the free-space floor in bytes (setting disk_floor_bytes; 0 turns the rule off)."""
 
     return int(retention.number(connection, "disk_floor_bytes", DEFAULT_DISK_FLOOR_BYTES))
+
+
+SAMPLE_PRUNE_SECONDS = 60.0
+SAMPLE_PRUNED = [0.0]
 
 
 def push_copy(connection, digest: str, now: float, lease_seconds: float) -> None:
@@ -1375,8 +1380,13 @@ def make_handler(
                             (row["run_id"], row["lease_token"], node_name, component, shard_index,
                              cpu_microseconds, peak_rss_bytes, now),
                         )
-                        connection.execute(
-                            "DELETE FROM resource_usage_samples WHERE recorded<?", (now - 7 * 86400,))
+                        # Every report used to prune: with no index on recorded that scanned
+                        # all ~200,000 samples inside the writer lock a few times a second,
+                        # about a quarter of the leader's lock time. Once a minute is enough.
+                        if now - SAMPLE_PRUNED[0] >= SAMPLE_PRUNE_SECONDS:
+                            SAMPLE_PRUNED[0] = now
+                            connection.execute(
+                                "DELETE FROM resource_usage_samples WHERE recorded<?", (now - 7 * 86400,))
                         return {"ok": True}
 
                     if adapters.input_route(route):
