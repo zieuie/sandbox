@@ -65,6 +65,19 @@ def setting(connection: sqlite3.Connection, key: str, default: Any = None) -> An
     return default if row is None else row[0]
 
 
+def retired_nodes(connection: sqlite3.Connection) -> set[str]:
+    """Machines taken out of service: the leader setting retired_nodes, a JSON list of node names.
+
+    The leader keeps their rows for the history that references them. While such a machine is
+    silent it is left out of the fleet and the header counts instead of being reported as down;
+    one that heartbeats again shows up as usual.
+    """
+    try:
+        return set(json.loads(setting(connection, "retired_nodes", "[]")))
+    except ValueError:
+        return set()
+
+
 def host_of(address: str) -> str:
     """Return the bare host from an agent storage URL such as http://h:port."""
     return address.split("://", 1)[-1].split("/", 1)[0].rsplit(":", 1)[0]
@@ -354,7 +367,9 @@ class Snapshots:
         counts = dict(connection.execute(
             "SELECT state,COUNT(*) FROM runs WHERE state IN ('queued','waiting','running') "
             "GROUP BY state").fetchall())
-        heartbeats = [row[0] for row in connection.execute("SELECT last_heartbeat FROM nodes")]
+        retired = retired_nodes(connection)
+        heartbeats = [beat for name, beat in connection.execute("SELECT node_name,last_heartbeat FROM nodes")
+                      if name not in retired or now - beat <= lease_seconds]
         status = {
             "dispatch": setting(connection, "campaign_state", "unknown"),
             "schema_version": setting(connection, "schema_version"),
@@ -443,13 +458,7 @@ class Snapshots:
         lease_seconds = float(setting(connection, "lease_seconds", 60))
         dispatch = setting(connection, "campaign_state", "unknown")
         nodes = [dict(row) for row in connection.execute("SELECT * FROM nodes ORDER BY node_name")]
-        # A machine taken out of service (settings key retired_nodes, a JSON list of node names)
-        # is left out while it is silent instead of being reported as down. The leader keeps its
-        # row for the history it is referenced by; one that heartbeats again shows up as usual.
-        try:
-            retired = set(json.loads(setting(connection, "retired_nodes", "[]")))
-        except ValueError:
-            retired = set()
+        retired = retired_nodes(connection)  # left out while silent
         nodes = [node for node in nodes
                  if node["node_name"] not in retired or now - node["last_heartbeat"] <= lease_seconds]
         reservations = {row["node_name"]: row["run_id"] for row in

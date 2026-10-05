@@ -275,6 +275,18 @@ class MonitorTests(unittest.TestCase):
             with self.assertRaises(Observed):
                 enlarged.loop()
 
+    def test_a_retired_machine_is_not_measured_and_leaves_the_totals(self) -> None:
+        self.monitor.measure()
+        self.assertEqual(self.monitor.view()["cluster"]["total"]["machines"], 2)
+        with sqlite3.connect(self.deployments / "live" / "leader.sqlite") as connection:
+            connection.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('retired_nodes','[\"dp-101\"]')")
+        self.calls.clear()
+        self.monitor.measure()
+        view = self.monitor.view()
+        self.assertEqual([host for host, _ in self.calls], ["192.168.4.151"])
+        self.assertNotIn("192.168.4.101", view["hosts"])
+        self.assertEqual(view["cluster"]["total"]["machines"], 1)
+
     def test_a_failed_host_keeps_its_last_numbers_and_says_why(self) -> None:
         self.monitor.measure()
         self.now += 1800

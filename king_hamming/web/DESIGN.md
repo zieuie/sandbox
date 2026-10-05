@@ -146,7 +146,9 @@ is *blocked* or *ready* according to `dp_solver.tiles.dependencies`. A single
 grouped query does the replica counting, instead of one query per tile.
 
 A machine listed in the leader setting `retired_nodes` (a JSON list) is left out
-of `fleet` while it is silent, instead of being reported as down.
+of `fleet` and of the header's machine count while it is silent, instead of being
+reported as down; the disk monitor stops measuring it and drops its numbers from
+the cluster totals.
 
 ## HTTP endpoints
 

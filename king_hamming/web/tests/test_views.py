@@ -174,6 +174,8 @@ class ViewTests(unittest.TestCase):
         built = self.build()
         self.assertNotIn("dp-108", [node["name"] for node in built["fleet"]["nodes"]])
         self.assertNotIn("node_down:dp-108", {entry["group"] for entry in built["problems"]["active"]})
+        self.assertEqual(built["status"]["nodes_healthy"], built["status"]["nodes_total"],
+                         "the header doesn't count a silent retired machine")
         with sqlite3.connect(self.database) as connection:
             connection.execute("UPDATE nodes SET last_heartbeat=? WHERE node_name='dp-108'", (NOW - 1,))
         self.assertIn("dp-108", [node["name"] for node in self.build()["fleet"]["nodes"]],

@@ -302,12 +302,25 @@ class DiskMonitor:
         self.wake.set()
         return {"started": True}
 
-    def storage_roots(self, connection: sqlite3.Connection) -> dict[str, str]:
-        roots = {}
-        for address, root in connection.execute("SELECT address,storage_root FROM nodes"):
+    def storage_roots(self, connection: sqlite3.Connection) -> tuple[dict[str, str], set[str]]:
+        """Return each registered host's blob store, and the hosts of retired machines.
+
+        A machine in the leader setting retired_nodes is powered off for good: it is not
+        measured, and its last numbers leave the cluster totals.
+        """
+        row = connection.execute("SELECT value FROM settings WHERE key='retired_nodes'").fetchone()
+        try:
+            retired_names = set(json.loads(row[0])) if row else set()
+        except ValueError:
+            retired_names = set()
+        roots, retired = {}, set()
+        for name, address, root in connection.execute("SELECT node_name,address,storage_root FROM nodes"):
             host = address.split("//")[-1].rsplit(":", 1)[0]
-            roots[host] = root
-        return roots
+            if name in retired_names:
+                retired.add(host)
+            else:
+                roots[host] = root
+        return roots, retired
 
     def measure(self) -> None:
         """Measure every host, one at a time, and publish the result."""
@@ -319,17 +332,19 @@ class DiskMonitor:
             try:
                 connection = sqlite3.connect(f"file:{self.database}?mode=ro", uri=True, timeout=10)
                 try:
-                    roots = self.storage_roots(connection)
+                    roots, retired = self.storage_roots(connection)
                     index = tile_index(connection)
                 finally:
                     connection.close()
             except sqlite3.Error as error:
-                roots, index = {}, None
+                roots, retired, index = {}, set(), None
                 failure = f"leader database: {error}"
             else:
                 failure = None
             fresh: dict[str, dict] = {}
             for host in self.hosts:
+                if host in retired:
+                    continue
                 started = self.clock()
                 try:
                     if failure:
