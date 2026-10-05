@@ -1,9 +1,10 @@
-"""Follow campaign log files and stamp new lines with the time they were seen.
+"""Follow campaign log files and time their events.
 
-The leader and feeder logs carry no timestamps. On its first read a watcher
-parses the existing file as an untimed baseline; afterwards every new event is
-stamped with the interval in which it appeared (between two polls). Nothing is
-persisted, so a dashboard restart starts a new baseline.
+Since 2026-10-04 the leader, agents and feeder prefix every line with its local time
+(`cluster/logstamp.py`), and an event takes the time of the line that produced it, in
+the baseline as well as afterwards. Older, unstamped lines are handled as before: on its
+first read a watcher parses the existing file as an untimed baseline; afterwards each new
+unstamped event is given the interval in which it appeared (between two polls).
 """
 
 from __future__ import annotations
@@ -13,6 +14,12 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
+
+_CLUSTER = Path(__file__).resolve().parents[1] / "cluster"
+if str(_CLUSTER) not in sys.path:
+    sys.path.insert(0, str(_CLUSTER))
+from logstamp import split  # noqa: E402
 
 EXCEPTION = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt))(?::\s?(.*))?$")
 REQUEST = re.compile(r"^Exception occurred during processing of request from \('([^']+)', \d+\)")
@@ -28,6 +35,7 @@ class LeaderLogParser:
 
     def __init__(self) -> None:
         self.client: str | None = None
+        self.client_time: float | None = None
         self.last: dict | None = None
 
     @staticmethod
@@ -43,10 +51,11 @@ class LeaderLogParser:
 
     def feed(self, lines: list[str]) -> list[dict]:
         events = []
-        for line in lines:
+        for raw in lines:
+            logged, line = split(raw)
             request = REQUEST.match(line)
             if request:
-                self.client, self.last = request.group(1), None
+                self.client, self.client_time, self.last = request.group(1), logged, None
                 continue
             if self.client is not None:
                 # Inside one failed request: keep the final exception of the block.
@@ -55,17 +64,17 @@ class LeaderLogParser:
                     self.last = self.exception(match)
                 elif SEPARATOR.match(line):
                     if self.last:
-                        events.append({**self.last, "client": self.client})
-                    self.client, self.last = None, None
+                        events.append({**self.last, "client": self.client, "logged": self.client_time})
+                    self.client, self.client_time, self.last = None, None, None
                 continue
             if line.startswith("leader listening on"):
-                events.append({"kind": "leader_start", "message": line.strip()})
+                events.append({"kind": "leader_start", "message": line.strip(), "logged": logged})
             elif line.startswith("scheduler transaction failed"):
-                events.append({"kind": "scheduler_retry", "message": line.strip()})
+                events.append({"kind": "scheduler_retry", "message": line.strip(), "logged": logged})
             else:
                 match = EXCEPTION.match(line)
                 if match:
-                    events.append(self.exception(match))
+                    events.append({**self.exception(match), "logged": logged})
         return events
 
 
@@ -74,18 +83,19 @@ class FeederLogParser:
 
     def feed(self, lines: list[str]) -> list[dict]:
         events = []
-        for line in lines:
+        for raw in lines:
+            logged, line = split(raw)
             text = line.strip()
             if text.startswith("{"):
                 try:
-                    events.append({"kind": "reconcile", "result": json.loads(text)})
+                    events.append({"kind": "reconcile", "result": json.loads(text), "logged": logged})
                 except ValueError:
                     continue
             elif text.startswith("continuous campaign will retry:"):
                 events.append({"kind": "feeder_error",
-                               "message": text.split(":", 1)[1].strip()[:300]})
+                               "message": text.split(":", 1)[1].strip()[:300], "logged": logged})
             elif text.startswith("continuous_campaign.py:") or text.startswith("Traceback"):
-                events.append({"kind": "feeder_error", "message": text[:300]})
+                events.append({"kind": "feeder_error", "message": text[:300], "logged": logged})
         return events
 
 
@@ -128,13 +138,16 @@ class LogWatcher:
             if first and hasattr(self.parser, "baseline"):
                 events = self.parser.baseline(events)
             for event in events:
-                if first:
+                logged = event.pop("logged", None)
+                if logged is not None:  # the line carries its own time
+                    event["time"] = logged
+                    event["after"] = None
+                elif first:
                     event["time"] = None
-                    self.baseline.append(event)
                 else:
                     event["time"] = now
                     event["after"] = self.last_poll
-                    self.observed.append(event)
+                (self.baseline if first else self.observed).append(event)
         if first:
             self.started = now
         self.last_poll = now

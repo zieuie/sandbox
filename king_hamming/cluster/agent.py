@@ -27,6 +27,7 @@ from urllib.request import Request, urlopen
 from common import calculation_id, canonical_json, store_blob
 from blob_store import blob_path, fetch_blob, file_digest, storage_transaction, sync_directory
 import adapters
+import logstamp
 import gpus
 from outcomes import SolverOutcome, classify
 from checkpoints import DEFAULT_MAX_BYTES, capture_checkpoint, fetch_checkpoint, restore_checkpoint, validate_manifest
@@ -1291,6 +1292,8 @@ def main() -> int:
     if arguments.command is None:
         parser.print_help()
         return 0
+    if arguments.command == "run":
+        logstamp.install()  # agent.log lines carry their own times
 
     durations = (arguments.poll_seconds, arguments.control_seconds, arguments.stop_grace_seconds)
 

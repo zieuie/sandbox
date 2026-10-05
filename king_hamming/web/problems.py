@@ -171,15 +171,17 @@ def current_conditions(snapshot: dict, connection: sqlite3.Connection, now: floa
                           "re-copies or recomputes them while the check runs. Look at the worker's log.",
                           row["since"], "#fleet"))
 
-    # Repeated leader errors in the last hour, from what the dashboard has seen.
+    # Repeated leader errors in the last hour. Stamped lines (logstamp) carry their own time, so
+    # the baseline counts too; unstamped ones only once the dashboard has seen them appear.
     recent: dict[str, list[dict]] = {}
-    for event in leader_log.observed:
-        if event["kind"] == "leader_exception" and not event["benign"] and event["time"] >= now - RECENT_LOG_WINDOW:
+    for event in list(leader_log.baseline) + list(leader_log.observed):
+        if event["kind"] == "leader_exception" and not event["benign"] and \
+                event["time"] is not None and event["time"] >= now - RECENT_LOG_WINDOW:
             recent.setdefault(f"{event['type']}: {event['message']}", []).append(event)
     for text, events in recent.items():
         found.append(item("warning", f"leader_recent:{text}",
                           f"Leader logged “{text}” {len(events)}× in the last hour",
-                          "Seen by the dashboard while watching leader.log.", events[-1]["time"], None,
+                          "From leader.log.", events[-1]["time"], None,
                           count=len(events)))
     return found
 

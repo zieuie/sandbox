@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from common import calculation_id, canonical_json
 from blob_store import valid_digest
 from checkpoints import DEFAULT_MAX_BYTES
+import logstamp
 import recovery
 import sampler
 import retention
@@ -1683,6 +1684,8 @@ def main() -> int:
     if arguments.command is None:
         parser.print_help()
         return 0
+    if arguments.command == "serve":
+        logstamp.install()  # leader.log lines carry their own times
 
     # Each in-flight request holds a socket and a database connection; the
     # common 1024 soft limit leaves too little headroom for a busy fleet.

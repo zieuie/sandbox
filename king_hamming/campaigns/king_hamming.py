@@ -743,6 +743,9 @@ def main(policy_name="legacy") -> int:
         parser.print_help()
         return 0
     state = arguments.state.resolve()
+    if arguments.action == "run":
+        import logstamp
+        logstamp.install()  # feeder.log lines carry their own times
     try:
         if arguments.action == "adopt":
             print(json.dumps(adopt_capacity(state), indent=2))

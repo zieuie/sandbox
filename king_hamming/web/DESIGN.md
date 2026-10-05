@@ -20,7 +20,10 @@ Built, all read-only:
 5. **Feeder panel**: pipeline policy, gauges, fields in flight, next fields,
    and pass history (`feeder.py`).
 6. **Problems feed**: current conditions plus 7 days of grouped events
-   (`problems.py`), with log lines timed by `logs.py`.
+   (`problems.py`). Leader and feeder log lines carry their own timestamps
+   (`cluster/logstamp.py`), which `logs.py` reads, so this history is exact and
+   survives dashboard restarts; older unstamped lines are timed by when the
+   dashboard first saw them.
 7. **Matching**: live and past matching runs, with phase-by-phase convergence
    from the leader's `checkpoints` table, where `cursor` is the phase and
    `done` is the number of matched requests (`matching.py`).

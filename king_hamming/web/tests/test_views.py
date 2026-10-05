@@ -63,6 +63,25 @@ class LogWatcherTests(unittest.TestCase):
         watcher.poll(2.0)
         self.assertEqual(len(watcher.observed), 1)
 
+    def test_stamped_lines_carry_their_own_time_even_in_the_baseline(self) -> None:
+        stamp = "2026-10-04T20:00:00.000-05:00 "  # 1791162000
+        self.path.write_text(
+            "leader listening on old\n"  # an unstamped line from before logstamp
+            + stamp + "leader listening on new\n"
+            + "".join(stamp + line + "\n" for line in fixture.LOCKED_BLOCK.splitlines()))
+        watcher = LogWatcher(self.path, LeaderLogParser())
+        watcher.poll(1791163000.0)
+        self.assertEqual([(event["kind"], event["time"]) for event in watcher.baseline],
+                         [("leader_start", 1791162000.0), ("leader_exception", 1791162000.0)])
+        self.assertEqual(watcher.baseline[1]["client"], "192.168.4.101")
+        with self.path.open("a") as stream:
+            stream.write("2026-10-04T20:10:00.000-05:00 scheduler transaction failed: locked\n")
+        watcher.poll(1791163100.0)
+        self.assertEqual((watcher.observed[0]["time"], watcher.observed[0]["after"]), (1791162600.0, None))
+        events = FeederLogParser().feed([stamp + '{"collected_dp": 2}'])
+        self.assertEqual((events[0]["kind"], events[0]["result"], events[0]["logged"]),
+                         ("reconcile", {"collected_dp": 2}, 1791162000.0))
+
     def test_feeder_parser(self) -> None:
         events = FeederLogParser().feed([
             '{"collected_dp": 1, "matching": {"submitted": 1}}',
