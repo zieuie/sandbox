@@ -1,9 +1,9 @@
 # Continuous household campaign
 
-The unified campaign owns DP and distributed matching on one leader and an
-eleven-agent pool: workers `.101` through `.108`, Merlin (`.151`) with its
-leader physical core reserved, Pellinore (`.152`) with 12 compute CPUs, and
-Gawain (`.156`) on Wi-Fi.
+The unified campaign owns DP and matching on one leader and a ten-agent pool:
+workers `.101` through `.108`, Merlin (`.151`) with its leader physical core
+reserved, and Gawain (`.156`). Pellinore (`.152`) was retired on 2026-10-04. Every
+machine has an NVIDIA GPU and is on both Wi-Fi and the wired switch (below).
 Its retained state is
 `cluster/deployments/continuous-campaign` and its leader is port `8061`.
 
@@ -121,7 +121,7 @@ priority, ready tiles from roots with fewer active leases are scheduled first,
 so a long-running root does not indefinitely starve another.
 Status shows `allocated=N/M`; this is reserved capacity, not measured CPU use.
 Use the thread view or canary above to measure activity. One native process can
-use all eight CPUs (fourteen on Merlin, twelve on Pellinore); each compute
+use all eight CPUs (fourteen on Merlin, twelve on Gawain); each compute
 thread still has a one-CPU affinity. Native matching workers pull bounded
 chunks from a shared work queue, and DP diagonals spread central and boundary
 cells across the team.
@@ -135,7 +135,8 @@ giving a tile to a node that already holds its left neighbour, only as a bounded
 tie-break. See [DP_NETWORK_LOCALITY.md](DP_NETWORK_LOCALITY.md).
 
 Every machine has a GPU. Fields that fit an advertised GPU (Merlin's 3060: up to
-~180 M labels; the eight P600s: ~55 M; pellinore's 1050 Ti: ~110 M, estimated) are matched by the single-GPU `match_gpu` program instead, and DP tile
+~180 M labels; the eight P600s: ~55 M) are matched by the single-GPU `match_gpu`
+program instead, larger ones block by block (`match_gpu_blocks`, up to 2^36 labels), and DP tile
 leases use a free host GPU opportunistically with byte-identical results; see
 [GPU.md](GPU.md).
 

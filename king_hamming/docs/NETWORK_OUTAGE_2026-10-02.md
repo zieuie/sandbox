@@ -1,6 +1,12 @@
 # Wi-Fi outage, 2026-10-02 03:07 CDT
 
-**Status:** diagnosed. No fix applied yet; the options are below.
+**Status (2026-10-04):** diagnosed; none of the fixes below has been applied. Since then every
+machine got a wired link (`10.203.0.X`), but only data transfers use it: the leader's control
+traffic, SSH and the default route still go over Wi-Fi, so this failure mode can still take
+workers offline. Moving the agents' leader address to the wired network would remove it (see
+[CONTINUOUS_CAMPAIGN.md](CONTINUOUS_CAMPAIGN.md#wired-data-network)). The NVIDIA driver now
+loads at boot ([GPU.md](GPU.md)), but the agents still don't start at boot: after a reboot,
+relaunch them (`launch_dp.py resume-workers` or `upgrade-worker-rolling`).
 
 ## Impact
 

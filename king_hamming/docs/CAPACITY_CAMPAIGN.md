@@ -1,5 +1,7 @@
 # Capacity-first continuous campaign
 
+> **Status (2026-10-04).** Built but not the policy running: the live campaign's `pipeline.json` has no `policy` field, so the feeder uses the default (legacy) policy.
+
 The separate entry point is `campaigns/capacity_campaign.py`. It reuses the
 retained DP/collection/retry machinery rather than creating a second cluster
 implementation. Old pipelines without a `policy` field keep the existing policy.

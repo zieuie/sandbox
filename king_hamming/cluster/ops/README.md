@@ -1,5 +1,7 @@
 # Pellinore network recovery
 
+> **Retired (2026-10-04).** Pellinore was retired and powered off, so this watchdog no longer runs anywhere. Kept for reference: the same recovery approach is one of the options in [../../docs/NETWORK_OUTAGE_2026-10-02.md](../../docs/NETWORK_OUTAGE_2026-10-02.md), and the GPU driver notes below still apply to the other machines.
+
 Pellinore (`192.168.4.152`) runs `pellinore-network-watchdog.timer` once per minute.
 The oneshot service pings the gateway (`192.168.4.1`) and two cluster peers
 (`.151` and `.101`) through `wlp59s0`. It restarts only NetworkManager after

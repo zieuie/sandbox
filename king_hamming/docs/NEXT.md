@@ -1,5 +1,7 @@
 # Solver handoff
 
+> **Historical (2026-09-28).** The DP solver's handoff notes from before the distributed campaign. For the current state see [CONTINUOUS_CAMPAIGN.md](CONTINUOUS_CAMPAIGN.md) and [../results.md](../results.md).
+
 ## Verified stopping point
 
 The local DP now has a persistent, affinity-aware worker pool:

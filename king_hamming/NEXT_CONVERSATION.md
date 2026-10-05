@@ -1,5 +1,7 @@
 # King Hamming: next milestones
 
+> **Historical (2026-09-29).** A handoff written before the GPU solvers, the wired network and the 13⁹ matching. Most milestones below were completed or superseded. For the current state see [README.md](README.md), [results.md](results.md) and [docs/CONTINUOUS_CAMPAIGN.md](docs/CONTINUOUS_CAMPAIGN.md).
+
 Prepared 2026-09-29 after the leader/worker/feeder rollout. This is a fresh
 handoff for the next conversation, not a history of the project.
 

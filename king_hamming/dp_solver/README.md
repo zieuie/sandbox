@@ -80,8 +80,10 @@ python3 king_hamming/dp_solver/launch_dp.py stop
 python3 king_hamming/dp_solver/launch_dp.py resume
 ```
 
-The existing campaign database and results remain in
-[`cluster/deployments/dp-campaign/`](../cluster/deployments/dp-campaign/).
+The live campaign's database and results are in
+[`cluster/deployments/continuous-campaign/`](../cluster/deployments/continuous-campaign/);
+pass `--state king_hamming/cluster/deployments/continuous-campaign` to these commands (the
+default still names the retired `dp-campaign` deployment).
 The `cluster/launch_dp.py` command remains a thin compatibility wrapper.
 To start a fresh default campaign, use `launch_dp.py start`; it refuses to replace
 an existing deployment. Use `--state DIRECTORY` and a different `start --port`

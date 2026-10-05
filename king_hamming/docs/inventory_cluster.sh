@@ -15,7 +15,7 @@ readonly -a DEFAULT_HOSTS=(
     192.168.4.107
     192.168.4.108
     192.168.4.151
-    192.168.4.152
+    192.168.4.156
 )
 
 cleanup() {
@@ -35,7 +35,7 @@ Example:
   ./inventory_cluster.sh --run -o CLUSTER_INVENTORY.md
   ./inventory_cluster.sh --run --user zooey 192.168.4.101 192.168.4.151
 
-With no HOST arguments, queries 192.168.4.101 through .108, .151 and .152.
+With no HOST arguments, queries 192.168.4.101 through .108, .151 and .156.
 With no arguments, prints this help. Existing output files are not overwritten.
 SSH uses batch mode and an 8-second connection timeout.
 EOF

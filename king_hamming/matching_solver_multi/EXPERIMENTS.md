@@ -1,5 +1,7 @@
 # Partitioned matching: first physical-cluster experiments
 
+> **Status (2026-10-04).** This solver stayed an experiment; the campaign matches large fields on GPUs ([../docs/GPU.md](../docs/GPU.md)).
+
 2026-09-30. **Verdict: promising as a capacity experiment, not a replacement for
 the existing solver.** Ownership really is partitioned and its certificates
 verify, but the first straightforward implementation spends substantial time

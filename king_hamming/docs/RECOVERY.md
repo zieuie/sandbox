@@ -118,8 +118,8 @@ assert that two workers are currently reachable.
 ## Validation and real machines
 
 ```sh
-make -C king_hamming/first check
-make -C king_hamming/solver check
+make -C king_hamming/cluster check
+make -C king_hamming/dp_solver check
 king_hamming/cluster/cluster_smoke.py --run
 ```
 

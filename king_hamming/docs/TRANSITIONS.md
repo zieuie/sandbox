@@ -21,7 +21,7 @@ assumption about dominance between different costs.
 
 ## Representation and checkpoint compatibility
 
-The encapsulated builder in [`src/transitions.c`](../solver/src/transitions.c) enumerates
+The encapsulated builder in [`src/transitions.c`](../dp_solver/src/transitions.c) enumerates
 all `p^3` 12-byte records, sorts by costs, descending gain and original order,
 compacts one winner per group, then restores original order. Sorting avoids a
 quadratic pairwise dominance search. There are two library sorts and a linear
@@ -87,7 +87,7 @@ and the cubic enumeration count are unchanged; it does not make the largest
 supported fields feasible by itself.
 
 Local measurements are saved in
-[`benchmarks/transition_reduction.jsonl`](../solver/benchmarks/transition_reduction.jsonl).
+[`benchmarks/transition_reduction.jsonl`](../dp_solver/benchmarks/transition_reduction.jsonl).
 Each mode has three samples per worker count on the local host (`uther`, the
 leader hardware currently also called merlin). Every sample compares full state
 and artifact bytes with the alternate mode, obtaining theta=4,181.

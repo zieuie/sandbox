@@ -24,9 +24,8 @@ python3 king_hamming/web/server.py remove-user friend
 Passwords need at least 10 characters. Users can also change their own
 password from the account menu, at the top right of the page.
 
-- **Roles:** `viewer` can see everything. `operator` will be able to run
-  commands once they exist. Risky commands will also ask for the password again
-  (it counts for 10 minutes).
+- **Roles:** `viewer` can see everything. `operator` can also run the commands
+  (below). Risky commands ask for the password again (it counts for 10 minutes).
 - **Sessions:** a sign-in lasts up to 7 days, or 24 hours without use.
 - **Failed sign-ins:** after 4 failures within 15 minutes, from one address or
   for one name, each further attempt is delayed, doubling up to 15 minutes.

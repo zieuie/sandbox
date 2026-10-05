@@ -1,7 +1,9 @@
 # Matching 13^9: why it is blocked and what it would take
 
-Status: **implemented and rehearsed on 2026-10-04; see section 8.** Sections 1–7 are the
-original analysis (written the same day from the code and the live leader database), kept
+Status: **done.** 13^9 was matched, independently verified and archived on 2026-10-04
+(run `cd77bd61`, all 10,604,499,373 requests, 169 blocks, no exchange rounds), proving
+M(13⁹ + 1, 13⁹) ≥ 1,038,436,628,063,094. The write-storm fixes in section 8 were deployed in
+the later worker rollouts. Sections 1–7 are the original analysis (written the same day from the code and the live leader database), kept
 as the record of why. Re-verify numbers before acting; the commands are in section 6.
 
 ## 1. The question
@@ -194,7 +196,7 @@ Fixes:
   only; reverts at reboot). The leader forgives its own stalls: after more than 15 s without a
   commit (`leader.STALL_SECONDS`), running leases get one full lease to renew in before expiry
   runs (`recovery.forgive_stall`; test in `test_recovery.py`). Deployed by a live leader restart.
-- **In the code, deployed at the next worker rollout:** choices are stored XOR 0xFFFF, so a
+- **In the code, since deployed with the worker rollouts of 2026-10-04:** choices are stored XOR 0xFFFF, so a
   fresh sparse file already means "unmatched" and nothing is filled; each block's choices are
   written through (`msync`) after the block; the payload write `fdatasync`s every segment
   (~120 MB); `publish()` and `store_blob()` write through every 256 MiB.

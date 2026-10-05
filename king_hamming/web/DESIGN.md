@@ -4,13 +4,10 @@ A read-only web dashboard for the continuous DP → matching campaign. It runs
 as its own process on merlin (`.151`) and never contacts the leader, so a
 dashboard bug cannot disturb the campaign.
 
-**Status:**
-
-- Built: six views (results, fleet, DP tiles, timeline, feeder, problems), the
-  Activity tab, the login, and the commands. The commands are described in
-  README.md.
-- It is not yet exposed to the internet. Authentication, specified below, must be
-implemented before the Cloudflare tunnel points at it.
+**Status:** built and in daily use. It has eight tabs (Results, Fleet, DP tiles,
+Matching, Timeline, Feeder, Problems, Activity), the login and the operator commands
+(described in README.md). It is reachable from the internet through a Cloudflare tunnel
+(`cloudflared`, running as a system service on merlin) that points at `127.0.0.1:8070`.
 
 ## Scope
 
@@ -38,7 +35,7 @@ the library changes in CAMPAIGN_NOTES.md.
 ## Architecture
 
 ```
-browser ──(later: Cloudflare tunnel)──▶ web/server.py (127.0.0.1:8070)
+browser ──(Cloudflare tunnel)──▶ web/server.py (127.0.0.1:8070)
                                                        │  reads only
                      ┌─────────────────────────────────┼──────────────────────┐
                      ▼                                 ▼                      ▼
@@ -48,19 +45,21 @@ browser ──(later: Cloudflare tunnel)──▶ web/server.py (127.0.0.1:8070)
 
 - **Standard library only**: `http.server.ThreadingHTTPServer`, `sqlite3`,
   `hashlib.scrypt`, `secrets`, like the rest of the repo.
-- **Front end**: modern JavaScript, ES modules, inline SVG. No framework and
-  no build step.
+- **Front end**: modern JavaScript, ES modules, inline SVG for charts and
+  `<canvas>` for the tile grids. No framework and no build step.
 - **Binds to `127.0.0.1` by default.** `--listen 0.0.0.0:8070` opens it to
-  the home network. Once exposed, only the tunnel faces the internet. The
-  leader (port 8061) and agent storage ports must stay LAN-only.
+  the home network. Only the tunnel faces the internet. The leader (port 8061)
+  and agent storage ports must stay LAN-only.
 
 ## Data and caching
 
 The server builds one **snapshot** and holds it in memory:
 
-- It rebuilds on demand once the snapshot is older than `--ttl` seconds
-  (default 15).
-- **Refresh** forces a rebuild, at most once every 3 s.
+- **No request waits for a rebuild.** Once the snapshot is older than `--ttl`
+  seconds (default 15), the next request still gets it at once, while a
+  background thread builds a new one. Only the very first build after a start
+  (begun at startup, before any request) and a forced **Refresh** (at most once
+  every 3 s) wait.
 - The page polls every 30 s while it is visible, and every view shows the
   data's age.
 
@@ -74,9 +73,19 @@ Immutable inputs are memoized across builds, keyed by path, size and mtime:
 - decoded inline matching DPs
 - tile dependency geometry
 
-Costs measured on the live campaign: a cold build takes about 5 s (hashing
-about 400 MB of certificates), a warm build about 0.7 s, and the gzip payload
-is about 150 KB.
+**Certificate checks run off the critical path.** Hashing every archived
+matching certificate (about 40 GB, including 20 GB for 13⁹) took 2–3 minutes,
+and used to block the first build after every restart. A background worker now
+checks them, and results are saved in `certificates.json` in the state
+directory, so a restart re-hashes nothing it has already checked. Until a
+certificate's check finishes, its field shows "Matched, certificate being
+checked".
+
+**Costs on the live campaign (2026-10-04):** a build takes about 7.5 s of CPU,
+mostly the tile grids of three large DP roots (about 200,000 tiles). The
+snapshot is about 3.7 MB of JSON, 0.6 MB compressed. It used to be 21.8 MB
+(4.9 MB compressed), almost all of it per-tile detail; that detail now lives
+behind `/api/tiles` (below).
 
 ### Snapshot contents
 
@@ -113,15 +122,28 @@ each field:
 running or queued tiles, or finished in the last 24 h:
 
 - field, attempt number, grid size, counts
-  (durable/complete/running/ready/blocked/failed)
+  (durable/complete/running/ready/blocked/failed), tiles finished in the last
+  hour, and tiles finished more than once (`recomputed`)
 - the first dependency boundary
-- one cell per `distributed_tiles` row: state, node, child run id, live
-  replica count
+- a compact **grid string**: one character per tile, row by row (`STATE_CODES`
+  in `snapshot.py`: `d` durable, `c` complete, `r` running, …), plus a short
+  list of the tiles that are live right now (running or queued: machine,
+  progress)
 
-A tile is *durable* when it is complete and has at least 2 live replicas, the
-same rule as `dp_solver/adapter.py`. A tile that hasn't been created yet is
-*blocked* or *ready* according to `dp_solver.tiles.dependencies`. A single
+The full per-tile detail (state, node, child run, timings, copies) is built
+with the snapshot but sent only on request: `GET /api/tiles?run=<root>` returns
+it in columnar form for one root (fetched when you open that field), and
+`GET /api/tile?run=<root>&r=<row>&c=<column>` returns one tile.
+
+A tile is shown *durable* when it is complete and has at least 2 live copies;
+the scheduler itself only needs one (`dependency_replicas`, default 1). Copies
+a restarted worker has not yet re-checked count as live (see
+`docs/LOST_TILES_INCIDENT_2026-10-04.md`). A tile that hasn't been created yet
+is *blocked* or *ready* according to `dp_solver.tiles.dependencies`. A single
 grouped query does the replica counting, instead of one query per tile.
+
+A machine listed in the leader setting `retired_nodes` (a JSON list) is left out
+of `fleet` while it is silent, instead of being reported as down.
 
 ## HTTP endpoints
 
@@ -133,11 +155,14 @@ grouped query does the replica counting, instead of one query per tile.
 | GET | `/`, `/static/*` | session | App shell (signed out: redirect to `/login?next=`) |
 | GET | `/api/session` | session | User, role, CSRF token, re-confirmation deadline |
 | GET | `/api/snapshot` | session | The cached snapshot as JSON (gzip when accepted) |
+| GET | `/api/tiles?run=` | session | Per-tile detail of one DP root, columnar (gzip when accepted) |
+| GET | `/api/tile?run=&r=&c=` | session | One tile's detail |
 | GET | `/api/audit` | session | Last 200 audit entries |
 | POST | `/api/refresh` | session + CSRF | Force a rebuild (debounced to once per 3 s) |
 | POST | `/api/reauth` | session + CSRF, throttled | Re-enter the password; opens a 10-minute window |
 | POST | `/api/password` | session + CSRF | Change your own password; signs you out everywhere |
 | POST | `/api/logout` | session + CSRF | End this session |
+| POST | `/api/disk/measure` | operator + CSRF | Measure every machine's disk now (at most once a minute) |
 
 Commands, built:
 
@@ -210,14 +235,17 @@ tunnel the client IP comes from `CF-Connecting-IP`.
 
 `index.html` loads `app.js` (an ES module). The page has:
 
-- **Header**: dispatch, feeder and machine status, the data's age, and a
-  Refresh button. The signed-in user is added with authentication.
-- **Tabs**: Results · Fleet · DP tiles. The selected tab, and an optional
-  detail, are kept in the URL hash (`#results/2,29`).
+- **Header**: dispatch, feeder and machine status, the data's age, a
+  Refresh button and the signed-in user.
+- **Tabs**: Results · Fleet · DP tiles · Matching · Timeline · Feeder ·
+  Problems · Activity. The selected tab, and an optional detail, are kept in
+  the URL hash (`#results/2,29`).
 - Each view module exports `render(container, snapshot, detail)` and rebuilds
   its panel from the data into a fresh container. Nothing else carries state.
 - Every interpolated value goes through the escaping `html` tagged template in
-  `util.js`. There is no inline script or style, so the CSP holds.
+  `util.js`. There is no inline script or style, so the CSP holds. That includes
+  style *attributes*: the CSP's `style-src 'self'` blocks them, so dynamic
+  sizes and colours are set through the CSSOM (`element.style.setProperty`).
 
 The views:
 
@@ -226,14 +254,23 @@ The views:
   matched, obstructed, matching queued/running, DP complete but too big to
   match, DP running, DP failed. Clicking a cell opens a detail drawer with the
   exact numbers, every attempt, polynomials and hashes.
-- **Fleet**: nine cards. Each card shows the hostname and address, a health
-  dot, heartbeat age, the idle reason or current work, a row of CPU squares
-  (lit when assigned), a memory bar, a 24 h utilisation sparkline and the 24 h
+- **Fleet**: one card per machine (ten since pellinore was retired). Each card
+  shows the hostname and address, a health dot, heartbeat age, the idle reason
+  or current work, a row of CPU squares (lit when assigned), a memory bar, its
+  GPUs, 24 h CPU and GPU utilisation sparklines, disk usage and the 24 h
   occupancy %.
-- **DP tiles**: one SVG grid per active root, with a colour per state. Running
-  tiles are labelled with the machine's short name, the dependency boundary is
-  given as text, and hovering shows a tooltip. Above each grid is a counts
-  summary. A failed root whose tiles are still running shows an alert.
+- **DP tiles**: one `<canvas>` grid per root, drawn from the grid string, with a
+  colour per state. Grids of finished fields are drawn only when their section
+  is opened. Hovering shows a magnifier (a zoomed view of the surrounding tiles)
+  and the tile's details; clicking selects a tile. Above each grid is a counts
+  summary, including tiles finished more than once. Drawing the three active
+  roots (about 200,000 tiles) takes about 110 ms.
+- **Matching**: live and past runs. A GPU block run shows its stages (GPU
+  wait, field rows, blocks, exchange, write, publish, verification) with
+  per-stage progress, time left and a stacked timeline, and a live burndown of
+  unmatched requests.
+- **Activity**: the operator commands, including drain, stop, resume and
+  dispatch status.
 
 The layout works at phone width. Colours come from CSS variables, with a dark
 theme.
@@ -310,6 +347,7 @@ web/
     login.html  login.js  account.js  command.js  activity.js  matching.js
   tests/
     fixture.py  test_snapshot.py  test_server.py  test_views.py  test_auth.py  test_commands.py
+    test_disk.py  test_matching_stages.py
   Makefile         `make -C king_hamming/web check`
 ```
 
@@ -320,3 +358,14 @@ Authentication added `auth.py`, `audit.py`, `static/login.html`,
 
 Tests run against small SQLite fixtures generated in a temporary directory,
 never against the live database.
+
+## Deploying front-end changes: stale browser caches
+
+Static files are served under fixed URLs (`/static/tiles.js`, …), so a browser may
+keep running cached JavaScript after a dashboard restart. That is harmless until the
+snapshot's *format* changes: on 2026-10-04 the DP tiles tab stopped loading because a
+cached `tiles.js` expected per-tile cells while the new server sent grid strings. A
+hard refresh (or clearing the cache) fixes it. If a format change ships again, either
+tell users to hard-refresh, or add versioned static URLs (for example
+`/static/v/<code version>/tiles.js`); that was considered and not adopted.
+

@@ -1,9 +1,11 @@
 # Matching with ownership partitioned across machines
 
-Design proposal, 2026-09-30. This is the specification for a future separate
-solver, tentatively `partitioned_matching_solver/`, exposed as `match_partitioned`.
-Neither name is registered or implemented. The existing replicated matcher
-remains an independent engine and a comparison oracle.
+Design proposal, 2026-09-30. It was implemented as a proof of concept in
+[`matching_solver_multi/`](../matching_solver_multi/README.md), registered as the program
+`match_partitioned`; see its [EXPERIMENTS.md](../matching_solver_multi/EXPERIMENTS.md). The
+campaign doesn't use it: since 2026-10-02 large fields are matched on GPUs
+([GPU.md](GPU.md)). The replicated CPU matcher remains an independent engine and a
+comparison oracle.
 
 The goal is exact maximum-cardinality bipartite matching when one machine
 cannot comfortably hold the working arrays. Each large field, matching, and

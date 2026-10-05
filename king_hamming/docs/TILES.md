@@ -18,9 +18,9 @@ with the same sum can execute independently. The driver uses wave barriers;
 the C kernel uses the existing pinned thread pool's cell antidiagonals within a
 tile. Strict improvement and stable original transition IDs preserve exact ties.
 
-[`tiles.py`](../cluster/tiles.py) handles geometry and streams predecessor rows into a
+[`tiles.py`](../dp_solver/tiles.py) handles geometry and streams predecessor rows into a
 sparse native input file. It never assembles the full matrix in RAM.
-`solver/kh_dp_tile` reads one tile-plus-halo image shared by its local threads,
+`dp_solver/kh_dp_tile` reads one tile-plus-halo image shared by its local threads,
 computes tile-only choices and publishes immutable `values.bin`, `choices.bin`
 and `tile.json` using fsync and a no-replace directory rename.
 

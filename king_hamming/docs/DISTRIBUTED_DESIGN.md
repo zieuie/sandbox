@@ -1,5 +1,7 @@
 # Distributed computation design
 
+> **Design pitch (2026-09-28).** The system that was built differs in places; see [../cluster/DESIGN.md](../cluster/DESIGN.md), [QUEUED_TILES.md](QUEUED_TILES.md) and [CONTINUOUS_CAMPAIGN.md](CONTINUOUS_CAMPAIGN.md).
+
 This document proposes an architecture for computations too large for one
 machine. It is a design pitch, not an implementation plan carved in stone. The
 frozen compatibility fixtures remain under [`examples/`](../examples/); their formats and

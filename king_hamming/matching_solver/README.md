@@ -133,53 +133,15 @@ lease attempt and shard. This deliberately excludes Python orchestration and
 does not claim simultaneous whole-machine memory precision. The normal cluster
 status command prints the retained values as CPU seconds and peak-RSS MiB.
 
-## Retained household matching campaign
+## Matching in the campaign
 
-A separate matching campaign is retained at `192.168.4.151:8051`; consult
-[`NEXT_CONVERSATION.md`](../NEXT_CONVERSATION.md) and the live status command
-before assuming its state. It does not replace the ongoing DP agents. When active, its
-eight matching agents use CPUs 0 and 1 at lower process priority. Its persistent
-leader database, launch identities, and locally archived certificates are under
-[`cluster/deployments/match-overnight/`](../cluster/deployments/match-overnight/).
-Of the 44 admitted saved DP fields, 43 have complete certificates; only 2^25
-remains active. 7^9 and 5^11 are archived. Admission checks the native kernel's
-conservative memory estimate against a 2 GiB per-job cap, as well as a 50 million
-element and 160 billion implicit-edge cap.
-
-From the repository root:
-
-```sh
-python3 king_hamming/cluster/kh.py --leader http://192.168.4.151:8051 status --watch 60
-python3 king_hamming/matching_solver/launch_overnight.py extend --max-q 50000000 --max-edges 160000000000
-python3 king_hamming/matching_solver/launch_overnight.py repair
-cat king_hamming/cluster/deployments/match-overnight/STATUS.md
-python3 king_hamming/cluster/kh.py --leader http://192.168.4.151:8051 stop --all
-python3 king_hamming/cluster/kh.py --leader http://192.168.4.151:8051 resume --all
-```
-
-The status command now shows the field and polynomial on each active node.
-`STATUS.md` links centrally downloaded KHM1 files and lists every verified
-polynomial obstruction encountered. The detached `witch_hunt.py` watcher
-checks the queue every two minutes, archives new certificates by SHA-256,
-tries the next primitive polynomial only after a verified Hall obstruction,
-reattaches dead campaign-owned matching processes, and collects newly
-finished DP artifacts every 30 minutes. It then enqueues
-new DP fields that fit the current admission limits. Its output is in
-`match-overnight/watcher.log`; `manifest.json` records its process identity.
-The `repair` command is idempotent for healthy processes and can be used
-manually after an interruption. It does not kill a live but unresponsive
-process or reboot a host. A newly launched campaign can be created with
-`launch_overnight.py start` only when `match-overnight/` does not already exist.
-
-Long native matching phases on the currently deployed workers may show
-`heartbeat-missing` during a long native phase in the current deployed bundle;
-its C kernel reports at phase boundaries. A subsequent code bundle emits a
-heartbeat when the native process is consuming CPU. Check the agent and
-kernel process before treating that status as a stalled calculation. The watcher checks CPU activity in newer code bundles, but the active matching
-workers still run the older bundle. Individual native phases cannot be checkpointed
-until they complete. Fields above the current 2 GiB admission cap need a
-sharded matching path before the campaign can cover the full uint32 range.
-The exact remaining fields and readiness work are in [FULL_SCALE.md](FULL_SCALE.md).
+The separate overnight matching campaign (port 8051, `launch_overnight.py`, the `witch_hunt.py`
+watcher) was retired, and its deployment `cluster/deployments/match-overnight/` was removed on
+2026-10-02. Matching now runs inside the continuous campaign
+([../docs/CONTINUOUS_CAMPAIGN.md](../docs/CONTINUOUS_CAMPAIGN.md)): fields that fit a GPU use
+`match_gpu`, larger ones `match_gpu_blocks` ([../docs/GPU.md](../docs/GPU.md)), and this CPU
+matcher remains the independent engine and a fallback. `launch_overnight.py` and
+`witch_hunt.py` are kept for reference; the results are in [../results.md](../results.md).
 
 ## Analyze and independently render certificates
 

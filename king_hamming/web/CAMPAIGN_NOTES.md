@@ -7,34 +7,13 @@ them; the workarounds are listed so they can be removed once the library
 changes. Item numbers are stable, because other documents and the dashboard
 refer to them.
 
-**Open items come first, then completed ones.** Status as of 2026-10-02
-(evening).
+**Open items come first, then completed ones.** Status reviewed 2026-10-04.
 
-## Deployment status: read this first
+## Deployment status
 
-Changes made on 2026-10-02 that are **in the working tree but not yet running**
-on the campaign (the campaign is stopped, and an upgrade restarts the leader,
-agents and feeder):
-
-| Change | Items | Needs |
-| --- | --- | --- |
-| Finished fields' tiles are deleted; surplus copies are trimmed; replication waits out short outages; scratch is removed | 22, 23, 24 | leader and agents |
-| Edge bands: a tile fetches about 1.5 MiB of inputs instead of about 65 MiB | 20 | leader and agents |
-| Soft row affinity in lease choice | 21 | leader |
-| Free-disk floor on new leases and copies; disk checks in the Submit preview | 7, 8 | leader (and the dashboard) |
-| New program `match_gpu_blocks`: fields too big for one GPU are matched block by block on any machine with the RAM (all five large fields qualify); the feeder plans it, the Matching tab shows it. Also: a finished run keeps its JSON summary instead of the word "complete" | none (new) | leader, agents (new binary), feeder, dashboard |
-| Native KHM1 verifier `kh_verify_khm1` (0.2 s instead of 31 s on 2^23); block runs need about a quarter of the host RAM | none (new) | agents, feeder |
-| GPU use graph on the Fleet tab (agents sample `nvidia-smi`; leader table `gpu_usage_samples`) | none (new) | leader, agents, dashboard |
-
-To deploy: `launch_dp.py upgrade-leader`, then `upgrade-workers`, then restart the
-dashboard (`web/restart_dashboard.sh`). After deploying, watch the first `match_gpu_blocks`
-run: it holds its GPU for minutes (verification is native and takes seconds to minutes). Then compare the first tiles' `input_mode`
-and `input_bytes` (see item 20) with the old ones.
-
-Already done by hand on 2026-10-02, while everything was stopped: the equivalent
-of items 22–24 was applied to the live data (see the completed section), which
-freed 1.23 TB, and the retired deployments' storage was removed from every
-machine.
+Everything this section once listed as written but not yet running (items 7, 8 and
+20–24, `match_gpu_blocks`, the native verifier `kh_verify_khm1`, and the GPU use graph)
+was deployed on 2026-10-03 and 2026-10-04 and is running.
 
 ---
 
@@ -264,6 +243,7 @@ remains is checking space before admitting work.
       tile.
     - **Possible change:** use one grouped query, as the dashboard does in
       about 0.1 s.
+    - **2026-10-04:** measured at about 2.5 s; better, but still not a grouped query.
 
 15. **The running code is not visible.** The feeder records only its process id,
     start time and command (`feeder_process.json`), and agents report a runtime
@@ -291,6 +271,10 @@ remains is checking space before admitting work.
       `dp_solver.distributed.advance()` fell from about 1.0 s to 0.17 s per
       pass. Confirm the live leader log stays free of lock errors after its
       next safe restart; this change does not require worker replacement.
+    - **2026-10-04:** that fix and the rest of the leader-contention work
+      (`docs/LEADER_CONTENTION_AND_DP_RECONSTRUCTION_PLAN.md`) are deployed. Lock
+      errors still happen occasionally (the latest at 18:43 during worker
+      upgrades), far less often than before.
 
 17. **`campaigns/result_table.py` once aborted on one uncollected artifact (may
     be moot).**
@@ -299,8 +283,13 @@ remains is checking space before admitting work.
       reproduced, and the table now shows unfinished fields as "—".
     - **Possible change:** confirm that an uncollected artifact is reported and
       skipped, and close this.
+    - **2026-10-04:** it also ignored fields matched on a GPU (`match_gpu`,
+      `match_gpu_blocks`), so 13⁹ and the other GPU-matched fields showed no `^`.
+      Fixed: its list of matching programs now matches the dashboard's. It now
+      generates the project's `results.md`.
 
 ## Operations and security
+
 
 18. **The leader has no authentication and listens on 0.0.0.0 (accepted for now).**
     - **Effect:** any device on the home network can stop dispatch or cancel
@@ -334,7 +323,7 @@ remains is checking space before admitting work.
      code, not re-observed on a live campaign. The dashboard's alert and
      **Priority…** button remain as a fallback.
 
-20. **Distributed DP re-downloaded whole predecessor tiles. Fixed (not yet deployed).**
+20. **Distributed DP re-downloaded whole predecessor tiles. Fixed and deployed.**
     - **Was:** an interior 4096-square tile fetched its top, left and top-left
       predecessors as complete packets (about 65 MiB for 13⁹), although its halo
       reads only a thin border (`docs/DP_NETWORK_LOCALITY.md`).
@@ -348,9 +337,11 @@ remains is checking space before admitting work.
     - **Measure:** each tile's progress record carries `input_mode`,
       `input_bytes`, `input_band_bytes` and `bands_published`; the query is in
       the locality document.
+    - **2026-10-04:** 97% of tiles in the last 24 hours fetched their inputs as
+      bands (72,486 of 74,531).
 
-21. **Tiles were placed without regard to where their inputs were. Done (not yet
-    deployed; small benefit).**
+21. **Tiles were placed without regard to where their inputs were. Done and
+    deployed (small benefit).**
     - **Done:** when a machine asks for work, the leader prefers a tile whose left
       neighbour that machine produced or stores, as a tie-break inside the same
       root and priority. A tile that has waited 15 minutes ignores it, and

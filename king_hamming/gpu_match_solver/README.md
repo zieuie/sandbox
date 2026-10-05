@@ -123,7 +123,7 @@ also budgets about 24q + 512 MiB for the Python verifier, which needs about
 | --- | ---: | --- |
 | RTX 3060 Laptop (Merlin) | 5.6 GiB | ~180 M labels: 3^17, 2^27 |
 | Quadro P600 (.101–.108) | 1.7 GiB | ~55 M labels: 5^11 |
-| GTX 1050 Ti Max-Q (pellinore) | 3.9 GiB | ~110 M labels (estimated, not yet run) |
+| GTX 1050 Ti Max-Q (pellinore, retired 2026-10-04) | 3.9 GiB | ~110 M labels (estimated, never run) |
 
 ## Build, run, test
 

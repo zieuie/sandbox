@@ -5,8 +5,8 @@ Every worker shares the same table. It does not retain a full coefficient table
 or a logarithm table alongside the partition.
 
 ```sh
-make -C king_hamming/solver
-king_hamming/solver/kh_field 5 3 --threads 2 -o /tmp/field_5_3.bin
+make -C king_hamming/dp_solver
+king_hamming/dp_solver/kh_field 5 3 --threads 2 -o /tmp/field_5_3.bin
 ```
 
 With no arguments, the program prints help and an example. Standard output gives
@@ -55,5 +55,6 @@ second complete field table.
 2^3, 2^5, 3^3, 5^3 and 7^5, checks byte-identical results across thread counts,
 and checks memory admission and output overwrite protection.
 
-The production matching solver and its distributed ownership protocol remain
-separate work. This builder establishes the shared representation they will use.
+The matching solvers (CPU, GPU and GPU block) build their fields with this same
+representation; fields above 2^32 labels use the 64-bit used-rows builder in
+`gpu_block_match_solver/src/field_prefix.c` ([MATCHING_13_9.md](MATCHING_13_9.md)).

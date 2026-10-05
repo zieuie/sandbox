@@ -44,7 +44,7 @@ has a clean leader log and additionally waits for final artifact replication.
 From the repository root:
 
 ```sh
-make -C king_hamming/solver all
+make -C king_hamming/dp_solver all
 king_hamming/cluster/cluster_smoke.py --run
 ```
 

@@ -1,5 +1,7 @@
 # Full-scale matching readiness
 
+> **Status (2026-10-04).** The 6 GiB / 100,000,000-element gate below applies only to the CPU matchers. Since 2026-10-02 large fields are matched on GPUs instead ([../docs/GPU.md](../docs/GPU.md)), up to 13⁹ ([../docs/MATCHING_13_9.md](../docs/MATCHING_13_9.md)).
+
 The retained unified campaign at `192.168.4.151:8061` uses this compact,
 checkpoint-compatible bundle. Its conservative 6 GiB matching admission and
 100,000,000-element field gate remain in force pending physical calibration.

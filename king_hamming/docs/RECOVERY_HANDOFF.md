@@ -1,5 +1,7 @@
 # Checkpoint recovery handoff
 
+> **Historical (2026-09-28).** Handoff notes from the recovery milestone; the protocol itself is in [RECOVERY.md](RECOVERY.md).
+
 The checkpoint replication and cross-worker recovery milestone is complete.
 The POC and exact DP recurrence/tie choices remain unchanged. The user authorized
 isolated experiments on the household machines; no services or reboots were

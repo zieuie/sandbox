@@ -1,5 +1,7 @@
 # Running DP on five household workers
 
+> **Historical (2026-09-27).** The first five-worker DP campaign. Its deployment (`cluster/deployments/dp-campaign`) no longer exists; the live campaign is described in [CONTINUOUS_CAMPAIGN.md](CONTINUOUS_CAMPAIGN.md).
+
 The campaign launched on 2026-09-27 uses merlin/uther (`192.168.4.151`) as
 leader and these compute/storage workers:
 
@@ -158,8 +160,8 @@ After collecting, list filenames in `deployments/dp-campaign/results/` and print
 one with the production utility:
 
 ```sh
-python3 king_hamming/solver/print_dp.py PATH_TO_RESULT.khdp
-python3 king_hamming/solver/print_dp.py PATH_TO_RESULT.khdp --verify
+python3 king_hamming/dp_solver/print_dp.py PATH_TO_RESULT.khdp
+python3 king_hamming/dp_solver/print_dp.py PATH_TO_RESULT.khdp --verify
 ```
 
 Collection validates SHA-256, canonical binary encoding, dimensions and split

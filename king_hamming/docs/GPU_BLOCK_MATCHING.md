@@ -347,7 +347,7 @@ verifier's formula in that case.
 
 **Then (ask first):** run 7^11 and 11^9 on merlin and verify them.
 
-### Stage 4: campaign integration (implemented; not deployed)
+### Stage 4: campaign integration (implemented and deployed)
 
 Done 2026-10-02: program `match_gpu_blocks`, feeder tier, dashboard, tests. Differences from
 the plan below: the setting `gpu_block_matching` defaults to **true** (Zooey asked for these

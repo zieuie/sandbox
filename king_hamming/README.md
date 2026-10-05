@@ -2,56 +2,85 @@
 
 `king_hamming` is a distributed implementation of the prime-power
 Partition-and-Extension construction described in
-[`prime_power_09_26.pdf`](docs/prime_power_09_26.pdf).
+[`prime_power_09_26.pdf`](docs/prime_power_09_26.pdf). For a prime power q = pʳ (r odd)
+it computes the paper's DP split, finds the bipartite matching that makes the construction
+valid, and stores a compact certificate that anyone can check, proving a lower bound on
+M(q + 1, q).
 
-Small frozen KHD1 fixtures used for compatibility tests live in [`examples/`](./examples/).
-The superseded proof-of-concept implementation has been removed; production DP,
-matching, verification, and printing live in their dedicated directories.
+## Status (2026-10-04)
 
-The distributed control plane is in
-[`cluster/`](./cluster/). It contains the leader, affinity-aware agent, operator CLI,
-checkpointable demonstration solver, content-addressed worker storage,
-replication, standalone verification, and an end-to-end integration test.
+- **71 fields proved**, from 2³ up to 13⁹ (M(13⁹ + 1, 13⁹) ≥ 1,038,436,628,063,094). Every
+  field matched with the first polynomial tried. The table is [`results.md`](results.md).
+- **Still running:** the DP for 29⁷ and 31⁷.
+- **Blocked:** 7¹³ has its DP value, but its matching exceeds the matcher's 2³⁶ limit and
+  needs about 200 GB of RAM ([docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)).
+- **The cluster:** a leader on merlin and ten household machines, each with an NVIDIA GPU,
+  joined by Wi-Fi (control) and a 1 Gb/s switch (data). A dashboard on merlin shows and
+  controls the campaign.
 
-The complete DP implementation is in [`dp_solver/`](./dp_solver/): C kernels,
-resource estimates, checkpoint/resume, independent verification, compact artifacts,
-and Python integration with the generic cluster. Project adapter registration
-lives in `adapter_config.py`. [`matching_solver/`](./matching_solver/) now has a local C exact matcher with pinned parallel search, compact KHM1 certificates,
-independent verification, hydration, and a registered cluster adapter for pinned
-field attempts with replicated phase checkpoints and final certificates.
+## Components
 
-GPU acceleration ([`docs/GPU.md`](docs/GPU.md)): [`gpu_match_solver/`](./gpu_match_solver/)
-provides the exact single-GPU `match_gpu` program (seconds instead of hours, KHM1
-certificates verified as usual), and [`gpu_dp_solver/`](./gpu_dp_solver/) a
-byte-identical GPU drop-in for `kh_dp_tile` that tile leases use opportunistically.
-Both load the NVIDIA driver at run time through [`cuda/`](./cuda/); no CUDA toolkit
-is needed on workers.
+| Directory | What it is |
+| --- | --- |
+| [`cluster/`](cluster/README.md) | Leader (SQLite, leases, recovery, replication, retention), agents, operator CLI |
+| [`dp_solver/`](dp_solver/README.md) | The exact DP: C tile kernels, distributed tiles, compact artifacts, verifier |
+| [`gpu_dp_solver/`](gpu_dp_solver/README.md) | Byte-identical GPU tile kernel; it does almost all DP work now |
+| [`matching_solver/`](matching_solver/README.md) | CPU matcher, KHM1 certificates, the independent verifiers |
+| [`gpu_match_solver/`](gpu_match_solver/README.md) | Single-GPU matcher (`match_gpu`) |
+| [`gpu_block_match_solver/`](gpu_block_match_solver/README.md) | Block matcher for fields larger than one GPU, 64-bit up to 2³⁶ (`match_gpu_blocks`) |
+| [`campaigns/`](campaigns/) | The feeder that turns fields into DP and matching runs |
+| [`web/`](web/README.md) | The dashboard |
+| [`cuda/`](cuda/README.md) | CUDA driver loading; no CUDA toolkit is needed on workers |
+| [`row_verifier/`](row_verifier/README.md) | Renders actual permutations and checks distances (small fields) |
+| [`matching_solver_multi/`](matching_solver_multi/README.md) | Ownership-partitioned matching experiment |
 
-The design documents at the project root are:
+Project adapter registration lives in `adapter_config.py`. Small frozen fixtures are in
+[`examples/`](examples/).
 
-- [`docs/CLUSTER_INVENTORY.md`](docs/CLUSTER_INVENTORY.md): current hardware, OS,
-  storage, NUMA, watchdog, and toolchain facts for `.101`-`.108` and `.151`.
-- [`docs/DISTRIBUTED_DESIGN.md`](docs/DISTRIBUTED_DESIGN.md): proposed architecture for
-  distributed DP and matching, one resident field per machine, checkpointing,
-  failure recovery, scheduling, and implementation order.
-- [`docs/RESOURCE_MODEL.md`](docs/RESOURCE_MODEL.md): integer widths, standard DP tile,
-  per-machine memory admission, runtime ordering, and progress thresholds.
-- [`docs/DESIGN.md`](docs/DESIGN.md): accumulated mathematical, artifact, operational,
-  and cluster requirements from the brainstorming process.
-- [`docs/MATCHING_CERTIFICATE.md`](docs/MATCHING_CERTIFICATE.md): plain-language
-  explanation of the `.khmatch` certificate and why checking it proves the bound.
+## Documentation
 
-The control and storage protocol supports both a demonstration solver and the
-exact C tiled DP. Exact identical-cost
-transition reduction is implemented with preserved ties and checkpoints; see
-[`dp_solver/TRANSITIONS.md`](docs/TRANSITIONS.md) and
-[`dp_solver/NEXT.md`](docs/NEXT.md). The shared production field builder and local matching engine are implemented;
-matching checkpoint replication is implemented; the production multi-machine
-matching path now keeps algorithmic work in C and has passed fenced recovery and
-exact certificate verification. Long-tile progress and responsive control polling
-are implemented; see [`cluster/PROTOCOL.md`](docs/PROTOCOL.md).
+**Start here**
+- [docs/MATCHING_CERTIFICATE.md](docs/MATCHING_CERTIFICATE.md): what a certificate is and
+  why checking it proves the bound, in plain language.
+- [docs/CONTINUOUS_CAMPAIGN.md](docs/CONTINUOUS_CAMPAIGN.md): the live campaign and how to
+  operate it; [cluster/README.md](cluster/README.md) for the commands.
+- [docs/CLUSTER_PROGRAMMING_LESSONS.md](docs/CLUSTER_PROGRAMMING_LESSONS.md): what building
+  this taught us, for the next project.
 
-To build and test the production implementations from the repository root:
+**How it works**
+- Mathematics and requirements: [docs/DESIGN.md](docs/DESIGN.md), [docs/FIELD.md](docs/FIELD.md),
+  [docs/TRANSITIONS.md](docs/TRANSITIONS.md), [docs/RESOURCE_MODEL.md](docs/RESOURCE_MODEL.md).
+- Cluster: [cluster/DESIGN.md](cluster/DESIGN.md), [docs/PROTOCOL.md](docs/PROTOCOL.md),
+  [docs/RECOVERY.md](docs/RECOVERY.md), [docs/RETENTION.md](docs/RETENTION.md).
+- Distributed DP: [docs/TILES.md](docs/TILES.md), [docs/QUEUED_TILES.md](docs/QUEUED_TILES.md),
+  [docs/DP_STORAGE.md](docs/DP_STORAGE.md), [docs/DP_NETWORK_LOCALITY.md](docs/DP_NETWORK_LOCALITY.md).
+- GPUs and large matchings: [docs/GPU.md](docs/GPU.md),
+  [docs/GPU_BLOCK_MATCHING.md](docs/GPU_BLOCK_MATCHING.md), [docs/MATCHING_13_9.md](docs/MATCHING_13_9.md).
+- Dashboard: [web/DESIGN.md](web/DESIGN.md), [web/README.md](web/README.md).
+
+**Reports and incidents**
+- [docs/LOST_TILES_INCIDENT_2026-10-04.md](docs/LOST_TILES_INCIDENT_2026-10-04.md): finished
+  tiles cleared on every worker upgrade, and the four-layer fix.
+- [docs/TILE_SCRATCH_RAM.md](docs/TILE_SCRATCH_RAM.md): tile scratch moved to RAM, and the
+  fleet's drive health.
+- [docs/MACHINE_CONTRIBUTIONS.md](docs/MACHINE_CONTRIBUTIONS.md): how much each machine
+  contributes, and how that was measured.
+- [docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md): the workload and fleet, for hardware
+  planning.
+- [docs/NETWORK_OUTAGE_2026-10-02.md](docs/NETWORK_OUTAGE_2026-10-02.md): the Wi-Fi roaming
+  outage.
+- [docs/CLUSTER_INVENTORY.md](docs/CLUSTER_INVENTORY.md): hardware and OS facts per machine.
+
+**History** (dated snapshots, kept as a record): [NEXT_CONVERSATION.md](NEXT_CONVERSATION.md),
+[docs/NEXT.md](docs/NEXT.md), [docs/DISTRIBUTED_DESIGN.md](docs/DISTRIBUTED_DESIGN.md),
+[docs/DP_CAMPAIGN.md](docs/DP_CAMPAIGN.md), [docs/CAPACITY_CAMPAIGN.md](docs/CAPACITY_CAMPAIGN.md),
+[docs/PARTITIONED_MATCHING.md](docs/PARTITIONED_MATCHING.md), [docs/DP_SOLVER_CONCERNS.md](docs/DP_SOLVER_CONCERNS.md),
+[docs/RECOVERY_HANDOFF.md](docs/RECOVERY_HANDOFF.md), [docs/RECOVERY_EXPERIMENT.md](docs/RECOVERY_EXPERIMENT.md),
+[docs/LEADER_CONTENTION_AND_DP_RECONSTRUCTION_PLAN.md](docs/LEADER_CONTENTION_AND_DP_RECONSTRUCTION_PLAN.md).
+
+## Build and test
+
+From the repository root:
 
 ```sh
 make -C king_hamming/dp_solver check
@@ -59,10 +88,6 @@ make -C king_hamming/matching_solver check
 make -C king_hamming/cluster check
 make -C king_hamming/gpu_match_solver check   # needs a CUDA GPU
 make -C king_hamming/gpu_dp_solver check      # needs a CUDA GPU
+make -C king_hamming/gpu_block_match_solver check   # needs a CUDA GPU
+make -C king_hamming/web check
 ```
-
-Replicated native DP checkpoints and cross-worker recovery are now implemented
-and tested on the household machines. [`cluster/RECOVERY.md`](docs/RECOVERY.md)
-describes the protocol and [`cluster/RECOVERY_EXPERIMENT.md`](docs/RECOVERY_EXPERIMENT.md)
-records exact full-table verification after agent loss. A DP calculation can now use multiple ordinary leased workers; see
-[`cluster/QUEUED_TILES.md`](docs/QUEUED_TILES.md).

@@ -17,27 +17,26 @@ Both are plain C binaries that load `libcuda.so.1` at run time; see
 [cuda/README.md](../cuda/README.md). A host without a usable GPU behaves exactly as
 before.
 
-## Fleet (probed 2026-10-02, evening)
+## Fleet (2026-10-04)
 
-Every machine now has a working GPU. Each one passes `cuda/kh_cuda_probe`, the
-check an agent runs at start, and reports driver 580.178.04 with a
-Canonical-signed kernel module.
+Every machine has a working GPU, passes `cuda/kh_cuda_probe` (the check an agent runs at
+start), runs driver 580.178.04 with a Canonical-signed kernel module, and is registered
+with the leader.
 
-| Host | GPU | Usable memory | Registered with the leader |
+| Host | GPU | Usable memory | Measured DP tile kernel (29⁷, 4096²) |
 | --- | --- | --- | --- |
-| merlin `.151` | RTX 3060 Laptop, 6 GiB | 5.7 GiB | yes, since the 11:13 deploy |
-| `.101`, `.102`, `.104`, `.105` | Quadro P600, 2 GiB | 1.7 GiB each | yes, since the 11:13 deploy |
-| `.103`, `.106`, `.107`, `.108` | Quadro P600, 2 GiB | 1.7 GiB each | **no: probes fine, but the agent must restart** |
-| pellinore `.152` | GTX 1050 Ti Max-Q, 4 GiB | about 3.9 GiB | **no: probes fine, but the agent must restart** |
+| merlin `.151` | RTX 3060 Laptop, 6 GiB | 5.7 GiB | 5.5 s |
+| gawain `.156` | Quadro T1000, 4 GiB | about 3.6 GiB | 18.5 s |
+| `.101`–`.108` | Quadro P600, 2 GiB | 1.7 GiB each | 47 s |
 
-An agent detects GPUs only when it starts, and the agents are stopped now, so the
-leader's last record still lists only the first five. All ten register when the
-agents are next launched (`upgrade-workers`); check afterwards with
-`kh.py status --verbose | grep -i gpu`.
+pellinore `.152` (GTX 1050 Ti Max-Q, 48 s per tile) was retired on 2026-10-04; see
+[MACHINE_CONTRIBUTIONS.md](MACHINE_CONTRIBUTIONS.md). For the large fields DP is
+GPU-bound: a 2-thread CPU tile takes about 1,600 s, and the GPUs are 93–98% busy.
 
-Re-probe any host with `cluster/ops/gpu_driver_fix.sh check HOST...` (read-only: it
-copies the probe to `/tmp`, runs it and removes it), or run `cuda/kh_cuda_probe` on the
-host. Status shows each node's `gpus_json`.
+An agent detects GPUs only when it starts. Check with `kh.py status --verbose | grep -i gpu`.
+Re-probe any host with `cluster/ops/gpu_driver_fix.sh check HOST...` (read-only: it copies
+the probe to `/tmp`, runs it and removes it), or run `cuda/kh_cuda_probe` on the host.
+Status shows each node's `gpus_json`.
 
 ### History: the driver problems, now resolved
 
@@ -106,10 +105,9 @@ Pipeline settings (optional; defaults shown):
 | `gpu_matching_threads` | `4` | CPU threads for field construction |
 | `gpu_block_matching` | `true` | when no GPU holds the whole field, plan `match_gpu_blocks` on the largest GPU |
 
-With today's fleet, Merlin's 3060 admits fields up to about 180 M labels,
-including the previously blocked 3^17 and 2^27. The P600 nodes (now all eight)
-take fields up to about 55 M, and pellinore's 4 GiB 1050 Ti should take about
-110 M (an estimate from its memory; not yet run).
+With the 2026-10-02 fleet, Merlin's 3060 admitted fields up to about 180 M
+labels, including the previously blocked 3^17 and 2^27, and the P600 nodes up to
+about 55 M. Larger fields go to block matching (below).
 
 Fields larger than that get the plan `{"program": "match_gpu_blocks", ...}` (second tier
 in `gpu_policy.py`) when `gpu_block_matching` is on and some healthy host has the RAM
@@ -117,11 +115,15 @@ in `gpu_policy.py`) when `gpu_block_matching` is on and some healthy host has th
 about 6 bytes per label). **Every host with a usable GPU and that much RAM may take the
 run**, so several fields match at once; the lease asks for the smallest eligible device, and
 the kernel sizes its blocks from the device it actually gets (merlin's 3060 needs 3 blocks
-for 17^7, a P600 needs 9). On today's fleet all five large fields are admitted:
+for 17^7, a P600 needs 9). On the 2026-10-02 fleet all five large fields were admitted:
 17^7, 2^29 and 19^7 (about 2.4, 3.1 and 5.1 GiB of host RAM) on all ten machines, 7^11
 (11.1 GiB) on all ten, and 11^9 (13.3 GiB) on merlin and the P600 machines. The leader only
 places a job where its memory fits beside the DP tiles already reserved on that host, so the
 big ones in practice land on merlin.
+
+Fields with more than 2^32 labels (up to 2^36) use 64-bit block matching, built for 13^9; see
+[MATCHING_13_9.md](MATCHING_13_9.md). 13^9 matched on merlin in about an hour of solver time
+(11 minutes of it on the GPU), plus about 2 hours of verification.
 
 Results are verified by `matching_solver/kh_verify_khm1`, a native streaming verifier
 (about 150x faster than the Python one: 0.2 s against 31 s on 2^23). It is written

@@ -19,23 +19,32 @@ make -C king_hamming/matching_solver check
 
 Every executable prints help and an example when invoked without arguments.
 
-## Operate the existing household campaign
+## Operate the household campaign
+
+The live campaign is the continuous DP → matching campaign, with its state in
+[`deployments/continuous-campaign/`](deployments/continuous-campaign/) (leader on merlin,
+port 8061). The launcher's default `--state` still names the retired `dp-campaign`
+deployment, so always pass `--state`:
 
 ```sh
-python3 king_hamming/cluster/launch_dp.py status
-python3 king_hamming/cluster/kh.py \
-    --leader http://192.168.4.151:8041 status --watch 60
+S=king_hamming/cluster/deployments/continuous-campaign
+python3 king_hamming/dp_solver/launch_dp.py --state $S status
+python3 king_hamming/cluster/kh.py --leader http://192.168.4.151:8061 status --watch 60
 
-# Stop and resume computation, retaining results and restart state.
-python3 king_hamming/cluster/launch_dp.py stop
-python3 king_hamming/cluster/launch_dp.py resume
+# Stop granting new leases (running work finishes), and resume.
+python3 king_hamming/dp_solver/launch_dp.py --state $S drain
+python3 king_hamming/dp_solver/launch_dp.py --state $S resume
 
-# Copy newly completed compact results to the leader.
-python3 king_hamming/cluster/launch_dp.py collect
+# Deploy new code: the leader live, the workers one host at a time or all together.
+python3 king_hamming/dp_solver/launch_dp.py --state $S upgrade-leader --live
+python3 king_hamming/dp_solver/launch_dp.py --state $S upgrade-worker-rolling --host 192.168.4.101
+python3 king_hamming/dp_solver/launch_dp.py --state $S upgrade-workers
 ```
 
-Collected files and their score/hash index are in
-[`deployments/dp-campaign/results/`](deployments/dp-campaign/results/).
+Results are in `deployments/continuous-campaign/results/` (DP) and `matching-results/`
+(certificates); the summary table is [`results.md`](../results.md). Day-to-day operation is
+easiest from the dashboard ([web/README.md](../web/README.md)), and the campaign is described
+in [docs/CONTINUOUS_CAMPAIGN.md](../docs/CONTINUOUS_CAMPAIGN.md).
 
 ```sh
 python3 king_hamming/dp_solver/print_dp.py PATH_TO_RESULT.khdp

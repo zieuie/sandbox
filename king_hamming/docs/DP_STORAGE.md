@@ -118,7 +118,7 @@ admission in `adapter.resource_requirements`. Markdown that turned out wrong or 
 P600 hosts, and `docs/DP_SOLVER_CONCERNS.md` says every machine is on Wi-Fi, though 9 of 11 now
 have wired addresses (the `nodes` table's `private_group`).
 
-## Changes made tonight (uncommitted, not deployed)
+## Changes made that night (since committed and deployed: the live campaign runs `tile_format: 2`)
 
 | file | change |
 | --- | --- |

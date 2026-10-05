@@ -1,5 +1,7 @@
 # Concerns about the DP side of the campaign
 
+> **Snapshot (2026-10-02).** Some items have since been addressed: the "long GPU hold" fix in item 2 is deployed, and the DP now runs mostly on GPUs ([MACHINE_CONTRIBUTIONS.md](MACHINE_CONTRIBUTIONS.md)). Recheck an item against the code before acting on it.
+
 Written 2026-10-02 (night), after deploying block matching and resuming the DP roots.
 Each item says what I **observed**, what I only **suspect**, and what to look at. Nothing here
 is urgent; the campaign was healthy when this was written.

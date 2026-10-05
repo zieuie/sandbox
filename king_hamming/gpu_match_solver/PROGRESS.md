@@ -1,5 +1,7 @@
 # GPU solvers — overnight progress log (2026-10-02)
 
+> **Historical (2026-10-02).** The overnight log from building the GPU solvers. Current documentation: [../docs/GPU.md](../docs/GPU.md) and the solvers' READMEs.
+
 Request (Zooey, ~01:20 CDT): build production `gpu_match_solver` and a GPU DP
 solver ("dp_match_solver" — interpreted as a GPU DP tile solver, named
 `gpu_dp_solver/`; confirm), document design and measurements vs the CPU
