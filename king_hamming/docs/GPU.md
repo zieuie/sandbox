@@ -83,8 +83,10 @@ Status shows each node's `gpus_json`.
     minutes on the CPUs, often on its field's critical path.
   - **allowed:** it waits up to half its estimated CPU time (at most 15 minutes,
     or `KH_GPU_DP_WAIT_SECONDS`), then runs `kh_dp_tile` on the leased CPUs.
-  Either way a tile with no usable GPU (too big for it, a failed kernel, or a GPU
-  held by a long matching) runs on its CPUs. Exit 3 (no usable GPU) marks the device
+  Either way a tile with no usable GPU (too big for it, or a failed kernel) runs on
+  its CPUs. While CPU fallback is off, the leader also gives no tiles to a host whose
+  every GPU is held by a GPU lease (a matching): on 2026-10-05 merlin's slots ran 31⁷
+  tiles on CPUs for the whole 29⁷ matching and slowed the leader on the same machine. Exit 3 (no usable GPU) marks the device
   unavailable for 10 minutes, so broken hosts don't retry every tile. The final
   tile progress record carries `"engine": "gpu"|"cpu"`, which is kept in
   `progress_details`. While it waits for the lock, a tile reports a
