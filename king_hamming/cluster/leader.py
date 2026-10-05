@@ -248,6 +248,18 @@ def expire_leases(connection, now: float) -> None:
     recovery.expire(connection, now, partner_grace=gap if gap > STALL_SECONDS else 0.0)
 
 
+def gpus_all_leased(connection, node) -> bool:
+    """Whether every GPU of node is held by a running GPU lease (a matching), leaving none for tiles."""
+
+    devices = gpus.from_record(node)
+    if not devices:
+        return False
+    held = {row[0] for row in connection.execute(
+        "SELECT gpu_index FROM runs WHERE node_name=? AND state='running' AND gpu_index IS NOT NULL",
+        (node["node_name"],))}
+    return all(device["index"] in held for device in devices)
+
+
 def disk_floor(connection) -> int:
     """Return the free-space floor in bytes (setting disk_floor_bytes; 0 turns the rule off)."""
 
@@ -1281,6 +1293,8 @@ def make_handler(
                         resources = ResourceRequest.from_adapter(
                             adapter.resource_requirements(specification))
                         sharing = required == 1 and bool(adapter.allows_host_sharing(specification))
+                        if adapter.needs_free_gpu(connection, specification) and gpus_all_leased(connection, node):
+                            continue
                         active_on_host = connection.execute(
                             "SELECT COUNT(*) AS count,COALESCE(SUM(reserved_memory_bytes),0) AS memory "
                             "FROM runs WHERE node_name=? AND state='running'",

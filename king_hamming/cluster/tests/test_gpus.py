@@ -145,6 +145,26 @@ class GPUSchedulingTests(unittest.TestCase):
             self.assertEqual(job["specification"]["program"], "match_gpu")
             self.assertTrue(set(job["assigned_cpu_set"].split(",")).isdisjoint(tile["assigned_cpu_set"].split(",")))
 
+    def test_no_dp_tiles_on_a_host_whose_gpu_a_matching_holds(self) -> None:
+        """2026-10-05: a block matching held merlin's GPU for hours and merlin's slots ran 31^7
+        tiles on CPUs instead (25-50 min each), saturating the leader's machine."""
+        with tempfile.TemporaryDirectory() as directory:
+            database, handler = self.handler(directory)
+            self.register(handler, "gpu", [P600])
+            handler.dispatch_post("/v1/enqueue", {"specification": gpu_job(), "priority": 100})
+            job = handler.dispatch_post("/v1/lease", {"node_name": "gpu", "slot_id": 0})["job"]
+            self.assertEqual(job["specification"]["program"], "match_gpu")
+            handler.dispatch_post("/v1/enqueue", {"specification": {
+                "program": "dp_distributed", "arguments": {
+                    "p": 3, "r": 3, "tile_side": 4, "threads": 1, "max_cpus": 1,
+                    "max_visits": 10**9, "max_tile_bytes": 2 * 1024**3}}})
+            self.assertIsNone(handler.dispatch_post("/v1/lease", {"node_name": "gpu", "slot_id": 1})["job"],
+                              "its only GPU is leased, and tiles may not fall back to CPUs")
+            with leader.connect(database) as connection:
+                connection.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('dp_cpu_fallback','1')")
+            tile = handler.dispatch_post("/v1/lease", {"node_name": "gpu", "slot_id": 1})["job"]
+            self.assertEqual(tile["specification"]["program"], "dp_tile", "allowed again once CPUs are")
+
     def test_heartbeat_keeps_registered_devices_and_status_reports_them(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database, handler = self.handler(directory)

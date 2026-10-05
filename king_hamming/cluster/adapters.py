@@ -52,6 +52,13 @@ class SolverAdapter:
         """Return whether disjoint CPU slots may run beside this single-node job."""
         return False
 
+    def needs_free_gpu(self, connection, specification):
+        """Return whether this job should only go to a host with a GPU not held by a GPU lease.
+
+        For work that can run only slowly without a GPU, and is not allowed to fall back to CPUs.
+        """
+        return False
+
     def cpu_width(self, specification, available):
         """Choose a lease width from free host CPUs; sharing adapters default to one."""
         return min(1, available)

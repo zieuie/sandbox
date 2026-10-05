@@ -128,6 +128,15 @@ class DPAdapter(SolverAdapter):
         """Allow immutable tile kernels, but not roots/reconstruction, on disjoint slots."""
         return specification["program"] == "dp_tile"
 
+    def needs_free_gpu(self, connection, specification):
+        """A tile needs a GPU it can get unless CPU fallback is allowed (setting dp_cpu_fallback).
+
+        On 2026-10-05 a 29^7 block matching held merlin's GPU for hours; merlin's tile slots kept
+        taking 31^7 tiles and ran them on its CPUs (25-50 min each), saturating the leader's
+        machine until requests timed out.
+        """
+        return specification["program"] == "dp_tile" and not distributed.cpu_fallback_allowed(connection)
+
     def cpu_width(self, specification, available):
         """Use spare cores, bounded by the halo, native stacks and an optional cap.
 
