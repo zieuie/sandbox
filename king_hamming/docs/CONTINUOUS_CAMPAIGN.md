@@ -53,9 +53,12 @@ module above.
 
 ## Wired data network
 
-All eleven machines (the eight `.101`–`.108` workers, Merlin, pellinore `.152`
-and gawain `.156`) have permanent `10.203.0.X/24` addresses on the same 1 Gb/s
-switch (`X` is their Wi-Fi address suffix). Their wired NetworkManager profiles
+All ten machines (the eight `.101`–`.108` workers, Merlin and gawain `.156`)
+have permanent `10.203.0.X/24` addresses on the same 1 Gb/s switch. pellinore
+`.152` was retired on 2026-10-04 (its GPU was no faster than a P600 at the
+highest energy per tile): it is out of the manifest, listed in the leader
+setting `retired_nodes` so the dashboard does not report it as down, and
+powered off. Its addresses below are kept for reference. (`X` is their Wi-Fi address suffix). Their wired NetworkManager profiles
 have no gateway or DNS; Wi-Fi remains the default route, SSH fallback, and
 leader control address. `.106`, `.152` and `.156` use a separate
 `King Hamming wired` profile (on `.152` and `.156` bound to the USB ASIX
@@ -89,7 +92,7 @@ python3 king_hamming/dp_solver/launch_dp.py \
   --state king_hamming/cluster/deployments/continuous-campaign resume-workers
 ```
 
-The manifest already records the full eleven-host mapping. To add one host
+The manifest records the mapping for all ten machines. To add one host
 while the campaign is busy, add its entry to `private_networks` in the manifest
 and run `upgrade-worker-rolling --host` for it; `set-storage-addresses` refuses
 while any lease is active. `resume-workers`

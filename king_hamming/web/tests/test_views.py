@@ -149,6 +149,17 @@ class ViewTests(unittest.TestCase):
         root = next(item for item in built["roots"] if item["run_id"] == "root-5-3")
         self.assertGreaterEqual(root["recomputed"], 0)
 
+    def test_a_retired_silent_node_is_hidden_not_down(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("INSERT INTO settings(key,value) VALUES('retired_nodes','[\"dp-108\"]')")
+        built = self.build()
+        self.assertNotIn("dp-108", [node["name"] for node in built["fleet"]["nodes"]])
+        self.assertNotIn("node_down:dp-108", {entry["group"] for entry in built["problems"]["active"]})
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("UPDATE nodes SET last_heartbeat=? WHERE node_name='dp-108'", (NOW - 1,))
+        self.assertIn("dp-108", [node["name"] for node in self.build()["fleet"]["nodes"]],
+                      "a retired node that heartbeats again is shown")
+
     def test_a_long_storage_recheck_is_a_problem(self) -> None:
         with sqlite3.connect(self.database) as connection:
             for created, digest in ((NOW - 5400, "a" * 64), (NOW - 60, "b" * 64)):

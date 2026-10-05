@@ -443,6 +443,15 @@ class Snapshots:
         lease_seconds = float(setting(connection, "lease_seconds", 60))
         dispatch = setting(connection, "campaign_state", "unknown")
         nodes = [dict(row) for row in connection.execute("SELECT * FROM nodes ORDER BY node_name")]
+        # A machine taken out of service (settings key retired_nodes, a JSON list of node names)
+        # is left out while it is silent instead of being reported as down. The leader keeps its
+        # row for the history it is referenced by; one that heartbeats again shows up as usual.
+        try:
+            retired = set(json.loads(setting(connection, "retired_nodes", "[]")))
+        except ValueError:
+            retired = set()
+        nodes = [node for node in nodes
+                 if node["node_name"] not in retired or now - node["last_heartbeat"] <= lease_seconds]
         reservations = {row["node_name"]: row["run_id"] for row in
                         connection.execute("SELECT node_name,run_id FROM node_reservations")}
         for node in nodes:
