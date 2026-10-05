@@ -225,7 +225,7 @@ remains is checking space before admitting work.
 
 ## Observability
 
-13. **Logs have no timestamps.**
+13. **Logs had no timestamps. Fixed (2026-10-04).**
     - **Cause:** `leader.log` is mostly Python tracebacks, and `feeder.log` is
       one JSON object per pass.
     - **Possible change:** prefix every line with an ISO time, and emit
@@ -237,6 +237,12 @@ remains is checking space before admitting work.
       baseline again, and the leader baseline covers only the current leader
       session. Timestamps written by the leader and feeder themselves would make
       the Problems history exact and permanent.
+    - **Done (2026-10-04):** the leader, agents and feeder prefix every line with
+      its local ISO time (`cluster/logstamp.py`), and the dashboard's log watcher
+      takes each event's time from its line, in the baseline too, so the Problems
+      history survives dashboard restarts. Older unstamped lines are still timed
+      the old way. Not stamped: output that a child process writes straight to an
+      inherited log descriptor (only the matching-shard peer processes do).
 
 14. **`/v1/status` is slow (about 6 s).**
     - **Cause:** `DPAdapter.augment_status` runs one replica-count query per
@@ -251,7 +257,7 @@ remains is checking space before admitting work.
     predated the working tree kept running. **Possible change:** record a code
     hash in `feeder_process.json` and in the leader's `/v1/status`.
 
-16. **`database is locked` errors.**
+16. **`database is locked` errors. Fixed (2026-10-04).**
     - **Observed:** about 44 in one leader session, at `BEGIN IMMEDIATE` in
       `dispatch_post`. They appear to cluster with failure and retry storms,
       not with dashboard reads.
@@ -273,8 +279,16 @@ remains is checking space before admitting work.
       next safe restart; this change does not require worker replacement.
     - **2026-10-04:** that fix and the rest of the leader-contention work
       (`docs/LEADER_CONTENTION_AND_DP_RECONSTRUCTION_PLAN.md`) are deployed. Lock
-      errors still happen occasionally (the latest at 18:43 during worker
-      upgrades), far less often than before.
+      errors still happened occasionally: 6 in 5.6 hours, about 620,000 write
+      transactions (4 on `/v1/run-control`, 2 on `/v1/resource-usage`), although
+      no transaction held the lock for more than 4.6 s.
+    - **Cause:** SQLite doesn't queue waiting writers; each sleeps and retries,
+      so an unlucky request can lose the race past its 8-second timeout.
+    - **Done (2026-10-04):** all leader writers now wait in a first-come,
+      first-served queue in front of `BEGIN IMMEDIATE` (`leader.WriterQueue`),
+      which hands the slot straight to the next request. A test runs 24 threads ×
+      40 writes; with a 0.5 s timeout it produced lock errors without the queue and
+      none with it. The leader's `/v1/health` still counts lock errors per route.
 
 17. **`campaigns/result_table.py` once aborted on one uncollected artifact (may
     be moot).**

@@ -238,6 +238,15 @@ The useful sequence was:
 6. Reduce chatty control requests in proportion to the actual lease duration.
    For this campaign, five-second renewals retained generous slack for a
    60-second lease without one SQLite write per busy core per second.
+7. **Queue writers yourself.** SQLite doesn't queue waiting writers: each one
+   sleeps and retries, backing off to 100 ms between tries. At about 30 writes
+   a second an unlucky request could lose the race for more than its 8-second
+   timeout although no transaction held the lock for more than a few seconds,
+   so a handful of requests a day still failed with `database is locked`. All
+   leader writers are threads of one process, so a first-come, first-served
+   queue in front of `BEGIN IMMEDIATE` (`leader.WriterQueue`, 2026-10-04)
+   removes the starvation; a stress test with a short timeout that fails with
+   lock errors without the queue passes with it, at the same throughput.
 
 After those changes, a sustained post-rollout observation showed healthy
 leader status and zero lock errors, though that is a measurement at one load,
@@ -404,6 +413,13 @@ reconstruction, or actual failure. A “healthy” badge must not mean only that
 one scheduler thread recently returned. Expose current configuration, runtime
 version, and last successful measurement. Keep per-route metrics bounded so
 observability itself cannot fill the database or logs.
+
+Timestamp every log line where it is written. Until 2026-10-04 the leader, agent and
+feeder logs carried no times, so a traceback couldn't be placed, and the dashboard
+guessed times from when it first saw a line (forgetting them on restart). Each
+long-running process now stamps its own lines (`cluster/logstamp.py`); do it inside
+the process rather than through a pipe to a helper, so logging can never block on
+the helper and a crash's last traceback is still written.
 
 Provide concise ordinary status and an explicit verbose mode, plus
 copy-and-paste operator commands. Record the distinction between a static

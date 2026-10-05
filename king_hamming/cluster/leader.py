@@ -13,6 +13,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -148,6 +149,53 @@ def session(database: Path, timeout: float = 30.0):
         connection.close()
 
 
+class WriterQueue:
+    """First come, first served access to SQLite's single writer slot, within this process.
+
+    SQLite does not queue waiting writers: each one sleeps and retries (backing off to
+    100 ms between tries), so under about 30 writes a second an unlucky request could keep
+    losing the race until its 8-second timeout, although no transaction held the lock for
+    more than a few seconds ("database is locked", item 16 of web/CAMPAIGN_NOTES.md). Every
+    leader writer is a thread of this process, so they now wait here in arrival order and
+    the slot is handed straight to the next one. Other processes (the launcher, rarely)
+    still meet SQLite's own busy wait.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.waiters: deque[threading.Event] = deque()
+        self.held = False
+
+    def acquire(self, timeout: float) -> bool:
+        """Wait up to timeout seconds for the slot; return whether it is now ours."""
+
+        with self.lock:
+            if not self.held and not self.waiters:
+                self.held = True
+                return True
+            turn = threading.Event()
+            self.waiters.append(turn)
+        if turn.wait(timeout):
+            return True
+        with self.lock:
+            if turn.is_set():  # handed over just as the wait timed out
+                return True
+            self.waiters.remove(turn)
+            return False
+
+    def release(self) -> None:
+        """Hand the slot to the longest waiter, or free it."""
+
+        with self.lock:
+            if self.waiters:
+                self.waiters.popleft().set()
+            else:
+                self.held = False
+
+
+WRITERS = WriterQueue()
+
+
 @contextmanager
 def writer_session(database: Path, route: str, health: "SchedulerHealth", timeout: float = 8.0):
     """Measure writer wait and transaction hold time, including commit/rollback."""
@@ -155,8 +203,14 @@ def writer_session(database: Path, route: str, health: "SchedulerHealth", timeou
     started = time.monotonic()
     acquired = None
     error = None
+    queued = False
     try:
-        with session(database, timeout=timeout) as connection:
+        if not WRITERS.acquire(timeout):
+            raise sqlite3.OperationalError(f"database is locked: waited {timeout:.0f} s in the writer queue")
+        queued = True
+        # Normally free now; only another process (rare) can still hold SQLite's lock.
+        remaining = max(1.0, timeout - (time.monotonic() - started))
+        with session(database, timeout=remaining) as connection:
             connection.execute("BEGIN IMMEDIATE")
             acquired = time.monotonic()
             yield connection
@@ -165,6 +219,8 @@ def writer_session(database: Path, route: str, health: "SchedulerHealth", timeou
         error = failure
         raise
     finally:
+        if queued:
+            WRITERS.release()
         ended = time.monotonic()
         health.transaction(route, (acquired or ended) - started,
                            0.0 if acquired is None else ended - acquired, error)
