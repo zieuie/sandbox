@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -30,6 +31,9 @@ def main() -> int:
         return 0
     with tempfile.TemporaryDirectory(prefix="kh-gpu-cluster-") as name:
         temporary = Path(name)
+        # Tile scratch in its own tmpfs directory, apart from any production tiles on this host.
+        shm = Path("/dev/shm")
+        scratch = Path(tempfile.mkdtemp(prefix="kh-check-", dir=shm if shm.is_dir() else temporary))
         base = f"http://127.0.0.1:{free_port()}"
         processes, logs = [], []
 
@@ -53,7 +57,7 @@ def main() -> int:
                               "--storage-root", str(temporary / f"blobs-{label}"),
                               "--storage-listen", f"127.0.0.1:{port}", "--storage-url", f"http://127.0.0.1:{port}",
                               "--poll-seconds", "0.05", "--control-seconds", "0.05"],
-                      {"KH_GPU_LOCK_DIR": str(lock_dir), **extra})
+                      {"KH_GPU_LOCK_DIR": str(lock_dir), "KH_TILE_SCRATCH": str(scratch), **extra})
             wait_until(lambda: len(request_json(base, "GET", "/v1/status")["nodes"]) == 2, "agents", timeout=30)
             nodes = {node["node_name"]: node for node in request_json(base, "GET", "/v1/status")["nodes"]}
             assert json.loads(nodes["node-gpu"]["gpus_json"]), nodes["node-gpu"]
@@ -92,9 +96,15 @@ def main() -> int:
             with urlopen(dp_row["artifact_location"], timeout=10) as response:
                 document = json.loads(response.read())
             assert document == json.loads(reference.read_text()), "distributed DP with GPU tiles differs from kh_dp_local"
-            gpu_tiles = sum('"engine":"gpu"' in (line or "") for line in _tile_messages(temporary / "leader.sqlite"))
+            messages = _tile_messages(temporary / "leader.sqlite")
+            gpu_tiles = sum('"engine":"gpu"' in (line or "") for line in messages)
             assert gpu_tiles > 0, "no tile reported GPU computation"
-            print(f"ok DP 5^3 root identical to kh_dp_local; {gpu_tiles} tiles computed on the GPU")
+            ram_tiles = sum('"scratch":"ram"' in (line or "") for line in messages)
+            assert ram_tiles == len(messages), f"only {ram_tiles} of {len(messages)} tiles used RAM scratch"
+            left = [path.name for path in scratch.iterdir() if path.name.startswith("kh-tile-")]
+            assert not left, f"tile scratch left behind: {left}"
+            print(f"ok DP 5^3 root identical to kh_dp_local; {gpu_tiles} tiles computed on the GPU, "
+                  f"all {ram_tiles} in RAM scratch, none left behind")
             return 0
         except BaseException:
             for log in logs:
@@ -109,6 +119,7 @@ def main() -> int:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill()
+            shutil.rmtree(scratch, ignore_errors=True)
             for log in logs:
                 log.close()
 

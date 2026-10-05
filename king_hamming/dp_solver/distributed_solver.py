@@ -26,7 +26,7 @@ from agent import request_json
 from blob_store import fetch_blob, file_digest, storage_transaction, store_blob
 from dependency_cache import checkout
 import gpus
-from dp_solver import tile_codec
+from dp_solver import tile_codec, tile_scratch
 from dp_solver.bands import read_band, write_band
 from dp_solver.scheduling import dp_estimate
 from dp_solver.tiles import band_kind, band_region, build_halo, needed_bands, tile
@@ -381,7 +381,24 @@ def assist_plan(p: int, rectangle, lease_cpus: list[int]) -> list[int] | None:
 
 # Compute an immutable tile from peer artifacts, leaving whole-calculation state on no worker.
 def compute(arguments, specification: dict) -> None:
-    """Assemble one admitted halo, invoke the exact pinned C kernel and pack its complete output."""
+    """Compute one tile with its halo and kernel output in RAM scratch when it fits, else on disk."""
+
+    options=specification["arguments"]
+    rectangle=tile(options["p"],options["r"],options["tile_side"],options["row"],options["column"])
+    # The halo plus the kernel's values and choices; staging and tile.json fit in the slack.
+    scratch=tile_scratch.claim(rectangle.halo_bytes+rectangle.value_bytes*3//2+16*1024**2)
+    try:
+        compute_in(arguments,specification,scratch or arguments.output.parent,"ram" if scratch else "disk")
+    finally:
+        tile_scratch.release(scratch)
+
+
+def compute_in(arguments, specification: dict, work: Path, scratch: str) -> None:
+    """Assemble one admitted halo in work, invoke the exact pinned C kernel and pack its complete output.
+
+    Inputs and the packet stay beside arguments.output: inputs are small bands except in the
+    rare whole-packet fallback, and the agent publishes the packet after this process exits.
+    """
 
     options=specification["arguments"]
     p,r,side=options["p"],options["r"],options["tile_side"]
@@ -407,13 +424,13 @@ def compute(arguments, specification: dict) -> None:
         fetched[mode]+=size
         counts[mode]+=1
     lap("fetch")
-    halo=arguments.output.parent/"halo.bin"
+    halo=work/"halo.bin"
     build_halo(p,r,side,rectangle,sources,halo,int(options.get("max_tile_bytes",2*1024**3)))
     shutil.rmtree(cache)
     lap("halo")
     if REPORTER is not None:
         REPORTER.close()
-    output=arguments.output.parent/"tile-output"
+    output=work/"tile-output"
     cpus=sorted(os.sched_getaffinity(0))
     threads=min(int(options.get("threads",1)),len(cpus))
 
@@ -505,7 +522,7 @@ def compute(arguments, specification: dict) -> None:
     mode="none" if not counts["band"]+counts["packet"] else "bands" if not counts["packet"] else "packets" if not counts["band"] else "mixed"
     print(json.dumps({"done":cells,"total":cells,"checkpoint_done":cells,"units":"cells","phase":"complete","heartbeat":True,
                       "engine":"cpu-assist" if assisted else "gpu" if computed else "cpu","assist_threads":assisted,
-                      "gpu_wait_limit":round(limit,1),"input_mode":mode,
+                      "gpu_wait_limit":round(limit,1),"input_mode":mode,"scratch":scratch,
                       "input_bytes":fetched["band"]+fetched["packet"],"input_band_bytes":fetched["band"],
                       "bands_published":published,**timings}),flush=True)
 
