@@ -379,6 +379,27 @@ def assist_plan(p: int, rectangle, lease_cpus: list[int]) -> list[int] | None:
     return wide if work/len(lease_cpus)>minimum and work/len(wide)<=ASSIST_MAX_SECONDS else None
 
 
+# A tile queued for its host's GPU used to fall silent for the whole wait (95-100 s on a P600
+# shared by four tiles), so the dashboard reported healthy queued tiles as "heartbeat-missing".
+GPU_WAIT_HEARTBEAT_SECONDS = 5.0
+
+
+def gpu_wait_heartbeat(cells: int, clock=time.monotonic):
+    """Return the GPU lock's stop check, which also reports a "waiting for GPU" heartbeat every few seconds."""
+
+    last=[None]
+
+    def should_stop() -> bool:
+        now=clock()
+        if last[0] is None or now-last[0]>=GPU_WAIT_HEARTBEAT_SECONDS:
+            print(json.dumps({"done":0,"total":cells,"checkpoint_done":0,"units":"cells",
+                              "phase":"waiting for GPU","heartbeat":True}),flush=True)
+            last[0]=now
+        return STOP
+
+    return should_stop
+
+
 # Compute an immutable tile from peer artifacts, leaving whole-calculation state on no worker.
 def compute(arguments, specification: dict) -> None:
     """Compute one tile with its halo and kernel output in RAM scratch when it fits, else on disk."""
@@ -482,7 +503,7 @@ def compute_in(arguments, specification: dict, work: Path, scratch: str) -> None
                     raise RuntimeError(f"C tile kernel exited {code}")
                 computed=True
         if not computed and not acquired:
-            acquired=lock.acquire(limit,lambda: STOP,skip_long=True)
+            acquired=lock.acquire(limit,gpu_wait_heartbeat(rectangle.value_bytes//8),skip_long=True)
         lap("gpu_wait")
         if acquired:
             try:

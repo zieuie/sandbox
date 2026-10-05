@@ -80,7 +80,10 @@ Status shows each node's `gpus_json`.
   `kh_dp_tile` on the leased CPUs. Exit 3 (no usable GPU) marks the device
   unavailable for 10 minutes, so broken hosts don't retry every tile. The final
   tile progress record carries `"engine": "gpu"|"cpu"`, which is kept in
-  `progress_details`.
+  `progress_details`. While it waits for the lock, a tile reports a
+  `"waiting for GPU"` heartbeat every 5 s; before 2026-10-05 it fell silent for
+  the whole wait (95–100 s on a P600 shared by four tiles), and the dashboard
+  flagged healthy queued tiles as "heartbeat-missing".
 - **Coexistence.** `match_gpu`'s bridge takes the same lock before launching
   its kernel (waiting up to 30 minutes), so a matching and a tile never share
   device memory. Tiles hold the lock for seconds; a matching holds it for
