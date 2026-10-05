@@ -710,6 +710,9 @@ def make_handler(
                         )
                     elif now - run["last_solver_heartbeat"] > 30:
                         run["solver_health"] = "heartbeat-missing"
+                    elif run["progress_phase"] == "waiting for GPU":
+                        # Alive (it heartbeats) and queued behind other tiles: not a progress problem.
+                        run["solver_health"] = "waiting-for-gpu"
                     elif run["last_progress_at"] is not None and now - run["last_progress_at"] >= 1800:
                         run["solver_health"] = "stalled"
                     elif run["last_progress_at"] is not None and now - run["last_progress_at"] >= 300:

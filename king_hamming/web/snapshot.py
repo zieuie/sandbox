@@ -99,6 +99,8 @@ def solver_health(run: dict, now: float) -> str:
         return "heartbeat-missing" if started is not None and now - started > 30 else "starting"
     if now - heartbeat > 30:
         return "heartbeat-missing"
+    if run.get("progress_phase") == "waiting for GPU":
+        return "waiting-for-gpu"  # alive and queued behind other tiles, not stuck
     progress = run.get("last_progress_at")
     if progress is not None and now - progress >= 1800:
         return "stalled"

@@ -181,6 +181,14 @@ class ViewTests(unittest.TestCase):
         self.assertIn("dp-108", [node["name"] for node in self.build()["fleet"]["nodes"]],
                       "a retired node that heartbeats again is shown")
 
+    def test_a_tile_waiting_for_its_gpu_is_healthy_not_stalled(self) -> None:
+        import snapshot
+        run = {"state": "running", "stop_requested": 0, "started": NOW - 700, "last_solver_heartbeat": NOW - 3,
+               "last_progress_at": NOW - 690, "progress_phase": "waiting for GPU"}
+        self.assertEqual(snapshot.solver_health(run, NOW), "waiting-for-gpu")
+        self.assertEqual(snapshot.solver_health({**run, "progress_phase": "computing"}, NOW), "no-progress-warning")
+        self.assertEqual(snapshot.solver_health({**run, "last_solver_heartbeat": NOW - 60}, NOW), "heartbeat-missing")
+
     def test_a_long_storage_recheck_is_a_problem(self) -> None:
         with sqlite3.connect(self.database) as connection:
             for created, digest in ((NOW - 5400, "a" * 64), (NOW - 60, "b" * 64)):
