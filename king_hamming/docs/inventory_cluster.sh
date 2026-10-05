@@ -91,6 +91,11 @@ memory_bytes=$(command_value awk '/MemTotal:/ {print $2 * 1024}' /proc/meminfo)
 numa_nodes=$(command_value lscpu | sed -n 's/^NUMA node(s):[[:space:]]*//p' | head -n 1)
 virtualization=$(command_value systemd-detect-virt)
 watchdogs=$(find /dev -maxdepth 1 -name 'watchdog*' -printf '%f ' 2>/dev/null || true)
+# NVIDIA GPUs as "name (memory)", joined by "; ". Lines without a memory figure (nvidia-smi's own
+# error text when the driver is broken) are dropped.
+gpus=$(command_value nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits |
+    awk -F', *' 'NF >= 2 && $2 ~ /^[0-9]+$/ {printf "%s%s (%.1f GiB)", sep, $1, $2 / 1024; sep = "; "}')
+nvidia_driver=$(command_value nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)
 
 printf 'HOSTNAME=%s\n' "$(first_line hostname -f)"
 printf 'KERNEL=%s\n' "$(first_line uname -sr)"
@@ -101,6 +106,8 @@ printf 'MEMORY_BYTES=%.0f\n' "${memory_bytes:-0}"
 printf 'NUMA_NODES=%s\n' "${numa_nodes:-unknown}"
 printf 'VIRTUALIZATION=%s\n' "${virtualization:-none-or-unknown}"
 printf 'WATCHDOGS=%s\n' "${watchdogs:-none}"
+printf 'GPUS=%s\n' "${gpus:-none}"
+printf 'NVIDIA_DRIVER=%s\n' "${nvidia_driver:-none}"
 printf 'SYSTEMD=%s\n' "$(command -v systemctl >/dev/null 2>&1 && printf yes || printf no)"
 printf 'COMPILER=%s\n' "$(first_line cc --version)"
 printf 'UPTIME=%s\n' "$(first_line uptime -p)"
@@ -148,6 +155,16 @@ else
     printf 'No /sys/class/watchdog directory\n'
 fi
 printf 'END_WATCHDOG\n'
+
+printf 'BEGIN_GPU\n'
+if command -v nvidia-smi >/dev/null 2>&1; then
+    command_value nvidia-smi --query-gpu=index,name,memory.total,driver_version,compute_cap,pci.bus_id --format=csv
+else
+    printf 'nvidia-smi is not installed\n'
+fi
+printf 'Display controllers (lspci):\n'
+command_value lspci | grep -i -E 'vga|3d|display' || printf 'lspci is not available\n'
+printf 'END_GPU\n'
 
 printf 'BEGIN_NETWORK\n'
 command_value ip -brief address
@@ -257,17 +274,17 @@ main() {
         printf 'This report contains hardware and operating-system facts needed to size\n'
         printf 'resident fields, DP tiles, matching state, checkpoints, and watchdog setup.\n\n'
         printf '## Summary\n\n'
-        printf '| Address | Status | Hostname | Architecture | CPUs | Memory | NUMA | Watchdog | OS/kernel |\n'
-        printf '| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |\n'
+        printf '| Address | Status | Hostname | Architecture | CPUs | Memory | GPU | NUMA | Watchdog | OS/kernel |\n'
+        printf '| --- | --- | --- | --- | ---: | ---: | --- | ---: | --- | --- |\n'
 
         for index in "${!hosts[@]}"; do
             host=${hosts[$index]}
             file="${TEMPORARY_DIR}/${host}.txt"
             if [ "${statuses[$index]}" -ne 0 ]; then
-                printf '| %s | unreachable/error |  |  |  |  |  |  |  |\n' "$host"
+                printf '| %s | unreachable/error |  |  |  |  |  |  |  |  |\n' "$host"
                 continue
             fi
-            local hostname arch cpus memory numa watchdog kernel
+            local hostname arch cpus memory gpu numa watchdog kernel
             hostname=$(escape_markdown "$(single_line HOSTNAME "$file")")
             arch=$(escape_markdown "$(single_line ARCH "$file")")
             cpus=$(escape_markdown "$(single_line CPU_COUNT "$file")")
@@ -277,11 +294,12 @@ main() {
             else
                 memory="unknown"
             fi
+            gpu=$(escape_markdown "$(single_line GPUS "$file")")
             numa=$(escape_markdown "$(single_line NUMA_NODES "$file")")
             watchdog=$(escape_markdown "$(single_line WATCHDOGS "$file")")
             kernel=$(escape_markdown "$(single_line KERNEL "$file")")
-            printf '| %s | ok | %s | %s | %s | %s | %s | %s | %s |\n' \
-                "$host" "$hostname" "$arch" "$cpus" "$memory" "$numa" "$watchdog" "$kernel"
+            printf '| %s | ok | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+                "$host" "$hostname" "$arch" "$cpus" "$memory" "$gpu" "$numa" "$watchdog" "$kernel"
         done
 
         printf '\n## Machine details\n\n'
@@ -297,6 +315,8 @@ main() {
             printf -- '- CPU model: `%s`\n' "$(single_line CPU_MODEL "$file")"
             printf -- '- Online CPUs: `%s`\n' "$(single_line CPU_COUNT "$file")"
             printf -- '- Memory bytes: `%s`\n' "$(single_line MEMORY_BYTES "$file")"
+            printf -- '- GPUs: `%s`\n' "$(single_line GPUS "$file")"
+            printf -- '- NVIDIA driver: `%s`\n' "$(single_line NVIDIA_DRIVER "$file")"
             printf -- '- NUMA nodes: `%s`\n' "$(single_line NUMA_NODES "$file")"
             printf -- '- Virtualization: `%s`\n' "$(single_line VIRTUALIZATION "$file")"
             printf -- '- Watchdog devices: `%s`\n' "$(single_line WATCHDOGS "$file")"
@@ -310,6 +330,7 @@ main() {
             write_detail 'Block storage' STORAGE "$file"
             write_detail 'Mounted filesystems' FILESYSTEMS "$file"
             write_detail 'Watchdog' WATCHDOG "$file"
+            write_detail 'GPU' GPU "$file"
             write_detail 'Network' NETWORK "$file"
             write_detail 'Process and memory limits' LIMITS "$file"
         done
