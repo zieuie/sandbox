@@ -3,33 +3,31 @@
 Run commands from the repository root. Each utility prints help when invoked
 without arguments.
 
-## Print the collected results as Markdown
+## Print the results table
 
-Refresh the local collection, then print or save the table:
+The project's `results.md` (prime × exponent, with which bounds are proved) comes from the
+live leader database:
 
 ```sh
-python3 king_hamming/dp_solver/launch_dp.py collect
-python3 king_hamming/scripts/print_results.py \
-    king_hamming/cluster/deployments/dp-campaign/results
-
-python3 king_hamming/scripts/print_results.py \
-    king_hamming/cluster/deployments/dp-campaign/results > results.md
+python3 king_hamming/campaigns/result_table.py > king_hamming/results.md
 ```
 
-You can supply `index.json` instead of the directory. Without an index, the
-utility reads all `.khdp` files in the directory. Each retained run gets its own
-row, sorted by field size. The table includes p, r, q, theta, predicted rows, and
-a link to the compact artifact. It checks artifact checksums and split feasibility.
-Predicted rows are not a completed matching result.
+It is read-only and re-checks every matching certificate's hashes and header (about a
+minute).
 
-Links are relative to the current directory. When saving elsewhere, specify that
-report's directory:
+## List DP artifacts
+
+To list the DP results in one directory (p, r, q, θ, predicted rows and a link to each
+compact artifact), use `print_results.py`. It checks checksums and split feasibility, not
+matchings:
 
 ```sh
 python3 king_hamming/scripts/print_results.py \
-    king_hamming/cluster/deployments/dp-campaign/results \
-    --link-base king_hamming > king_hamming/results.md
+    king_hamming/cluster/deployments/continuous-campaign/results
 ```
+
+You can supply `index.json` instead of the directory. Links are relative to the current
+directory; pass `--link-base DIR` when saving the output elsewhere.
 
 ## Inspect individual artifacts
 

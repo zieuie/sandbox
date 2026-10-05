@@ -19,7 +19,7 @@ from matching_solver.artifacts import Reader, request_count
 
 ACTIVE = {"queued", "waiting", "running", "stopping"}
 DP_PROGRAMS = {"dp", "dp_distributed"}
-MATCH_PROGRAMS = {"match", "match_distributed"}
+MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks"}
 
 
 def permutation_count(dp: dict) -> int:

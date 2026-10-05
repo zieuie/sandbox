@@ -27,6 +27,14 @@ class ResultTableTests(unittest.TestCase):
         self.assertIn("| 2 | 12^ | 120* |", table)
         self.assertIn("| 3 | 256 (running) | (running) |", table)
 
+    def test_every_matching_program_counts(self) -> None:
+        # GPU-matched fields (13^9 among them) once showed no ^ because this list only had
+        # the CPU programs; it must cover every program the dashboard treats as matching.
+        from campaigns.result_table import MATCH_PROGRAMS
+        sys.path.insert(0, str(ROOT / "web"))
+        import snapshot
+        self.assertEqual(set(MATCH_PROGRAMS), set(snapshot.MATCH_PROGRAMS))
+
 
 if __name__ == "__main__":
     unittest.main()

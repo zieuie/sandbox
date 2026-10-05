@@ -67,7 +67,7 @@ def main() -> int:
     """Parse command-line input and print the table; return zero on success or help."""
 
     parser = argparse.ArgumentParser(description=__doc__,
-        epilog='Example: python3 king_hamming/scripts/print_results.py king_hamming/cluster/deployments/dp-campaign/results > results.md')
+        epilog='Example: python3 king_hamming/scripts/print_results.py king_hamming/cluster/deployments/continuous-campaign/results > dp_results.md')
     parser.add_argument('results', type=Path, nargs='?', help='results directory or index.json')
     parser.add_argument('--link-base', type=Path, default=Path.cwd(),
                         help='directory where the Markdown report will live; defaults to the current directory')
