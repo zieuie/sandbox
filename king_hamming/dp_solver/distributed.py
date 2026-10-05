@@ -706,6 +706,19 @@ def locality_scores(connection: sqlite3.Connection, node_name: str, items: list,
 
 
 # Page only the immutable predecessor descriptions required by the currently owned task.
+def cpu_fallback_allowed(connection: sqlite3.Connection) -> bool:
+    """Whether a tile that finds its host's GPU busy may compute on its CPUs instead (setting dp_cpu_fallback).
+
+    Off unless an operator turns it on (the dashboard's Activity tab). A heavy tile that gave up on
+    the GPU after 11-14 minutes then took 25-50 minutes on its CPUs, often on the field's critical
+    path, while the GPU would have served it within minutes. A tile with no usable GPU (too big for
+    it, a broken GPU, or one held for a long matching) still uses its CPUs either way.
+    """
+
+    row = connection.execute("SELECT value FROM settings WHERE key='dp_cpu_fallback'").fetchone()
+    return row is not None and row[0] == "1"
+
+
 def inputs(connection: sqlite3.Connection, run: sqlite3.Row, request: dict[str, Any], now: float) -> dict[str, Any]:
     """Return a bounded page of live artifact sources, enforcing task-specific tile scope."""
 
@@ -741,4 +754,5 @@ def inputs(connection: sqlite3.Connection, run: sqlite3.Row, request: dict[str, 
                 record["band"] = band
         records.append(record)
     next_offset = offset+len(records)
-    return {"records":records,"next":next_offset if next_offset<len(wanted) else None}
+    return {"records":records,"next":next_offset if next_offset<len(wanted) else None,
+            "cpu_fallback":cpu_fallback_allowed(connection)}

@@ -217,10 +217,12 @@ def dispatch_status(context: Context) -> dict:
             "SELECT state, COUNT(*) FROM runs WHERE state IN ('running','stopping','queued') GROUP BY state").fetchall())
         stop_requested = connection.execute(
             "SELECT COUNT(*) FROM runs WHERE state='running' AND stop_requested=1").fetchone()[0]
+        fallback = connection.execute("SELECT value FROM settings WHERE key='dp_cpu_fallback'").fetchone()
     active = counts.get("running", 0) + counts.get("stopping", 0)
     return {"state": state, "running": counts.get("running", 0), "stopping": counts.get("stopping", 0),
             "queued": counts.get("queued", 0), "stop_requested": stop_requested,
-            "draining": state == "stopped" and active > 0, "idle": state == "stopped" and active == 0}
+            "draining": state == "stopped" and active > 0, "idle": state == "stopped" and active == 0,
+            "cpu_fallback": fallback is not None and fallback[0] == "1"}
 
 
 def drain(context: Context, params: dict) -> Plan:
@@ -243,6 +245,43 @@ def drain(context: Context, params: dict) -> Plan:
         plan.blockers.append("Dispatch is already stopped.")
     if active:
         plan.warnings.append(f"{active} run(s) are in flight; they will finish on their own.")
+    return plan
+
+
+def tile_cpu_fallback(context: Context, params: dict) -> Plan:
+    """Allow or forbid DP tiles that find their GPU busy to compute on their CPUs (setting dp_cpu_fallback)."""
+
+    allow = params.get("allow")
+    if type(allow) is not bool:
+        raise CommandError("allow must be true or false")
+    current = dispatch_status(context)["cpu_fallback"]
+
+    def action() -> dict:
+        connection = sqlite3.connect(context.state / "leader.sqlite", timeout=30)
+        try:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("INSERT INTO settings(key,value) VALUES('dp_cpu_fallback',?) "
+                                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("1" if allow else "0",))
+        finally:
+            connection.close()
+        return {"cpu_fallback": allow}
+
+    plan = Plan(
+        title="Let DP tiles use CPUs" if allow else "Keep DP tiles on GPUs",
+        summary=("A tile that finds its machine's GPU busy may compute on its own CPUs after a bounded wait "
+                 "(half its estimated CPU time, at most 15 minutes). For heavy fields the CPU run is 30-300x "
+                 "slower than the GPU, so this mostly helps light fields." if allow else
+                 "A tile that finds its machine's GPU busy waits its turn instead of falling back to the CPUs, "
+                 "where a heavy tile takes 25-50 minutes. Tiles with no usable GPU (too big for it, a broken "
+                 "GPU, or one held by a long matching) still use their CPUs."),
+        facts={"cpu_fallback": current},
+        action=action,
+        changes=[{"label": "DP tiles on CPUs", "before": "allowed" if current else "off",
+                  "after": "allowed" if allow else "off"}])
+    if current == allow:
+        plan.blockers.append(f"DP tiles on CPUs are already {'allowed' if allow else 'off'}.")
+    plan.items.append("Applies to tiles that start from now on; running tiles keep the policy they started with.")
     return plan
 
 
@@ -951,6 +990,7 @@ COMMANDS: dict[str, Callable[[Context, dict], Plan]] = {
     "dispatch.drain": drain,
     "dispatch.stop": lambda c, p: dispatch(c, p, "stopped"),
     "dispatch.resume": lambda c, p: dispatch(c, p, "running"),
+    "tiles.cpu_fallback": tile_cpu_fallback,
     "run.pause": lambda c, p: run_control(c, p, "pause"),
     "run.resume": lambda c, p: run_control(c, p, "resume"),
     "run.cancel": lambda c, p: run_control(c, p, "cancel"),

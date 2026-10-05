@@ -74,10 +74,17 @@ Status shows each node's `gpus_json`.
   memory as usual.
 - **Opportunistic DP tiles.** Tiles do not request a GPU, because the GPU
   result is identical. In `dp_solver/distributed_solver.py`, a tile lease takes
-  the host-wide lock `/tmp/kh-gpu-<index>.lock` (`gpus.DeviceLock`). It waits up
-  to `KH_GPU_DP_WAIT_SECONDS` (default 120 s), honouring stop requests, then
-  runs `kh_gpu_dp_tile`. If the lock times out or the GPU kernel fails, it runs
-  `kh_dp_tile` on the leased CPUs. Exit 3 (no usable GPU) marks the device
+  the host-wide lock `/tmp/kh-gpu-<index>.lock` (`gpus.DeviceLock`), honouring
+  stop requests, then runs `kh_gpu_dp_tile`. How long it waits is set by the
+  leader setting `dp_cpu_fallback` (the **DP tiles on CPUs** card on the
+  dashboard's Activity tab), which the leader sends with the tile's inputs:
+  - **off (the default since 2026-10-05):** the tile waits for the GPU however
+    long it takes. A heavy tile that gave up after 11–14 minutes then took 25–50
+    minutes on the CPUs, often on its field's critical path.
+  - **allowed:** it waits up to half its estimated CPU time (at most 15 minutes,
+    or `KH_GPU_DP_WAIT_SECONDS`), then runs `kh_dp_tile` on the leased CPUs.
+  Either way a tile with no usable GPU (too big for it, a failed kernel, or a GPU
+  held by a long matching) runs on its CPUs. Exit 3 (no usable GPU) marks the device
   unavailable for 10 minutes, so broken hosts don't retry every tile. The final
   tile progress record carries `"engine": "gpu"|"cpu"`, which is kept in
   `progress_details`. While it waits for the lock, a tile reports a

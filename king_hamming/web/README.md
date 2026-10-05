@@ -196,6 +196,7 @@ way:
 | Feeder | Add fields now… | Runs `launch_dp.py extend` while holding the feeder's lock (password). |
 | Results (empty cell, or Submit a field…), Feeder | Submit a field… | Queues a DP root for any supported p^r (p prime, r odd 3–31) and records it in the feeder's manifest, so its result is collected and matched like any other (password). Details below. |
 | Activity, Problems | Start / Restart feeder | Start runs `launch_dp.py ensure-feeder`; restart calls `restart_owned_feeder` so new feeder code loads (password). |
+| Activity | Keep tiles on GPUs / Allow CPUs… | Sets the leader setting `dp_cpu_fallback` (off by default): whether a DP tile that finds its GPU busy may fall back to its CPUs. Applies to tiles that start afterwards. |
 | Activity | Upgrade workers… / leader… | `launch_dp.py upgrade-workers` / `upgrade-leader` (type the phrase, password). Blocked until no run is active, and the preview lists your uncommitted files. |
 
 **Submit a field** previews:

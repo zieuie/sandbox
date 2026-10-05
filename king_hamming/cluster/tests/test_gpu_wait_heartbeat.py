@@ -37,5 +37,36 @@ class GPUWaitHeartbeatTests(unittest.TestCase):
             distributed_solver.STOP = False
 
 
+class CPUFallbackPolicyTests(unittest.TestCase):
+    def test_off_means_wait_for_the_gpu_however_long_it_takes(self) -> None:
+        from dp_solver.tiles import tile
+        rectangle = tile(29, 7, 4096, 50, 50)
+        self.assertEqual(distributed_solver.gpu_wait_seconds(29, rectangle, 2, cpu_fallback=False), float("inf"))
+        bounded = distributed_solver.gpu_wait_seconds(29, rectangle, 2, cpu_fallback=True)
+        self.assertTrue(0 < bounded <= distributed_solver.MAX_GPU_WAIT_SECONDS)
+
+    def test_the_leader_sends_the_setting_with_the_inputs_and_the_tile_keeps_it(self) -> None:
+        import tempfile
+        import leader
+        from dp_solver import distributed
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            with leader.connect(database) as connection:
+                self.assertFalse(distributed.cpu_fallback_allowed(connection), "off unless turned on")
+                connection.execute("INSERT INTO settings(key,value) VALUES('dp_cpu_fallback','1')")
+                self.assertTrue(distributed.cpu_fallback_allowed(connection))
+        responses = iter([{"records": [1], "next": 1, "cpu_fallback": False}, {"records": [2], "next": None}])
+        original_request, original_policy = distributed_solver.leader_request, dict(distributed_solver.POLICY)
+        distributed_solver.leader_request = lambda arguments, route, body: next(responses)
+        try:
+            arguments = type("A", (), {"run_id": "r", "lease_token": "t"})()
+            self.assertEqual(distributed_solver.descriptions(arguments), [1, 2])
+            self.assertFalse(distributed_solver.POLICY["cpu_fallback"])
+        finally:
+            distributed_solver.leader_request = original_request
+            distributed_solver.POLICY.update(original_policy)
+
+
 if __name__ == "__main__":
     unittest.main()

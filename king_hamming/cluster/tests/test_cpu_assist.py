@@ -84,6 +84,10 @@ class AssistClusterTests(unittest.TestCase):
                 self.assertTrue(holder.acquire(1.0))          # someone else is using the GPU
                 cluster = Cluster(root)
                 try:
+                    # CPU assist is a use of the CPUs, which the leader forbids unless dp_cpu_fallback is on.
+                    import sqlite3
+                    with sqlite3.connect(cluster.database, timeout=30) as connection:
+                        connection.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('dp_cpu_fallback','1')")
                     cluster.worker("a", 4, 2)
                     wait_until(lambda: len(request_json(cluster.url, "GET", "/v1/status")["nodes"]) == 1, "worker")
                     specification = {"program": "dp_distributed", "arguments": {

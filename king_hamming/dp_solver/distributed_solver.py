@@ -11,6 +11,7 @@ else:
 import argparse
 from array import array
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -141,6 +142,11 @@ def check_tile_metadata(directory: Path, rectangle, p: int, r: int) -> None:
 
 
 # Request only the immutable dependency descriptions belonging to the current lease.
+# Policy the leader sends with the input descriptors. A leader from before the setting sends
+# nothing, which keeps the old behaviour (fall back to the CPUs after a bounded wait).
+POLICY={"cpu_fallback":True}
+
+
 def descriptions(arguments, **extra) -> list[dict]:
     """Return paginated input descriptors while enforcing current ownership at the leader."""
 
@@ -150,6 +156,8 @@ def descriptions(arguments, **extra) -> list[dict]:
         if STOP:
             raise InterruptedError("dependency request stopped")
         response=leader_request(arguments,"/v1/tile-input",{"run_id":arguments.run_id,"lease_token":arguments.lease_token,"offset":offset,**extra})
+        if "cpu_fallback" in response:
+            POLICY["cpu_fallback"]=bool(response["cpu_fallback"])
         records.extend(response["records"])
         if response["next"] is None:
             return records
@@ -335,9 +343,11 @@ MAX_GPU_WAIT_SECONDS = 900.0
 # the CPU (30x slower than the GPU it had nearly reached), while a light tile idled for two
 # minutes for a GPU that its own CPUs would beat. Waiting is worth it only while it costs less
 # than the CPU run it avoids, so wait up to half the CPU estimate, within sane bounds.
-def gpu_wait_seconds(p: int, rectangle, threads: int) -> float:
-    """Return how long this tile should wait for the GPU before computing on its CPUs."""
+def gpu_wait_seconds(p: int, rectangle, threads: int, cpu_fallback: bool = True) -> float:
+    """Return how long this tile should wait for the GPU before computing on its CPUs (forever when not allowed)."""
 
+    if not cpu_fallback:
+        return math.inf
     configured=os.environ.get("KH_GPU_DP_WAIT_SECONDS")
     if configured:
         return float(configured)
@@ -486,9 +496,9 @@ def compute_in(arguments, specification: dict, work: Path, scratch: str) -> None
     if (GPU_TILE.exists() and os.environ.get("KH_DISABLE_GPU_DP")!="1" and gpu_fits(p,rectangle,device) and
             not gpus.recently_unavailable(device)):
         lock=gpus.DeviceLock(device)
-        limit=gpu_wait_seconds(p,rectangle,threads)
+        limit=gpu_wait_seconds(p,rectangle,threads,POLICY["cpu_fallback"])
         acquired=lock.acquire(0.0,lambda: STOP,skip_long=True)
-        wide=None if acquired else assist_plan(p,rectangle,cpus)
+        wide=None if acquired or not POLICY["cpu_fallback"] else assist_plan(p,rectangle,cpus)
         if wide is not None:
             slot=gpus.AssistSlot(int(os.environ.get("KH_CPU_ASSIST_SLOTS","1")))
             if slot.acquire():
@@ -543,7 +553,8 @@ def compute_in(arguments, specification: dict, work: Path, scratch: str) -> None
     mode="none" if not counts["band"]+counts["packet"] else "bands" if not counts["packet"] else "packets" if not counts["band"] else "mixed"
     print(json.dumps({"done":cells,"total":cells,"checkpoint_done":cells,"units":"cells","phase":"complete","heartbeat":True,
                       "engine":"cpu-assist" if assisted else "gpu" if computed else "cpu","assist_threads":assisted,
-                      "gpu_wait_limit":round(limit,1),"input_mode":mode,"scratch":scratch,
+                      "gpu_wait_limit":None if math.isinf(limit) else round(limit,1),
+                      "cpu_fallback":POLICY["cpu_fallback"],"input_mode":mode,"scratch":scratch,
                       "input_bytes":fetched["band"]+fetched["packet"],"input_band_bytes":fetched["band"],
                       "bands_published":published,**timings}),flush=True)
 

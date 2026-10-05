@@ -74,6 +74,20 @@ class CommandTests(unittest.TestCase):
         entry = self.audit()[-1]
         self.assertEqual((entry["command"], entry["outcome"], entry["user"]), ("dispatch.stop", "ok", "tester"))
 
+    def test_dp_tiles_on_cpus_is_off_by_default_and_toggles(self) -> None:
+        self.assertFalse(self.client.json("/api/jobs")[2]["dispatch"]["cpu_fallback"])
+        self.assertEqual(self.preview("tiles.cpu_fallback", {"allow": False})[2]["blockers"],
+                         ["DP tiles on CPUs are already off."])
+        status, _, reply = self.run_command("tiles.cpu_fallback", {"allow": True})
+        self.assertEqual((status, reply["result"]), (200, {"cpu_fallback": True}))
+        self.assertTrue(self.client.json("/api/jobs")[2]["dispatch"]["cpu_fallback"])
+        status, _, reply = self.run_command("tiles.cpu_fallback", {"allow": False})
+        self.assertEqual(reply["result"], {"cpu_fallback": False})
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT value FROM settings WHERE key='dp_cpu_fallback'").fetchone()[0], "0")
+        self.assertEqual(self.preview("tiles.cpu_fallback", {"allow": "yes"})[0], 400)
+
     def test_drain_stops_new_work_without_asking_running_work_to_stop(self) -> None:
         status, _, preview = self.preview("dispatch.drain")
         self.assertEqual((status, preview["confirm_text"], preview["blockers"]), (200, None, []))

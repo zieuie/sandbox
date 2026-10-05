@@ -84,6 +84,17 @@ async function draw(container) {
           upgrade). <b>Stop</b> also tells running tiles to quit now; they restart later from the beginning.
           <b>Resume</b> undoes either.</p>` : ''}
       </div>
+      ${data.dispatch ? html`<div class="card">
+        <h3>DP tiles on CPUs <span class="state state-${data.dispatch.cpu_fallback ? 'running' : 'unknown'}">${data.dispatch.cpu_fallback ? 'allowed' : 'off'}</span></h3>
+        <p>${data.dispatch.cpu_fallback
+          ? 'A tile that finds its GPU busy falls back to its CPUs after a bounded wait.'
+          : 'Tiles wait for their GPU instead of falling back to their CPUs (a heavy tile takes 25–50 minutes on CPUs). Tiles with no usable GPU still use CPUs.'}</p>
+        ${operator ? html`<div class="cmd-row">
+          ${data.dispatch.cpu_fallback
+            ? button('tiles.cpu_fallback', { allow: false }, 'Keep tiles on GPUs')
+            : button('tiles.cpu_fallback', { allow: true }, 'Allow CPUs…')}
+        </div>` : ''}
+      </div>` : ''}
       ${operator ? html`<div class="card">
         <h3>Processes</h3>
         <div class="cmd-row">
