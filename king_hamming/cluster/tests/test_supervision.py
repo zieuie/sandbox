@@ -415,6 +415,27 @@ class SupervisionTests(unittest.TestCase):
                 self.assertEqual(row["stop_requested"], 0)
                 self.assertIsNone(row["last_solver_heartbeat"])
 
+    def test_a_new_phase_counts_as_progress(self) -> None:
+        """A tile that waited minutes for its GPU and has just started computing is not stuck."""
+
+        with tempfile.TemporaryDirectory(prefix="kh-status-test-") as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            handler.dispatch_post("/v1/register", {"node_name": "worker"})
+            queued = handler.dispatch_post("/v1/enqueue", {"specification": {"program": "demo"}})
+            job = handler.dispatch_post("/v1/lease", {"node_name": "worker"})["job"]
+            identity = {"run_id": queued["run_id"], "lease_token": job["lease_token"]}
+            reports = ((100.0, "fetching", 20000), (110.0, "waiting for GPU", 0), (400.0, "waiting for GPU", 0),
+                       (420.0, "computing", 0), (430.0, "computing", 0))
+            for now, phase, done in reports:
+                with patch.object(leader.time, "time", return_value=now):
+                    handler.dispatch_post("/v1/progress", {**identity, "done": done, "total": 10**7,
+                                                           "checkpoint_done": 0, "phase": phase})
+            with leader.connect(database) as connection:
+                row = connection.execute("SELECT * FROM runs WHERE run_id=?", (queued["run_id"],)).fetchone()
+                self.assertEqual((row["last_progress_at"], row["last_solver_heartbeat"]), (420.0, 430.0))
+
     # Repeated heartbeats must not reset the mathematical-progress timestamp.
     def test_heartbeat_work_and_checkpoint_are_distinct(self) -> None:
         """Persist status timestamps separately and latch stop across a quick resume."""

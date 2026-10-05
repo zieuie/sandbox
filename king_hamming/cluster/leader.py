@@ -1564,7 +1564,10 @@ def make_handler(
                             details[key[:64]] = value[:256] if isinstance(value, str) else value
                         encoded_details = canonical_json(details).decode("utf-8")
 
-                        advanced = done > row["progress_done"]
+                        # A new phase is progress too: a tile that waited minutes for its GPU and has
+                        # just started computing (from done=0 again) is not stuck.
+                        advanced = (done > row["progress_done"] or
+                                    str(request.get("phase", "computing")) != row["progress_phase"])
                         checkpoint_advanced = checkpoint_done > row["progress_checkpoint_done"]
                         connection.execute(
                             "UPDATE runs SET progress_done=?, progress_total=?, progress_message=?, "
