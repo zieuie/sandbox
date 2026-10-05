@@ -166,9 +166,16 @@ def excess_plan(connection: sqlite3.Connection, node: str, now: float, limit: in
 
 
 def queue_trim(connection: sqlite3.Connection, node: str, digest: str, reason: str, now: float) -> None:
-    """Forget node's copy of digest and queue its blob for deletion on that node."""
+    """Forget node's copy of digest and queue its blob for deletion on that node.
+
+    A pending re-check of that copy (the node restarted and is revalidating its disk) is
+    cancelled too: otherwise the check could find the file before the deletion ran and record
+    a verified copy of a file that was then deleted, which replication kept failing to fetch.
+    """
 
     connection.execute("DELETE FROM replicas WHERE artifact_hash=? AND node_name=?", (digest, node))
+    connection.execute("DELETE FROM node_revalidation WHERE node_name=? AND kind='artifact' AND digest=?",
+                       (node, digest))
     connection.execute("INSERT OR IGNORE INTO artifact_trim(node_name,artifact_hash,reason,created) VALUES(?,?,?,?)",
                        (node, digest, reason, now))
 

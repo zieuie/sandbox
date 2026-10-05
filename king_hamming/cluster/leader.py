@@ -1080,8 +1080,13 @@ def make_handler(
                             (node["node_name"], kind, digest),
                         ).fetchone()
                         if pending is None:
-                            raise ValueError("revalidation result is not pending")
-                        if valid and kind == "artifact":
+                            # Cancelled since the batch was handed out (its file was queued for
+                            # deletion): never record it, and keep the rest of the batch.
+                            continue
+                        trimmed = kind == "artifact" and connection.execute(
+                            "SELECT 1 FROM artifact_trim WHERE node_name=? AND artifact_hash=?",
+                            (node["node_name"], digest)).fetchone() is not None
+                        if valid and kind == "artifact" and not trimmed:
                             connection.execute(
                                 "INSERT OR REPLACE INTO replicas(artifact_hash,node_name,location,created) "
                                 "VALUES(?,?,?,?)", (digest, node["node_name"],
@@ -1133,6 +1138,12 @@ def make_handler(
                     )
                     connection.executemany(
                         "DELETE FROM artifact_trim WHERE node_name=? AND artifact_hash=?",
+                        [(node["node_name"], digest) for digest in hashes],
+                    )
+                    # The node has deleted these blobs, so it holds no copy of them, whatever the
+                    # index says; a stale claim would send replication to a 404 forever.
+                    connection.executemany(
+                        "DELETE FROM replicas WHERE node_name=? AND artifact_hash=?",
                         [(node["node_name"], digest) for digest in hashes],
                     )
                     return {"ok": True}

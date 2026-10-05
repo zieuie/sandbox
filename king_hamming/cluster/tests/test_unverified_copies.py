@@ -95,6 +95,34 @@ class UnverifiedCopyTests(unittest.TestCase):
         with leader.connect(self.database) as connection:
             self.assertEqual(self.claims(connection), {"b": 1, "c": 1})
 
+    def test_a_copy_queued_for_deletion_is_not_revived_by_its_revalidation(self) -> None:
+        """The race found on 2026-10-04: retirement queued a restarted node's copy for deletion while
+        its re-check was pending; the check then re-recorded it as verified, and the file was deleted."""
+        other = "cd" * 32
+        with leader.connect(self.database) as connection:
+            connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created,size) VALUES(?,3,1,9)",
+                               (other,))
+            connection.execute("INSERT INTO replicas(artifact_hash,node_name,location,created) VALUES(?,?,?,1)",
+                               (other, "a", f"http://a:8042/blobs/{other}"))
+        self.register("a")  # both copies on a now await a re-check
+        with leader.connect(self.database) as connection:
+            retention.queue_trim(connection, "a", DIGEST, "finished field", time.time())
+        # The agent reports a batch fetched before the trim: the trimmed copy is skipped, the rest kept.
+        self.handler.dispatch_post("/v1/revalidation-batch-done", {
+            "node_name": "a", "session_id": self.sessions["a"],
+            "records": [{"kind": "artifact", "digest": DIGEST, "valid": True},
+                        {"kind": "artifact", "digest": other, "valid": True}]})
+        with leader.connect(self.database) as connection:
+            self.assertNotIn("a", self.claims(connection))
+            self.assertEqual(connection.execute("SELECT verified FROM replicas WHERE node_name='a' AND artifact_hash=?",
+                                                (other,)).fetchone()[0], 1)
+
+    def test_a_confirmed_deletion_drops_the_nodes_claim(self) -> None:
+        self.handler.dispatch_post("/v1/gc-done", {"node_name": "b", "session_id": self.sessions["b"],
+                                                    "blob_hashes": [DIGEST]})
+        with leader.connect(self.database) as connection:
+            self.assertEqual(self.claims(connection), {"a": 1, "c": 1})
+
     def test_queue_entries_from_an_older_leader_become_unverified_claims(self) -> None:
         with leader.connect(self.database) as connection:
             connection.execute("DELETE FROM replicas WHERE node_name='a'")

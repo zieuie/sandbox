@@ -104,6 +104,35 @@ The first live tests were the agent restarts on gawain and pellinore and then al
 machines on 2026-10-04: thousands of copies went unverified and back to verified within
 seconds, none were deleted, no hold appeared, and nothing was re-copied.
 
+## Follow-up: a race in the fix (found and fixed the same night)
+
+Once the agents' logs carried timestamps, every worker turned out to be logging 10 to
+25 "replication will retry: no valid blob source: HTTP Error 404" lines a minute. Layer 4
+had a race with the retirement of finished fields' tiles:
+
+1. A worker restarts, and its copy records are marked unverified, each queued for a re-check.
+2. The finished field's tiles are retired: every holder's record of each tile file,
+   unverified ones included, is deleted, and the files are queued for deletion.
+3. The re-check, still holding its list, finds the file on disk and reports it valid; the
+   leader re-records it as a verified copy.
+4. The worker's cleanup deletes the file. Nothing removes the revived record.
+
+The result was 3,680 "verified" copies of files that no longer existed, all edge bands of
+the finished 7¹³ field (the retirement scan never revisits bands once their tile is gone),
+and replication trying to fetch them forever. No live field was affected, because
+retirement is the only step that deletes unverified records and it only touches finished
+fields.
+
+Fixed on 2026-10-04:
+- Queuing a copy for deletion (`retention.queue_trim`) cancels its pending re-check, and a
+  re-check result for a cancelled or deletion-queued copy is ignored instead of recorded.
+- A worker's confirmation that it deleted files (`/v1/gc-done`) drops its records of them,
+  so a stale record can't outlive its file whatever the cause.
+- `distributed.retire_orphan_bands` (run once by hand; about a second) queued the 3,680
+  stale records for deletion.
+- Tests reproduce the race (`cluster/tests/test_unverified_copies.py`); they fail on the
+  code from before the fix.
+
 ## Lessons
 
 - **Don't delete a claim you merely haven't re-checked.** Keep it, marked unverified, and
@@ -112,6 +141,10 @@ seconds, none were deleted, no hold appeared, and nothing was re-copied.
   vanish at once, the bookkeeping is far more likely to be wrong than the disks.
 - **Test the fleet-wide case.** One silent worker and every worker restarting at once are
   different failure modes.
+- **A new state needs every writer audited, not just every reader.** Layer 4 decided per
+  *reader* how to treat unverified copies, but a *writer* (tile retirement) could delete one
+  while its re-check was in flight. Ask what each step that adds, removes or re-records the
+  state does when another step is halfway through.
 - **Measure net progress, not completions.** Distinct finished units gained per hour would
   have exposed this immediately; completions per minute hid it.
 

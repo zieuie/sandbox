@@ -251,6 +251,7 @@ def reuse_tiles(connection: sqlite3.Connection, parent: sqlite3.Row, now: float)
 RETIRE_SCAN_SECONDS = 120
 RETIRE_BATCH = 100
 _ACTIVE_ROOT = "('waiting','queued','running','stopping','paused')"
+_ACTIVE_ROOT_STATES = {"waiting", "queued", "running", "stopping", "paused"}
 
 
 # Tile packets are only scaffolding for the final split: once a field's result is safely stored,
@@ -298,6 +299,41 @@ def retire_finished_tiles(connection: sqlite3.Connection, now: float, force: boo
     if len(packets) >= RETIRE_BATCH:  # more are waiting: scan again on the next pass
         connection.execute("UPDATE settings SET value='0' WHERE key='tile_retire_scanned'")
     return len(packets)
+
+
+def retire_orphan_bands(connection: sqlite3.Connection, now: float) -> int:
+    """Queue deletion of band copies whose tile packet has already been retired; return how many.
+
+    A one-off repair, run by hand (not by the scheduler: the check costs about a second on
+    the live database). Until 2026-10-04 a restarted worker's pending revalidation could
+    re-record a band copy that retire_finished_tiles had just queued for deletion; the file
+    was then deleted, leaving a verified claim that replication tried to fetch forever (404).
+    queue_trim now cancels such checks, and gc-done drops claims on deleted blobs. A band is
+    swept only when its packet has no copies left and every root using the packet is
+    finished, the same rule retire_finished_tiles applies to the packet itself.
+    """
+
+    claims = connection.execute(
+        "SELECT h.node_name,h.artifact_hash,b.packet_hash FROM tile_bands b "
+        "JOIN replicas h ON h.artifact_hash=b.band_hash "
+        "WHERE NOT EXISTS (SELECT 1 FROM replicas p WHERE p.artifact_hash=b.packet_hash)").fetchall()
+    if not claims:
+        return 0
+    # runs has no index on artifact_hash, so read each finished tile's roots in one pass.
+    finished, active = set(), set()
+    for packet, root_state in connection.execute(
+            "SELECT c.artifact_hash,root.state FROM runs c JOIN runs root ON root.run_id=c.parent_run_id "
+            "WHERE c.state='complete' AND c.artifact_hash IS NOT NULL "
+            "AND json_extract(c.specification,'$.program')='dp_tile'"):
+        finished.add(packet)
+        if root_state in _ACTIVE_ROOT_STATES:
+            active.add(packet)
+    swept = 0
+    for node, digest, packet in claims:
+        if packet in finished and packet not in active:
+            retention_module.queue_trim(connection, node, digest, "orphaned band", now)
+            swept += 1
+    return swept
 
 
 # Durable means complete with at least two verified replicas on live nodes, read in one query.

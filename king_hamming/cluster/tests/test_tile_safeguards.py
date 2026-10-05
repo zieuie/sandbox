@@ -129,6 +129,22 @@ class TileSafeguardTests(unittest.TestCase):
             self.assertIsNone(connection.execute(
                 "SELECT value FROM settings WHERE key=?", (f"tile_clear_hold:{self.root}",)).fetchone())
 
+    def test_band_copies_of_retired_packets_are_swept_once_their_field_is_done(self) -> None:
+        with leader.connect(self.database) as connection:
+            packets = [row[0] for row in connection.execute("SELECT artifact_hash FROM artifacts ORDER BY artifact_hash LIMIT 3")]
+            for index, packet in enumerate(packets):
+                band = f"{index + 1:x}" * 64
+                connection.execute("INSERT INTO artifacts(artifact_hash,target_replicas,created,size) VALUES(?,3,1,9)", (band,))
+                connection.execute("INSERT INTO tile_bands(packet_hash,kind,band_hash) VALUES(?,'right',?)", (packet, band))
+                connection.execute("INSERT INTO replicas(artifact_hash,node_name,location,created) VALUES(?,'a','x',1)", (band,))
+            # The first two packets were retired (no copies left); the third still has its copies.
+            connection.execute("DELETE FROM replicas WHERE artifact_hash IN (?,?)", packets[:2])
+            self.assertEqual(distributed.retire_orphan_bands(connection, self.now), 0, "the field is still active")
+            connection.execute("UPDATE runs SET state='complete' WHERE run_id=?", (self.root,))
+            self.assertEqual(distributed.retire_orphan_bands(connection, self.now), 2)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM artifact_trim WHERE reason='orphaned band'").fetchone()[0], 2)
+            self.assertEqual(distributed.retire_orphan_bands(connection, self.now), 0)
+
     def test_the_upgrade_check_sees_lost_tiles_and_holds(self) -> None:
         from dp_solver import launch_dp
         before = launch_dp.tile_progress(self.database)

@@ -144,7 +144,9 @@ New agent incarnations revalidate retained disk contents. Until then their
 replica claims stay in the index marked unverified (`replicas.verified=0`):
 they count toward copy targets and keep finished tiles from looking lost, but
 no reader is sent to them, retention does not trim them, and a copy that fails
-the check is forgotten. The index survives leader restart. Final artifacts target
+the check is forgotten. Queuing a copy for deletion cancels its pending check, and a
+node's confirmed deletion drops its claim, so a check can never re-record a copy that
+is about to be deleted. The index survives leader restart. Final artifacts target
 three worker copies when enough workers are available. Adapter validation checks
 results before publication, and `verify_artifact.py` delegates manual verification
 to the registered algorithm with optional checksum and work limits.
