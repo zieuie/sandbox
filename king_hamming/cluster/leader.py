@@ -585,6 +585,18 @@ def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
 
 
 # Build a request handler bound to one database path.
+class LeaderHTTPServer(ThreadingHTTPServer):
+    """The leader's HTTP server, with a listen backlog sized for the fleet.
+
+    socketserver's default backlog is 5. Agents open about 100 connections a second, in bursts,
+    and more with short DP tiles (5^15): by 2026-10-06 merlin's kernel had dropped 430,963
+    connections from the full queue, and the half-open connections ended as "connection reset
+    by peer" on both sides. The kernel allows up to net.core.somaxconn (4096 on merlin).
+    """
+
+    request_queue_size = 1024
+
+
 def make_handler(
     database: Path, scheduler: SchedulerHealth | None = None,
 ) -> type[BaseHTTPRequestHandler]:
@@ -1799,7 +1811,7 @@ def main() -> int:
     initialize(arguments.database, arguments.checkpoint_seconds, arguments.lease_seconds, arguments.max_checkpoint_bytes, arguments.checkpoint_keep, arguments.visits_per_second)
     host, port_text = arguments.listen.rsplit(":", 1)
     scheduler_health = SchedulerHealth(max(10.0, min(30.0, arguments.lease_seconds / 2)))
-    server = ThreadingHTTPServer(
+    server = LeaderHTTPServer(
         (host, int(port_text)), make_handler(arguments.database, scheduler_health),
     )
     print(f"leader listening on http://{host}:{port_text}", flush=True)
