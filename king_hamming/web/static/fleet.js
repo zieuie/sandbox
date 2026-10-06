@@ -1,4 +1,4 @@
-// Fleet: one card per machine with CPUs, memory, current work and 24 h utilisation.
+// Fleet: one card per machine with CPUs, memory, current work, 24 h utilisation and heat.
 import {
   html, setHTML, field, fmtBytes, fmtDuration, fmtInt, pct, sparkline, bar, tooltips, now, gpuName, api, ago,
 } from './util.js';
@@ -175,7 +175,96 @@ function gpuUtil(node) {
   </div>`;
 }
 
-function card(node, generatedAt, fleetDisk) {
+// ----- heat: live gauges and a 24 h history (agents report temperatures since 2026-10-06) -----
+const HEAT_KINDS = [['cpu', 'CPU'], ['gpu', 'GPU'], ['nvme', 'NVMe']];
+const HEAT_LOW = 20;    // °C at the bottom of the chart and of each gauge
+const HEAT_HIGH = 105;  // °C at the top
+
+function heatLevel(value, limits) {
+  if (value === null || value === undefined || !limits) return 'none';
+  if (value >= limits.hot) return 'hot';
+  if (value >= limits.warm) return 'warm';
+  return 'cool';
+}
+
+function heatGauge(kind, name, value, limits) {
+  if (value === null || value === undefined) return '';
+  const level = heatLevel(value, limits);
+  const fill = Math.max(0, Math.min(1, (value - HEAT_LOW) / (HEAT_HIGH - HEAT_LOW))) * 100;
+  return html`<span class="heat-chip heat-${level}" title="${name}: ${value.toFixed(0)} °C now (warm from ${limits.warm}, hot from ${limits.hot})">
+    <span class="heat-name">${name}</span>
+    <svg class="heat-tube" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
+      <rect class="heat-track" x="0" y="0" width="100" height="6" rx="3"></rect>
+      <rect class="heat-fill" x="0" y="0" width="${fill.toFixed(1)}" height="6" rx="3"></rect>
+    </svg>
+    <b>${value.toFixed(0)}°</b></span>`;
+}
+
+// One line per sensor; a bucket without a reading breaks the line.
+function heatLines(series, width, height) {
+  const step = width / Math.max(1, series.length - 1);
+  const y = (value) => (height - (Math.max(HEAT_LOW, Math.min(HEAT_HIGH, value)) - HEAT_LOW) / (HEAT_HIGH - HEAT_LOW) * height).toFixed(1);
+  const segments = [];
+  let current = [];
+  series.forEach((value, i) => {
+    if (value === null || value === undefined) {
+      if (current.length) segments.push(current);
+      current = [];
+    } else {
+      current.push(`${(i * step).toFixed(1)},${y(value)}`);
+    }
+  });
+  if (current.length) segments.push(current);
+  return segments;
+}
+
+function heatChart(history, limits, width = 96, height = 40) {
+  // One dashed guide at the CPU's warm limit (80 °C, also the GPU's); the gauges carry the rest.
+  const guide = (height - (limits.cpu.warm - HEAT_LOW) / (HEAT_HIGH - HEAT_LOW) * height).toFixed(1);
+  const guides = html`<line class="heat-guide" x1="0" x2="${width}" y1="${guide}" y2="${guide}"></line>`;
+  const lines = HEAT_KINDS.flatMap(([kind]) => heatLines(history[kind] || [], width, height).map((points) =>
+    points.length === 1
+      ? html`<circle class="heat-${kind}-dot" cx="${points[0].split(',')[0]}" cy="${points[0].split(',')[1]}" r="0.9"></circle>`
+      : html`<polyline class="heat-line heat-${kind}-line" points="${points.join(' ')}"></polyline>`));
+  return html`<svg class="spark heat-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+    ${guides}${lines}</svg>`;
+}
+
+function heatSection(node, limits) {
+  const heat = node.heat;
+  if (!heat || !limits) return '';
+  const latest = heat.now || {};
+  const peaks = HEAT_KINDS.map(([kind, name]) => {
+    const values = (heat.history[kind] || []).filter((value) => value !== null && value !== undefined);
+    return values.length ? `${name} ${Math.max(...values).toFixed(0)}°` : null;
+  }).filter(Boolean);
+  const gauges = HEAT_KINDS.map(([kind, name]) => heatGauge(kind, name, latest[`${kind}_c`], limits[kind]));
+  return html`<div class="util heat">
+    <div class="util-head"><span>Heat, 24 h</span><span>${peaks.length ? `peak ${peaks.join(' · ')}` : ''}</span></div>
+    <div class="heat-gauges">${gauges}</div>
+    ${heatChart(heat.history, limits)}
+    <div class="heat-legend">${HEAT_KINDS.filter(([kind]) => (heat.history[kind] || []).some((v) => v !== null))
+      .map(([kind, name]) => html`<span><span class="heat-key heat-${kind}-key"></span>${name}</span>`)}
+      <span class="hint">${HEAT_LOW}–${HEAT_HIGH} °C, dashed ${limits.cpu.warm} °C</span></div>
+  </div>`;
+}
+
+// The hottest reading in the fleet now, relative to its own limits.
+function hottest(nodes, limits) {
+  let best = null;
+  nodes.forEach((node) => {
+    const latest = (node.heat && node.heat.now) || {};
+    HEAT_KINDS.forEach(([kind, name]) => {
+      const value = latest[`${kind}_c`];
+      if (value === null || value === undefined || !limits || !limits[kind]) return;
+      const share = value / limits[kind].hot;
+      if (!best || share > best.share) best = { share, text: `${node.hostname} ${name} ${value.toFixed(0)} °C`, level: heatLevel(value, limits[kind]) };
+    });
+  });
+  return best;
+}
+
+function card(node, generatedAt, fleetDisk, heatLimits) {
   const alive = node.state !== 'unavailable';
   const average = node.utilization.length
     ? node.utilization.reduce((a, b) => a + b, 0) / node.utilization.length : 0;
@@ -203,6 +292,7 @@ function card(node, generatedAt, fleetDisk) {
       ${sparkline(node.utilization)}
     </div>
     ${gpuUtil(node)}
+    ${heatSection(node, heatLimits)}
     <footer class="node-foot">${node.cpus.length} logical / ${node.physical_cores || '?'} cores ·
       runtime ${node.runtime_version || '?'} · storage ${node.storage_validation || '?'}</footer>
   </article>`;
@@ -220,6 +310,7 @@ export function render(container, snapshot) {
   const busy = nodes.reduce((sum, n) => sum + n.cpus.filter((c) => c.state === 'busy').length, 0);
   const average = nodes.length ? nodes.reduce((sum, n) =>
     sum + n.utilization.reduce((a, b) => a + b, 0) / Math.max(1, n.utilization.length), 0) / nodes.length : 0;
+  const hot = hottest(nodes, fleet.heat_limits);
 
   setHTML(container, html`
     <section class="panel">
@@ -230,7 +321,8 @@ export function render(container, snapshot) {
       </div>
       <div>
         <p class="hint">${healthy}/${nodes.length} machines healthy · ${busy}/${allocatable} CPUs allocated now ·
-          average CPU use over 24 h ${pct(average)}. Allocation is reserved capacity; the graph is measured use.</p>
+          average CPU use over 24 h ${pct(average)}${hot ? html` · hottest now: <span class="heat-text heat-${hot.level}">${hot.text}</span>` : ''}.
+          Allocation is reserved capacity; the graph is measured use.</p>
       </div>
       ${diskSummary(fleet, snapshot.generated_at || now())}
       <div class="legend">
@@ -238,7 +330,7 @@ export function render(container, snapshot) {
         <span class="legend-item"><span class="cpu cpu-free"></span>Free</span>
         <span class="legend-item"><span class="cpu cpu-reserved"></span>Not schedulable (leader core)</span>
       </div>
-      <div class="node-grid">${nodes.map((n) => card(n, snapshot.generated_at || now(), fleet.disk))}</div>
+      <div class="node-grid">${nodes.map((n) => card(n, snapshot.generated_at || now(), fleet.disk, fleet.heat_limits))}</div>
     </section>`);
 
   clearTimeout(diskRecheck);

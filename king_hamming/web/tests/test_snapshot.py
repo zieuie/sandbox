@@ -102,7 +102,8 @@ class SnapshotTests(unittest.TestCase):
         connection.execute("CREATE TABLE IF NOT EXISTS gpu_usage_samples (node_name TEXT, gpu_index INTEGER, "
                            "util_percent INTEGER, memory_used_bytes INTEGER, recorded REAL)")
         for age, util in ((3600, 20), (3590, 40), (30, 90)):
-            connection.execute("INSERT INTO gpu_usage_samples VALUES('dp-151',0,?,?,?)", (util, 1000 + util, NOW - age))
+            connection.execute("INSERT INTO gpu_usage_samples(node_name,gpu_index,util_percent,memory_used_bytes,recorded) "
+                               "VALUES('dp-151',0,?,?,?)", (util, 1000 + util, NOW - age))
         connection.commit()
         connection.close()
         nodes = {card["hostname"]: card for card in self.build()["fleet"]["nodes"]}
@@ -112,6 +113,42 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(merlin["gpu_now"], {"util": 90, "memory_used_bytes": 1090})
         self.assertIsNone(other["gpu_utilization"])  # a node that reports no samples shows no graph
         self.assertIsNone(other["gpu_now"])
+
+    def test_heat_gauges_history_and_hot_warning(self) -> None:
+        connection = sqlite3.connect(self.deployments / "live" / "leader.sqlite")
+        connection.execute("CREATE TABLE IF NOT EXISTS thermal_samples (node_name TEXT, cpu_c REAL, nvme_c REAL, recorded REAL)")
+        connection.execute("CREATE TABLE IF NOT EXISTS gpu_usage_samples (node_name TEXT, gpu_index INTEGER, "
+                           "util_percent INTEGER, memory_used_bytes INTEGER, temp_c INTEGER, recorded REAL)")
+        for age, cpu, nvme in ((7200, 70.0, 50.0), (7100, 75.0, 52.0), (60, 96.0, 55.0)):
+            connection.execute("INSERT INTO thermal_samples(node_name,cpu_c,nvme_c,recorded) VALUES('dp-151',?,?,?)",
+                               (cpu, nvme, NOW - age))
+        for index, temperature in ((0, 61), (1, 66)):   # two cards: the hotter one counts
+            connection.execute("INSERT INTO gpu_usage_samples(node_name,gpu_index,util_percent,memory_used_bytes,temp_c,"
+                               "recorded) VALUES('dp-151',?,10,1,?,?)", (index, temperature, NOW - 30))
+        connection.execute("INSERT INTO thermal_samples(node_name,cpu_c,nvme_c,recorded) VALUES('dp-101',55.0,NULL,?)",
+                           (NOW - 3 * 3600,))  # stale
+        connection.commit()
+        connection.close()
+        built = self.build()
+        fleet = built["fleet"]
+        nodes = {card["hostname"]: card for card in fleet["nodes"]}
+        merlin = nodes["merlin"]["heat"]
+        self.assertEqual(merlin["now"]["cpu_c"], 96.0)
+        self.assertEqual(merlin["now"]["gpu_c"], 66)
+        self.assertEqual(merlin["now"]["nvme_c"], 55.0)
+        self.assertEqual(len(merlin["history"]["cpu"]), len(nodes["merlin"]["utilization"]))
+        self.assertEqual(max(value for value in merlin["history"]["cpu"] if value is not None), 96.0)
+        self.assertIn(75.0, merlin["history"]["cpu"])          # the bucket keeps its maximum
+        self.assertEqual(nodes["fearless"]["heat"]["now"], {"cpu_c": None, "gpu_c": None, "nvme_c": None,
+                                                            "recorded": None})   # history only, no live reading
+        silent = [card for name, card in nodes.items() if name not in ("merlin", "fearless")]
+        self.assertTrue(silent and all(card["heat"] is None for card in silent))   # no samples, no gauges
+        self.assertEqual(fleet["heat_limits"]["cpu"], {"warm": 80, "hot": 95})
+        # 96 °C is past the CPU's hot limit: a Problems warning; the GPU at 66 °C is fine.
+        groups = {entry["group"]: entry for entry in built["problems"]["active"]}
+        self.assertEqual(groups["hot:dp-151:cpu"]["severity"], "warning")
+        self.assertIn("96 °C", groups["hot:dp-151:cpu"]["title"])
+        self.assertNotIn("hot:dp-151:gpu", groups)
 
     def test_gpu_block_run(self) -> None:
         import base64, hashlib

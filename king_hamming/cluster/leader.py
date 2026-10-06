@@ -31,6 +31,7 @@ import retention
 import replication
 import adapters
 import gpus
+import thermal
 from resources import ResourceRequest, fits as resource_fits, normalized_slots
 
 SCHEMA_VERSION = 7
@@ -95,6 +96,13 @@ CREATE TABLE IF NOT EXISTS gpu_usage_samples (
     recorded REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS gpu_usage_recorded ON gpu_usage_samples(recorded);
+CREATE TABLE IF NOT EXISTS thermal_samples (
+    node_name TEXT NOT NULL,
+    cpu_c REAL,
+    nvme_c REAL,
+    recorded REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS thermal_recorded ON thermal_samples(recorded);
 CREATE TABLE IF NOT EXISTS nodes (
     node_name TEXT PRIMARY KEY,
     address TEXT NOT NULL,
@@ -519,6 +527,9 @@ def initialize(
         for name, definition in additions.items():
             if name not in columns:
                 connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+        gpu_sample_columns = {row["name"] for row in connection.execute("PRAGMA table_info(gpu_usage_samples)")}
+        if "temp_c" not in gpu_sample_columns:
+            connection.execute("ALTER TABLE gpu_usage_samples ADD COLUMN temp_c INTEGER")
         node_columns = {row["name"] for row in connection.execute("PRAGMA table_info(nodes)")}
         if "storage_free_bytes" not in node_columns:
             connection.execute("ALTER TABLE nodes ADD COLUMN storage_free_bytes INTEGER NOT NULL DEFAULT 0")
@@ -585,6 +596,10 @@ def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
 
 
 # Build a request handler bound to one database path.
+THERMAL_SECONDS = 60.0          # one temperature row per machine per minute
+LAST_THERMAL: dict[str, float] = {}
+
+
 class LeaderHTTPServer(ThreadingHTTPServer):
     """The leader's HTTP server, with a listen backlog sized for the fleet.
 
@@ -1088,10 +1103,18 @@ def make_handler(
                         # Live GPU usage, kept 7 days like the CPU samples; absent from older agents.
                         for stat in gpus.normalized_stats(request.get("gpu_stats")):
                             connection.execute(
-                                "INSERT INTO gpu_usage_samples(node_name,gpu_index,util_percent,memory_used_bytes,recorded) "
-                                "VALUES(?,?,?,?,?)", (request["node_name"], stat["index"], stat["util_percent"],
-                                                      stat["memory_used_bytes"], now))
+                                "INSERT INTO gpu_usage_samples(node_name,gpu_index,util_percent,memory_used_bytes,"
+                                "temp_c,recorded) VALUES(?,?,?,?,?,?)",
+                                (request["node_name"], stat["index"], stat["util_percent"],
+                                 stat["memory_used_bytes"], stat.get("temp_c"), now))
                         connection.execute("DELETE FROM gpu_usage_samples WHERE recorded<?", (now - 7 * 86400,))
+                    heat = thermal.normalized(request.get("thermal")) if route == "/v1/heartbeat" else {}
+                    if heat and now - LAST_THERMAL.get(request["node_name"], 0.0) >= THERMAL_SECONDS:
+                        # CPU and NVMe temperatures for the heat gauges: one row a minute, kept 7 days.
+                        LAST_THERMAL[request["node_name"]] = now
+                        connection.execute("INSERT INTO thermal_samples(node_name,cpu_c,nvme_c,recorded) VALUES(?,?,?,?)",
+                                           (request["node_name"], heat.get("cpu_c"), heat.get("nvme_c"), now))
+                        connection.execute("DELETE FROM thermal_samples WHERE recorded<?", (now - 7 * 86400,))
                     return {"ok": True, "heartbeat_seconds": min(10.0, lease_seconds / 3),
                             "storage_validation_mode": validation_mode}
 

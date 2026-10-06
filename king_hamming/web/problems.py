@@ -42,6 +42,14 @@ def current_conditions(snapshot: dict, connection: sqlite3.Connection, now: floa
                               f"{node['hostname']} is not sending heartbeats",
                               f"last heartbeat {int(node['heartbeat_age'])} s ago",
                               now - node["heartbeat_age"], "#fleet"))
+        latest = (node.get("heat") or {}).get("now") or {}
+        for kind, name in (("cpu", "CPU"), ("gpu", "GPU"), ("nvme", "NVMe drive")):
+            limits = (fleet.get("heat_limits") or {}).get(kind)
+            value = latest.get(f"{kind}_c")
+            if node["state"] != "unavailable" and limits and value is not None and value >= limits["hot"]:
+                found.append(item("warning", f"hot:{node['name']}:{kind}",
+                                  f"{node['hostname']}'s {name} is at {value:.0f} °C",
+                                  f"hot from {limits['hot']} °C; check its cooling", latest.get("recorded"), "#fleet"))
         for work in node["work"]:
             health = work["health"]
             if health in {"stalled", "heartbeat-missing"}:

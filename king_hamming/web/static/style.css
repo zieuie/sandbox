@@ -675,3 +675,24 @@ nav.tabs a.active { background: none; box-shadow: none; color: var(--ink); font-
 .gpu-util .spark-line { stroke: #76b900; }
 .gpu-summary p { margin: 0.4rem 0; }
 .gpu-summary table { max-width: 22rem; }
+
+/* heat gauges and history (Fleet cards) */
+.heat-gauges { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 2px 0 4px; font-size: 12px; }
+.heat-chip { display: inline-flex; align-items: center; gap: 4px; }
+.heat-name { color: var(--muted); }
+.heat-tube { width: 42px; height: 6px; }
+.heat-track { fill: var(--soft); }
+.heat-fill { fill: #2f9e6b; }
+.heat-warm .heat-fill { fill: var(--warn); }
+.heat-hot .heat-fill { fill: #d0453b; }
+.heat-warm b, .heat-text.heat-warm { color: var(--warn); }
+.heat-hot b, .heat-text.heat-hot { color: #d0453b; }
+svg.spark.heat-chart { height: 56px; }
+.heat-chart .heat-line { fill: none; stroke-width: 1.2; vector-effect: non-scaling-stroke; }
+.heat-guide { stroke: var(--line); stroke-dasharray: 2 2; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.heat-cpu-line { stroke: #e07a3f; } .heat-cpu-dot { fill: #e07a3f; }
+.heat-gpu-line { stroke: #76b900; } .heat-gpu-dot { fill: #76b900; }
+.heat-nvme-line { stroke: #3f78e0; } .heat-nvme-dot { fill: #3f78e0; }
+.heat-legend { display: flex; gap: 10px; font-size: 11px; color: var(--muted); margin-top: 2px; }
+.heat-key { display: inline-block; width: 10px; height: 2px; margin-right: 4px; vertical-align: middle; }
+.heat-cpu-key { background: #e07a3f; } .heat-gpu-key { background: #76b900; } .heat-nvme-key { background: #3f78e0; }

@@ -29,6 +29,7 @@ from blob_store import blob_path, fetch_blob, file_digest, storage_transaction, 
 import adapters
 import logstamp
 import gpus
+import thermal
 from outcomes import SolverOutcome, classify
 from checkpoints import DEFAULT_MAX_BYTES, capture_checkpoint, fetch_checkpoint, restore_checkpoint, validate_manifest
 
@@ -391,6 +392,7 @@ def heartbeat_loop(
             beat = {**node_record, "storage_free_bytes": free}
             if node_record.get("gpus"):
                 beat["gpu_stats"] = gpus.sample()  # for the dashboard's GPU graph; the leader ignores it if unknown
+            beat["thermal"] = thermal.sample()      # CPU and NVMe temperatures for the heat gauges
             request_json(leader, "/v1/heartbeat", beat)
         except OSError as error:
             print(f"heartbeat failed: {error}", file=sys.stderr, flush=True)

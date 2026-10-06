@@ -197,20 +197,25 @@ def recently_unavailable(index: int, seconds: float = 600.0) -> bool:
 # ----- live usage samples (for the dashboard's GPU graph) ---------------------------------------
 
 def sample(timeout: float = 3.0) -> list[dict[str, int]]:
-    """Read each GPU's utilisation and memory use with nvidia-smi; [] when it is missing or fails."""
+    """Read each GPU's utilisation, memory use and temperature with nvidia-smi; [] when it is missing or fails."""
 
     try:
         done = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,temperature.gpu",
+             "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return []
     if done.returncode:
         return []
-    return normalized_stats([
-        {"index": fields[0], "util_percent": fields[1], "memory_used_bytes": int(fields[2]) * 1024**2}
-        for fields in (line.replace(" ", "").split(",") for line in done.stdout.splitlines())
-        if len(fields) == 3 and all(item.isdigit() for item in fields)])
+    stats = []
+    for fields in (line.replace(" ", "").split(",") for line in done.stdout.splitlines()):
+        if len(fields) == 4 and all(item.isdigit() for item in fields[:3]):
+            stat = {"index": fields[0], "util_percent": fields[1], "memory_used_bytes": int(fields[2]) * 1024**2}
+            if fields[3].isdigit():   # "[N/A]" on cards without a sensor
+                stat["temp_c"] = int(fields[3])
+            stats.append(stat)
+    return normalized_stats(stats)
 
 
 def normalized_stats(raw: Any) -> list[dict[str, int]]:
@@ -225,5 +230,9 @@ def normalized_stats(raw: Any) -> list[dict[str, int]]:
         except (KeyError, TypeError, ValueError):
             continue
         if 0 <= index < 64 and 0 <= util <= 100 and 0 <= memory < 2**50:
-            result.append({"index": index, "util_percent": util, "memory_used_bytes": memory})
+            stat = {"index": index, "util_percent": util, "memory_used_bytes": memory}
+            temperature = item.get("temp_c") if isinstance(item, dict) else None
+            if type(temperature) is int and 0 <= temperature <= 150:
+                stat["temp_c"] = temperature   # absent from agents before 2026-10-06
+            result.append(stat)
     return result

@@ -46,6 +46,10 @@ ACTIVE = {"queued", "waiting", "running", "stopping", "paused"}
 TERMINAL = {"complete", "failed", "cancelled"}
 DP_PROGRAMS = {"dp", "dp_distributed"}
 MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks", "match_gpu_wide"}
+# Temperatures (°C) at which a machine's heat gauge turns warm and hot; hot also raises a
+# Problems warning. CPU: Intel parts throttle near 100. GPU: NVIDIA cards slow down near 90.
+# NVMe: drives warn near 80 (the Samsung PM981 in merlin at 81 composite).
+HEAT_LIMITS = {"cpu": (80, 95), "gpu": (80, 87), "nvme": (65, 75)}
 WINDOW_SECONDS = 24 * 3600
 BUCKET_SECONDS = 15 * 60
 LONG_WINDOW_SECONDS = 7 * 24 * 3600
@@ -485,6 +489,7 @@ class Snapshots:
             "WHERE state='running' AND parent_run_id IS NOT NULL)").fetchall())
         series, busy = self.utilization(connection, nodes, now)
         gpu_series, gpu_now = self.gpu_utilization(connection, nodes, now)
+        heat = self.heat(connection, nodes, now)
 
         cards = []
         for node in nodes:
@@ -530,6 +535,7 @@ class Snapshots:
                 "utilization": series.get(name, []),
                 "gpu_utilization": gpu_series.get(name),
                 "gpu_now": gpu_now.get(name),
+                "heat": heat.get(name),
                 "busy_fraction": busy.get(name, 0.0),
             })
         order = sorted(HOST_NAMES)
@@ -542,7 +548,8 @@ class Snapshots:
                 card["disk"] = view["hosts"].get(card["host"])
             disk = {key: view[key] for key in ("cluster", "measured_at", "interval", "running")}
         return {"nodes": cards, "bucket_seconds": BUCKET_SECONDS, "window_seconds": WINDOW_SECONDS,
-                "dispatch": dispatch, "disk": disk}
+                "dispatch": dispatch, "disk": disk,
+                "heat_limits": {kind: {"warm": warm, "hot": hot} for kind, (warm, hot) in HEAT_LIMITS.items()}}
 
     def work_item(self, run: dict, role: str, node: dict, now: float,
                   root_states: dict[str, str]) -> dict:
@@ -597,6 +604,51 @@ class Snapshots:
         return series, {name: {"util": round(sum(d["util"] for d in devices.values()) / len(devices)),
                                "memory_used_bytes": sum(d["memory_used_bytes"] for d in devices.values())}
                         for name, devices in latest.items()}
+
+    def heat(self, connection: sqlite3.Connection, nodes: list[dict], now: float,
+             window: int = WINDOW_SECONDS, bucket: int = BUCKET_SECONDS) -> dict[str, dict]:
+        """Per node: the latest CPU, GPU and NVMe temperatures and 24 h of per-bucket maxima.
+
+        {"now": {"cpu_c", "gpu_c", "nvme_c", "recorded"}, "history": {"cpu": [...], "gpu": [...],
+        "nvme": [...]}}, None in a bucket with no reading. Absent until agents report temperatures
+        (2026-10-06) and for machines without sensors.
+        """
+        start = now - window
+        buckets = window // bucket
+        names = {node["node_name"] for node in nodes}
+        result: dict[str, dict] = {}
+
+        def record(name, kind, value, recorded):
+            if name not in names or value is None:
+                return
+            entry = result.setdefault(name, {"now": {}, "history": {key: [None] * buckets
+                                                                    for key in ("cpu", "gpu", "nvme")}})
+            index = min(buckets - 1, int((recorded - start) // bucket))
+            series = entry["history"][kind]
+            series[index] = value if series[index] is None else max(series[index], value)
+            latest = entry["now"]
+            if now - recorded <= 180 and recorded >= latest.get(f"{kind}_at", 0):
+                latest[f"{kind}_c"], latest[f"{kind}_at"] = value, recorded
+        try:
+            for name, cpu, nvme, recorded in connection.execute(
+                    "SELECT node_name,cpu_c,nvme_c,recorded FROM thermal_samples WHERE recorded>? ORDER BY recorded",
+                    (start,)):
+                record(name, "cpu", cpu, recorded)
+                record(name, "nvme", nvme, recorded)
+            # The hottest device per GPU sample: most machines have one.
+            for name, temperature, recorded in connection.execute(
+                    "SELECT node_name,MAX(temp_c),recorded FROM gpu_usage_samples "
+                    "WHERE recorded>? AND temp_c IS NOT NULL GROUP BY node_name,recorded ORDER BY recorded",
+                    (start,)):
+                record(name, "gpu", temperature, recorded)
+        except sqlite3.OperationalError:
+            return {}   # a leader database from before temperatures
+        for entry in result.values():
+            latest = entry["now"]
+            entry["now"] = {key: latest.get(key) for key in ("cpu_c", "gpu_c", "nvme_c")}
+            entry["now"]["recorded"] = max((latest.get(f"{kind}_at", 0) for kind in ("cpu", "gpu", "nvme")),
+                                           default=0) or None
+        return result
 
     def utilization(self, connection: sqlite3.Connection, nodes: list[dict], now: float,
                     window: int = WINDOW_SECONDS, bucket: int = BUCKET_SECONDS,
