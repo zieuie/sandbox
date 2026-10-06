@@ -143,7 +143,7 @@ class SnapshotTests(unittest.TestCase):
                                                             "recorded": None})   # history only, no live reading
         silent = [card for name, card in nodes.items() if name not in ("merlin", "fearless")]
         self.assertTrue(silent and all(card["heat"] is None for card in silent))   # no samples, no gauges
-        self.assertEqual(fleet["heat_limits"]["cpu"], {"warm": 80, "hot": 95})
+        self.assertEqual(fleet["heat_limits"]["cpu"], {"warm": 85, "hot": 95})
         # 96 °C is past the CPU's hot limit: a Problems warning; the GPU at 66 °C is fine.
         groups = {entry["group"]: entry for entry in built["problems"]["active"]}
         self.assertEqual(groups["hot:dp-151:cpu"]["severity"], "warning")

@@ -47,9 +47,10 @@ TERMINAL = {"complete", "failed", "cancelled"}
 DP_PROGRAMS = {"dp", "dp_distributed"}
 MATCH_PROGRAMS = {"match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks", "match_gpu_wide"}
 # Temperatures (°C) at which a machine's heat gauge turns warm and hot; hot also raises a
-# Problems warning. CPU: Intel parts throttle near 100. GPU: NVIDIA cards slow down near 90.
-# NVMe: drives warn near 80 (the Samsung PM981 in merlin at 81 composite).
-HEAT_LIMITS = {"cpu": (80, 95), "gpu": (80, 87), "nvme": (65, 75)}
+# Problems warning. CPU: Intel parts throttle near 100, and the fleet runs 74-81 under full load
+# (2026-10-06), so warm starts at 85. GPU: NVIDIA cards slow down near 90. NVMe: drives warn near
+# 80 (merlin's Samsung PM981: warning 80, critical 81, composite).
+HEAT_LIMITS = {"cpu": (85, 95), "gpu": (80, 87), "nvme": (65, 75)}
 WINDOW_SECONDS = 24 * 3600
 BUCKET_SECONDS = 15 * 60
 LONG_WINDOW_SECONDS = 7 * 24 * 3600

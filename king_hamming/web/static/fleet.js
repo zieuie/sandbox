@@ -219,7 +219,7 @@ function heatLines(series, width, height) {
 }
 
 function heatChart(history, limits, width = 96, height = 40) {
-  // One dashed guide at the CPU's warm limit (80 °C, also the GPU's); the gauges carry the rest.
+  // One dashed guide at the CPU's warm limit (85 °C); the gauges carry the rest.
   const guide = (height - (limits.cpu.warm - HEAT_LOW) / (HEAT_HIGH - HEAT_LOW) * height).toFixed(1);
   const guides = html`<line class="heat-guide" x1="0" x2="${width}" y1="${guide}" y2="${guide}"></line>`;
   const lines = HEAT_KINDS.flatMap(([kind]) => heatLines(history[kind] || [], width, height).map((points) =>
