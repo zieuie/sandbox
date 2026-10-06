@@ -87,6 +87,9 @@ def cpu_list(value: str | None) -> list[int]:
     return [int(item) for item in (value or "").split(",") if item.strip()]
 
 
+VERIFY_STALL_SECONDS = 6 * 3600.0  # as cluster/leader.py
+
+
 def solver_health(run: dict, now: float) -> str:
     """Mirror the leader's status labels for one run row."""
     if run["state"] != "running":
@@ -102,6 +105,8 @@ def solver_health(run: dict, now: float) -> str:
     if run.get("progress_phase") == "waiting for GPU":
         return "waiting-for-gpu"  # alive and queued behind other tiles, not stuck
     progress = run.get("last_progress_at")
+    if run.get("progress_phase") == "verifying" and progress is not None and now - progress < VERIFY_STALL_SECONDS:
+        return "verifying"  # checking and storing a large certificate moves no counter for hours
     if progress is not None and now - progress >= 1800:
         return "stalled"
     if progress is not None and now - progress >= 300:

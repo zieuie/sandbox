@@ -233,6 +233,9 @@ DEFAULT_DISK_FLOOR_BYTES = 10 * 1024**3
 # lease either. Expiring every lease afterwards punished the fleet for the leader's stall, and
 # restarted a long matching run from scratch. After such a gap, running leases first get one
 # more full lease to renew in.
+# Verifying and storing a 29^7-sized matching certificate takes hours with no progress counter
+# moving; only past this long is a heartbeating "verifying" run reported as stalled.
+VERIFY_STALL_SECONDS = 6 * 3600.0
 STALL_SECONDS = 15.0          # the scheduler commits every few seconds when healthy
 LAST_COMMIT = [time.time()]
 
@@ -725,6 +728,10 @@ def make_handler(
                     elif run["progress_phase"] == "waiting for GPU":
                         # Alive (it heartbeats) and queued behind other tiles: not a progress problem.
                         run["solver_health"] = "waiting-for-gpu"
+                    elif (run["progress_phase"] == "verifying" and run["last_progress_at"] is not None
+                          and now - run["last_progress_at"] < VERIFY_STALL_SECONDS):
+                        # Checking and storing a large certificate moves no counter for hours.
+                        run["solver_health"] = "verifying"
                     elif run["last_progress_at"] is not None and now - run["last_progress_at"] >= 1800:
                         run["solver_health"] = "stalled"
                     elif run["last_progress_at"] is not None and now - run["last_progress_at"] >= 300:

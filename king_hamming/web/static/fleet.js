@@ -109,7 +109,7 @@ function actions(item) {
 }
 
 const HEALTH_CLASS = {
-  responding: 'ok', starting: 'ok', 'waiting-for-gpu': 'ok', stopping: 'warn', 'no-progress-warning': 'warn',
+  responding: 'ok', starting: 'ok', 'waiting-for-gpu': 'ok', verifying: 'ok', stopping: 'warn', 'no-progress-warning': 'warn',
   stalled: 'bad', 'heartbeat-missing': 'bad',
 };
 

@@ -188,6 +188,9 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(snapshot.solver_health(run, NOW), "waiting-for-gpu")
         self.assertEqual(snapshot.solver_health({**run, "progress_phase": "computing"}, NOW), "no-progress-warning")
         self.assertEqual(snapshot.solver_health({**run, "last_solver_heartbeat": NOW - 60}, NOW), "heartbeat-missing")
+        verifying = {**run, "progress_phase": "verifying", "last_progress_at": NOW - 3 * 3600}
+        self.assertEqual(snapshot.solver_health(verifying, NOW), "verifying")
+        self.assertEqual(snapshot.solver_health({**verifying, "last_progress_at": NOW - 7 * 3600}, NOW), "stalled")
 
     def test_a_long_storage_recheck_is_a_problem(self) -> None:
         with sqlite3.connect(self.database) as connection:
