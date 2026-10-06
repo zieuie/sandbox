@@ -8,6 +8,23 @@ workers offline. Moving the agents' leader address to the wired network would re
 loads at boot ([GPU.md](GPU.md)), but the agents still don't start at boot: after a reboot,
 relaunch them (`launch_dp.py resume-workers` or `upgrade-worker-rolling`).
 
+## Recurrence, 2026-10-05 21:43
+
+The same thing happened again. At 21:43:55 the access point `c0:6f:98:de:9e:07` switched to DFS
+channel 104 (5520 MHz). fearless (`.101`), red (`.102`) and midnights (`.106`) lost Wi-Fi, failed
+re-authentication with `no-secrets` at 21:45:58, and stayed off. The other machines rode it out.
+
+- **Effect:** for about 13 minutes those three didn't heartbeat. Their 12 running tiles were
+  re-leased elsewhere. Because copies on silent machines don't count, about 3,600 of 31⁷'s
+  finished tiles showed as "complete, under-replicated" (light green) on the DP tiles page.
+- **Recovery (21:57):** over the wired network, using each machine's known host key
+  (`ssh -o HostKeyAlias=192.168.4.10X 10.203.0.10X`), ran
+  `sudo -n nmcli connection up "The Promised LAN 1" ifname wlp3s0` on each. All three
+  reconnected at once with the stored key, and their agents resumed without a restart.
+  Every tile was durable again within a minute.
+- **Still unfixed:** the fix options below. Router off DFS channels, or the watchdog on every
+  node, would have prevented this.
+
 ## Impact
 
 Five workers lost the network at 03:07 and stayed offline until a person
