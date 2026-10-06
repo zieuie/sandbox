@@ -13,8 +13,11 @@ M(q + 1, q).
   field matched with the first polynomial tried. The table is [`results.md`](results.md).
 - **Still running:** the DP for 31⁷, the last DP field. New DP fields are switched off
   (feeder setting `new_dp_fields` = 0); 31⁷ still gets its matching.
-- **Blocked:** 7¹³ has its DP value, but its matching exceeds the matcher's 2³⁶ limit and
-  needs about 200 GB of RAM ([docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)).
+- **Blocked:** 7¹³ has its DP value, but its matching exceeds the block matcher's limits (F,
+  q ≥ 2³⁶, about 166 GB of field rows). A wide solver and verifier that lift all three are built
+  and tested ([gpu_wide_match_solver/](gpu_wide_match_solver/README.md)). What's left: a full-width
+  rehearsal, campaign integration, and disk for a 206 GB certificate
+  ([docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md)).
 - **The cluster:** a leader on merlin and ten household machines, each with an NVIDIA GPU,
   joined by Wi-Fi (control) and a 1 Gb/s switch (data). A dashboard on merlin shows and
   controls the campaign.

@@ -1,7 +1,10 @@
 # Plan: a wide matching solver for 7¹³ and larger fields
 
-Status: **design only, 2026-10-05.** Nothing is built. This is the plan to pick up when 7¹³ (or
-another field past today's limits) is worth the effort.
+Status (2026-10-06): **solver and verifier built and tested** in
+[gpu_wide_match_solver/](../gpu_wide_match_solver/README.md). They are not wired into the campaign
+(section 7), and a full-width rehearsal is still to do (section 8). Disk is still the blocker for
+7¹³ itself (section 6). Designed on 2026-10-05; built the next day as planned, with CPU multi-pass
+rows, not GPU-built rows.
 
 ## Why a separate solver
 
@@ -116,14 +119,20 @@ plus up to 256 extra rows for imported requests.
 
 Every field so far had a round-1 residual of 0, including 13⁹, so exchange is expected to be rare.
 
-**Time estimate for 7¹³ on merlin**, scaled from measurements:
+**Time estimate for 7¹³ on merlin**, from the built solver's measurements (2026-10-06):
 
 | Stage | Estimate | Based on |
 |---|---|---|
-| Walks: 1 count + 8–9 placement | 30–45 min each, so **5–7 h** | 13⁹ row build: 394 s for two walks of 1.06 × 10¹⁰ labels on 8 threads; scaled for q and for 13 digits instead of 9 |
+| Count walk | **about 6 min** | 2.6 × 10⁸ labels/s at r = 13 (5¹³, 8 threads) |
+| Placement: 9 passes of about 20 GB | 6 min of walking plus 3–20 min of random writes each, so **about 1–4 h** | 1.7 × 10⁸ labels/s on a 0.6 GB pass, 7.4 × 10⁷ on a 4.9 GB pass |
 | Matching: about 590 blocks | about 9 s each, so **about 1.5 h** | 11⁹: 16 blocks in 147 s |
 | Choice writes | interleaved; tens of minutes in total | 2–4 GB of page writes per block |
-| **Solver total** | **about 7–9 h** | |
+| **Solver total** | **about 3–6 h** | was 7–9 h when estimated from the old builder |
+
+The rescue passes described above are built, as is refusing p = 2 (F is a power of two, so the
+payload has no spare "unmatched" value). **One inherited limit:** when n = q, a block's leftover
+requests have nowhere to go, because every other window is exactly full. Exchange can't fix that,
+in either solver. Production-size blocks have never left any (11⁹, 13⁹, 29⁷).
 
 **Faster option for later:** build each block's rows on the GPU. A walk over 9.7 × 10¹⁰ labels
 should take a few seconds on the 3060, so 590 blocks × 2 walks is about 30 minutes, with no rows in
@@ -155,8 +164,12 @@ and `--row-bytes`, and stays **independent of the solver**:
 - **One pass per cell range.** It builds that range's rows, then reads only the matching runs of
   the certificate with `pread`. It marks every right endpoint in a q/8 bitmap (12 GB at 7¹³) and
   fails on a repeat, a choice out of range, or nonzero padding.
-- **Time estimate for 7¹³:** about 10 walks at 10–60 minutes each on 12 threads (the range depends
-  on how fast the arithmetic gets), plus about 206 GB of reads. So **2–10 hours**, twice.
+- **Measured:** 13⁹ (q = 1.06 × 10¹⁰, 19.9 GB certificate) verified in **7 min 9 s** on 10
+  threads in 4 passes, peaking at 5.5 GB of memory. `kh_verify_khm1` took about 2 hours and
+  16.5 GiB.
+- **Scaled to 7¹³:** about 10 times the rows and 9 times the labels, so **about 1–2 hours** with
+  12–20 GB passes, plus the 12 GB bitmap. That's twice (worker and feeder) unless one check is
+  dropped.
 - **Possible saving:** skip the worker's check for this program and rely on the feeder's.
 
 ## 6. Disk: the real blocker
@@ -197,19 +210,27 @@ Needed before a 7¹³ run:
 - **Wide verifier:** agrees with the Python verifier and with `kh_verify_khm1` on good
   certificates, rejects corruptions, and gives the same answer with 1 thread and 12, and with 1
   pass and many.
-- **Full-width choices:** the smallest real fields with F > 65,534 are 5¹⁴ (q = 6.1 × 10⁹,
-  F = 78,125) and 17⁸ (q = 7.0 × 10⁹, F = 83,521). A 5¹⁴ run takes merlin's GPU for roughly an
-  hour, so it needs a planned window away from DP tiles.
+- **Full-width rehearsal (still to do):** the smallest field with F > 65,534 and an odd exponent
+  is **5¹⁵** (q = 3.05 × 10¹⁰, F = 78,125, 17-bit choices, 7 breakpoints per row). It needs no DP:
+  the blocks file `1` / `5 78125` asks for every cell of every coset, so n = q.
+  - **Cost:** about 122 GB of rows in several passes, about 190 blocks (roughly 30–60 minutes of
+    merlin's GPU), and a 65 GB payload.
+  - **So** it needs a planned window: after 31⁷'s matching, with DP tiles off merlin's GPU, and
+    disk to spare.
+- **Done (2026-10-06):**
+  - `tests/field_walk_unit.c`, `tests/check.py` (60 cases, plus 240 with another seed) and
+    `tests/check_verify.py` (8 certificates, corruptions) all pass.
+  - 13⁷ ran through the wide solver in 9 forced passes and was verified by both verifiers.
+  - 13⁹'s archived certificate verified with `kh_verify_wide`.
 
 ## 9. Effort and open questions
 
 - **Effort:**
-  - solver: about 2 days;
-  - wide verifier: about 1 day;
+  - solver and wide verifier: done;
   - disk plumbing: about half a day;
-  - the 5¹⁴ rehearsal, cluster integration and rollout: about 1 day.
+  - the 5¹⁵ rehearsal, cluster integration and rollout: about 1 day.
 - **Open questions:**
-  1. Is 7¹³ worth about 7–9 h of merlin's GPU plus 4–20 h of verification, given the disk it needs?
+  1. Is 7¹³ worth about 3–6 h of merlin's GPU plus 2–4 h of verification, given the disk it needs?
   2. Add a drive to merlin, or free space? (The hardware brief compares options.)
-  3. Start with CPU multi-pass as planned, or go straight to GPU-built rows (faster, more new
-     code)?
+  3. ~~CPU multi-pass or GPU-built rows?~~ CPU multi-pass was built; measured, it's fast enough
+     that GPU-built rows can wait.

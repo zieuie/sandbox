@@ -46,8 +46,9 @@ Notes:
   obstruction has ever been found.
 - **7¹³** has its DP value (27,357,428,724,361,309) but no matching yet: q = 9.7 × 10¹⁰ is
   above the matcher's 2³⁶ limit and needs about 200 GB of RAM (see
-  [docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)). A solver that could do it is planned in
-  [docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md).
+  [docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)). A solver that lifts those limits is built
+  ([gpu_wide_match_solver/](gpu_wide_match_solver/README.md)), but not yet run on it
+  ([docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md)).
 - **29⁷** was matched on 2026-10-05 (GPU blocks on merlin, 109 blocks) and verified.
 - **31⁷** was still in DP on 2026-10-05.
 - **107³, 109³ and 113³** were cancelled before their DP finished.

@@ -1,0 +1,4 @@
+kh_gpu_wide_kernel
+kh_verify_wide
+tests/field_walk_unit
+tests/bench_walk
