@@ -179,6 +179,27 @@ class ContinuousCampaignTests(unittest.TestCase):
         submitted.assert_not_called()
         self.assertEqual(record["matching_failure"], "still broken")
 
+    def test_an_attempt_stopped_for_a_defect_does_not_count(self) -> None:
+        """A run cancelled to fix a defect (not_counted) is retried without using up an attempt."""
+
+        source = ROOT.parent / "matching_solver/examples/13_5.khdp"
+        settings = dict(campaign.DEFAULTS)
+        settings.update(matching_workers=2, matching_threads=1,
+                        matching_retry_seconds=1, max_matching_attempts=2)
+        polynomial = [2, 4, 0, 0, 0, 1]
+        record = {"p": 13, "r": 5, "dp_artifact": str(source),
+                  "matching_attempts": [{"run_id": "misplaced", "poly": polynomial, "not_counted": "defect"},
+                                        {"run_id": "failed-1", "poly": polynomial}]}
+        pipeline = {"settings": settings, "fields": {"13^5": record}}
+        manifest = {"leader": "http://private", "entries": []}
+        nodes = [{"compute_enabled": True, "state": "healthy"} for _ in range(2)]
+        runs = {"misplaced": {"run_id": "misplaced", "state": "cancelled", "finished": 1},
+                "failed-1": {"run_id": "failed-1", "state": "cancelled", "finished": 1}}
+        with patch.object(campaign, "request", return_value={"run_id": "again", "state": "queued", "reused": False}):
+            self.assertEqual(campaign.advance_matching(
+                Path("unused"), manifest, runs, nodes, pipeline), {"retried": 1})
+        self.assertNotIn("matching_failure", record)
+
     def test_incomplete_block_matching_moves_to_the_next_polynomial(self) -> None:
         """An incomplete block run is deterministic: try another polynomial, and stop after the limit."""
 

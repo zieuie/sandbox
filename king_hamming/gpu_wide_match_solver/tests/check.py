@@ -224,6 +224,32 @@ def block_synthetic(rng: random.Random, p: int, r: int, directory: Path, index: 
     return metadata
 
 
+def blocks_skewed(directory: Path) -> dict:
+    """5^15's shape in small: 3^13 (n = q) with 2F dense cells and F cells of one request each.
+    Cutting by equal requests put every sparse cell's rows into the last block, which then never
+    fit, so 5^15 ran 216,521 one-cell blocks; cutting by cost needs about the minimum."""
+    p, r, f, extra_cells, fixed = 3, 13, 729, 256, 16 * 1024 * 1024
+    runs = [(2, 1092), (3, 1)]
+    per_cell = [1093] * (2 * f) + [1] * f
+    blocks = directory / "skewed.blocks"
+    write_blocks(blocks, runs)
+
+    def cell_cost(requests: int) -> int:
+        return 4 * f + 35 * (requests + requests // 64) + 4 * requests
+
+    per_block = 4 * f * extra_cells + 35 * 64 + fixed
+    total = sum(cell_cost(requests) for requests in per_cell)
+    budget = per_block + total // 10
+    minimum = -(-total // (budget - per_block))
+    code, metadata = run_kernel(KERNEL, p, r, blocks, directory / "skewed.bin", "--threads", "2",
+                                "--block-device-bytes", str(budget))
+    assert code in (0, 2) and metadata["engine"] == "gpu-wide", metadata
+    assert metadata["blocks"] <= minimum + 1, (metadata["blocks"], minimum)
+    print(f"ok skewed cells: {metadata['blocks']} blocks (cost minimum {minimum}), "
+          f"{'full matching' if code == 0 else 'incomplete'}")
+    return metadata
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, epilog="Example: python3 tests/check.py --run")
     parser.add_argument("--run", action="store_true")
@@ -244,6 +270,7 @@ def main() -> int:
         blocks_fixture(ROOT / "examples/7_5.khdp", None, directory, 5000, 3, pass_cells=60, tag=".passes")
         blocks_fixture(ROOT / "matching_solver/examples/13_5.khdp", "2,4,0,0,0,1", directory, 100000, 3,
                        split_bits=11, pass_cells=500, tag=".split.passes")
+        blocks_skewed(directory)
         rng = random.Random(arguments.seed)
         shapes = [(3, 3), (5, 3), (3, 5), (7, 3), (3, 7), (11, 3)]   # p = 2 is refused (F a power of two)
         seen = []

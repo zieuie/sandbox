@@ -388,9 +388,11 @@ def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
                     counts["exhausted"] += 1
                     continue
             elif run["state"] in {"failed", "cancelled"}:
+                # An attempt marked not_counted (stopped to fix a defect, with the reason) is
+                # retried without using up one of the polynomial's attempts.
                 same_candidate_failures = sum(
                     item.get("poly") == latest["poly"] and
-                    item.get("state") in {"failed", "cancelled"}
+                    item.get("state") in {"failed", "cancelled"} and not item.get("not_counted")
                     for item in attempts
                 )
                 if same_candidate_failures >= settings["max_matching_attempts"]:

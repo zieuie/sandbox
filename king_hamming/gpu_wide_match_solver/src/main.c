@@ -633,19 +633,26 @@ static uint64_t block_cost(uint64_t f, uint64_t nbp, uint64_t cells, uint64_t m,
     return 4 * (f + nbp) * (cells + EXTRA_MAX) + 35 * (m + imports) + 4 * window + UINT64_C(16777216);
 }
 
-// Cut the used cells into `count` blocks of nearly equal request counts. Returns false if any
-// block is over budget. Spare rights (n < q) go to the last window.
+// A cell's share of block_cost(): its rows, plus its requests' state and window.
+static uint64_t cell_cost(const bctx_t *x, uint64_t requests) {
+    return 4 * ((uint64_t)x->f + x->nbp) + 35 * (requests + requests / 64) + 4 * requests;
+}
+
+// Cut the used cells into `count` blocks of nearly equal device cost. Returns false if any block
+// is over budget. Spare rights (n < q) go to the last window. Equal cost, not equal requests: when
+// requests per cell are uneven (5^15 has 2F cells of 195,311 requests and F cells of 3), equal
+// request counts would put every sparse cell, and all their rows, into one block.
 static bool cut_blocks(bctx_t *x, uint32_t count, uint64_t budget, const uint64_t *per_cell, uint64_t ncells,
                        uint32_t *bounds) {
     uint64_t f = x->f, total = 0;
-    for (uint64_t c = 0; c < ncells; ++c) total += per_cell[c];
+    for (uint64_t c = 0; c < ncells; ++c) total += cell_cost(x, per_cell[c]);
     uint64_t c = 0, cumulative = 0;
     for (uint32_t k = 0; k < count; ++k) {
         uint64_t target = (uint64_t)((__uint128_t)total * (k + 1) / count);
         uint64_t start = c, m = 0;
-        while (c < ncells && (k + 1 == count || c == start || cumulative + per_cell[c] / 2 < target) &&
+        while (c < ncells && (k + 1 == count || c == start || cumulative + cell_cost(x, per_cell[c]) / 2 < target) &&
                (k + 1 == count || ncells - c > count - k - 1)) {
-            cumulative += per_cell[c];
+            cumulative += cell_cost(x, per_cell[c]);
             m += per_cell[c];
             ++c;
         }
