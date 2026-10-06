@@ -366,6 +366,33 @@ class ContinuousCampaignTests(unittest.TestCase):
         self.assertTrue(submissions[0]["rerun"])
         self.assertEqual(submissions[0]["specification"]["arguments"]["p"], 3)
 
+    def test_new_dp_fields_off_starts_no_new_field_but_still_retries(self) -> None:
+        """Wrapping up: no frontier candidate is submitted, but a submitted field's retry still is."""
+
+        settings = dict(campaign.DEFAULTS)
+        settings.update(target_dp_roots=2, max_ready_fields=4, minimum_free_bytes=1, new_dp_fields=0)
+        failed = {"program": "dp_distributed", "arguments": {"p": 3, "r": 3, "threads": 1, "tile_side": 4}}
+        candidate = {"program": "dp", "arguments": {"p": 5, "r": 3, "threads": 1, "tile_side": 4}}
+        manifest = {"leader": "http://private", "entries": [{"run_id": "failed", "specification": failed}]}
+        pipeline = {"settings": settings, "fields": {"3^3": {"p": 3, "r": 3, "dp_state": "failed"}}}
+        runs = {"failed": {"run_id": "failed", "state": "failed"}}
+        submissions = []
+
+        def fake_request(_leader, route, value=None):
+            submissions.append(value)
+            return {"run_id": "retry", "state": "waiting", "reused": False}
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(campaign.scheduling, "regional_campaign", return_value=iter([candidate])) as frontier, \
+                patch.object(campaign, "request", side_effect=fake_request):
+            added = campaign.replenish_dp(Path(directory), manifest, runs, pipeline, STORAGE_NODES)
+        self.assertEqual(added, 1)
+        self.assertEqual([item["specification"]["arguments"]["p"] for item in submissions], [3])
+        frontier.assert_not_called()
+        self.assertFalse(pipeline["demand"]["new_dp_fields"])
+        with self.assertRaises(ValueError):
+            campaign.validate_settings({**campaign.DEFAULTS, "new_dp_fields": 2})
+
     def test_shallow_ready_tile_pool_admits_independent_roots_to_hard_cap(self) -> None:
         """Dependency stalls are backfilled by other roots without an unlimited backlog."""
 

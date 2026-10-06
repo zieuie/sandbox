@@ -202,6 +202,11 @@ python3 king_hamming/dp_solver/launch_dp.py \
   --state king_hamming/cluster/deployments/continuous-campaign upgrade-workers
 ```
 
+**Wrapping up DP.** The feeder setting `new_dp_fields` (1 by default) controls whether new
+DP fields are started from the frontier. At 0, the feeder starts none. A field already
+submitted still finishes: its retries and its matching carry on. It was set to 0 on
+2026-10-06, with 31⁷ as the last DP field. Change it on the dashboard's Feeder tab.
+
 Stopping dispatch preserves the SQLite queue, worker blobs, checkpoints, and
 artifacts. Run-scoped `pause-run`, `resume-run`, `cancel`, and `reprioritize`
 commands are also available through `kh.py`.

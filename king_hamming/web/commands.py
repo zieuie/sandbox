@@ -473,7 +473,10 @@ def feeder_settings(context: Context, params: dict) -> Plan:
         if key not in allowed:
             raise CommandError(f"unknown setting: {key}")
         changes[key] = value = as_int(value, key)
-        if value <= 0:
+        if key == "new_dp_fields":
+            if value not in (0, 1):
+                raise CommandError("new_dp_fields must be 0 (no new DP fields) or 1")
+        elif value <= 0:
             raise CommandError(f"{key} must be a positive integer")
     proposed = {**current, **changes}
     defaults = dict(DEFAULTS)

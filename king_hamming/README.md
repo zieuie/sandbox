@@ -11,7 +11,8 @@ M(q + 1, q).
 
 - **72 fields proved**, from 2³ up to 29⁷ (M(29⁷ + 1, 29⁷) ≥ 2,218,287,697,118,362). Every
   field matched with the first polynomial tried. The table is [`results.md`](results.md).
-- **Still running:** the DP for 31⁷.
+- **Still running:** the DP for 31⁷, the last DP field. New DP fields are switched off
+  (feeder setting `new_dp_fields` = 0); 31⁷ still gets its matching.
 - **Blocked:** 7¹³ has its DP value, but its matching exceeds the matcher's 2³⁶ limit and
   needs about 200 GB of RAM ([docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)).
 - **The cluster:** a leader on merlin and ten household machines, each with an NVIDIA GPU,

@@ -177,6 +177,10 @@ class CommandTests(unittest.TestCase):
         self.assertIn("would reject", bad["blockers"][0])
         self.assertEqual(self.preview("feeder.settings", {"changes": {"nonsense": 1}})[0], 400)
         self.assertEqual(self.preview("feeder.settings", {"changes": {"max_visits": "1.5"}})[0], 400)
+        off = self.preview("feeder.settings", {"changes": {"new_dp_fields": 0}})[2]
+        self.assertEqual(off["changes"], [{"label": "new_dp_fields", "before": None, "after": 0}])
+        self.assertEqual(off["blockers"], [])
+        self.assertEqual(self.preview("feeder.settings", {"changes": {"new_dp_fields": 2}})[0], 400)
         status, _, reply = self.run_command("feeder.settings", {"changes": {"max_visits": "3e14"}})
         self.assertEqual(status, 200, reply)
         pipeline = json.loads((self.deployments / "live" / "pipeline.json").read_text())

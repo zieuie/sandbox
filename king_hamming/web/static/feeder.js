@@ -19,6 +19,7 @@ function editSettings(settings, only) {
 }
 
 const SETTINGS = [
+  ['new_dp_fields', 'Start new DP fields (1 yes, 0 no)'],
   ['target_dp_roots', 'Target active DP roots'],
   ['max_dp_roots', 'Hard cap on active DP roots'],
   ['target_ready_dp_tiles', 'Minimum ready-tile target'],
@@ -46,6 +47,7 @@ const SETTINGS = [
 
 function fmtSetting(key, value) {
   if (value === undefined || value === null) return '—';
+  if (key === 'new_dp_fields') return value ? 'yes' : 'no: wrapping up';
   if (key.endsWith('_bytes')) return fmtBytes(value);
   if (key.endsWith('_seconds')) return fmtDuration(value);
   return value >= 100000 ? fmtCompact(value) : fmtInt(value);
@@ -129,7 +131,10 @@ export function render(container, snapshot) {
       ${p.started ? html`<div class="kv"><span>Up for</span><b>${fmtDuration(snapshot.generated_at - p.started)}</b></div>` : ''}
       <div class="kv"><span>Pass interval</span><b>${fmtDuration(p.interval)}</b></div>`;
   const settings = feeder.settings;
-  const upcoming = feeder.upcoming.length
+  const upcoming = settings.new_dp_fields === 0
+    ? html`<p class="hint">Starting new DP fields is switched off (<code>new_dp_fields</code> = 0). Fields
+        already submitted finish their DP and matching.</p>`
+    : feeder.upcoming.length
     ? html`<ol class="upcoming">${feeder.upcoming.map((u) => html`<li>${field(u.field[0], u.field[1])} <span class="hint">q = ${fmtCompact(u.q)}</span></li>`)}</ol>`
     : html`<p class="hint">No new field fits the current limits (max ${fmtCompact(settings.max_visits)} visits,
         ${fmtBytes(settings.max_state_bytes)} state). Once the active roots finish, the feeder will report

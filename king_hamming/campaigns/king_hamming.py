@@ -46,6 +46,9 @@ DEFAULTS = {
     "max_matching_edges": 1_000_000_000_000_000,
     "max_field_elements": 100_000_000, "matching_priority": 100,
     "minimum_free_bytes": 20 * 1024**3,
+    # 1: add new DP fields from the frontier; 0: start no new DP (wrapping up). Retries of a
+    # field already submitted, and all matching, carry on either way.
+    "new_dp_fields": 1,
 }
 
 
@@ -474,6 +477,7 @@ def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: d
         "ready_dp_tiles": ready_tiles,
         "ready_tile_target": dynamic_ready_target,
         "roots_requested": needed,
+        "new_dp_fields": bool(settings["new_dp_fields"]),
     }
     # Retry transiently failed roots before expanding the mathematical frontier.
     for field, entries in attempts.items():
@@ -533,7 +537,7 @@ def replenish_dp(state: Path, manifest: dict, runs: dict[str, dict], pipeline: d
     disk_available = sum(storage)
     pipeline["demand"]["worker_disk_available_bytes"] = disk_available
     disk_blocked = []
-    for candidate in scheduling.regional_campaign(
+    for candidate in [] if not settings["new_dp_fields"] else scheduling.regional_campaign(
             settings["frontier_max_prime"], settings["frontier_max_exponent"],
             settings["frontier_max_visits"], settings["dp_threads"], settings["max_tile_bytes"],
             settings["max_tiles"], settings["tile_format"]):
@@ -630,6 +634,8 @@ def validate_settings(settings: dict, policy_name="legacy") -> None:
         raise ValueError("pipeline limits must be positive integers")
     if settings["target_dp_roots"] > settings["max_dp_roots"]:
         raise ValueError("target DP roots exceed the hard root cap")
+    if settings.get("new_dp_fields", 1) not in (0, 1):
+        raise ValueError("new_dp_fields must be 0 or 1")
     # Format 2 needs every agent to run a runtime that reads it; see docs/DP_STORAGE.md.
     if settings.get("tile_format", 1) not in (1, 2):
         raise ValueError("tile_format must be 1 or 2")
