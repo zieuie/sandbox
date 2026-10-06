@@ -1,0 +1,11 @@
+[Unit]
+Description=Check network connectivity every minute (wifi-watchdog)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Unit=wifi-watchdog.service
+
+[Install]
+WantedBy=timers.target

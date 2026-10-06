@@ -1,3 +1,26 @@
+# Wi-Fi watchdog (all workers)
+
+`wifi_watchdog.py` is a standalone system service, installed on dp-101–108 and gawain on
+2026-10-05 after a second Wi-Fi outage ([../../docs/NETWORK_OUTAGE_2026-10-02.md](../../docs/NETWORK_OUTAGE_2026-10-02.md)).
+It is independent of King Hamming and of any particular network: it names no addresses,
+SSIDs or interfaces, and never touches the agent or any other process.
+
+- **Online** means the current default gateway answers a ping (or ARP), over any interface. A
+  machine on any network, wired or wireless, is left alone.
+- **It acts** only after three offline minutes in a row, a confirmation ten seconds later, and only
+  when NetworkManager can see a Wi-Fi network it has a saved connection for. Then it runs
+  `nmcli device connect` on that Wi-Fi device, and restarts NetworkManager only if that fails.
+  At most one attempt per ten minutes.
+- **With no saved network in range** (moved elsewhere, Wi-Fi switched off) it does nothing.
+
+```sh
+cluster/ops/install_wifi_watchdog.sh install|status|uninstall HOST...    # needs sudo on HOST
+ssh HOST 'sudo journalctl -u wifi-watchdog.service --no-pager | tail'    # it logs only when offline
+```
+
+Files on each machine: `/usr/local/sbin/wifi-watchdog`, `/etc/systemd/system/wifi-watchdog.{service,timer}`,
+state in `/run/wifi-watchdog/`. Tests: `cluster/tests/test_wifi_watchdog.py`.
+
 # Pellinore network recovery
 
 > **Retired (2026-10-04).** Pellinore was retired and powered off, so this watchdog no longer runs anywhere. Kept for reference: the same recovery approach is one of the options in [../../docs/NETWORK_OUTAGE_2026-10-02.md](../../docs/NETWORK_OUTAGE_2026-10-02.md), and the GPU driver notes below still apply to the other machines.

@@ -1,9 +1,9 @@
 # Wi-Fi outage, 2026-10-02 03:07 CDT
 
-**Status (2026-10-04):** diagnosed; none of the fixes below has been applied. Since then every
-machine got a wired link (`10.203.0.X`), but only data transfers use it: the leader's control
+**Status (2026-10-05):** the watchdog (option 2) is installed on every worker; the router change (option 1) is still open. Every
+machine now has a wired link (`10.203.0.X`), but only data transfers use it: the leader's control
 traffic, SSH and the default route still go over Wi-Fi, so this failure mode can still take
-workers offline. Moving the agents' leader address to the wired network would remove it (see
+workers offline (now for a few minutes at most). Moving the agents' leader address to the wired network would remove it (see
 [CONTINUOUS_CAMPAIGN.md](CONTINUOUS_CAMPAIGN.md#wired-data-network)). The NVIDIA driver now
 loads at boot ([GPU.md](GPU.md)), but the agents still don't start at boot: after a reboot,
 relaunch them (`launch_dp.py resume-workers` or `upgrade-worker-rolling`).
@@ -22,8 +22,15 @@ re-authentication with `no-secrets` at 21:45:58, and stayed off. The other machi
   `sudo -n nmcli connection up "The Promised LAN 1" ifname wlp3s0` on each. All three
   reconnected at once with the stored key, and their agents resumed without a restart.
   Every tile was durable again within a minute.
-- **Still unfixed:** the fix options below. Router off DFS channels, or the watchdog on every
-  node, would have prevented this.
+- **Fixed afterwards (22:08):** option 2. A standalone Wi-Fi watchdog now runs on all nine
+  workers ([cluster/ops/README.md](../cluster/ops/README.md)). After three offline minutes, with a
+  saved network in range, it reconnects, so an outage like this lasts about 4 minutes. That's
+  inside the 10-minute replica grace.
+- **Side effect:** the leader treats a tile as lost when every copy has been out of reach
+  longer than the replica grace (`replica_grace_seconds`, 600 s). 64 finished 31⁷ tiles had all
+  their copies on these three machines, so they were cleared and recomputed (about 3 minutes of
+  cluster time). Their old copies were still on disk.
+- **Still open:** keeping the router off DFS channels (option 1), which would stop the drops.
 
 ## Impact
 

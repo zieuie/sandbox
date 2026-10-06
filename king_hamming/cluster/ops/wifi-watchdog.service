@@ -1,0 +1,8 @@
+[Unit]
+Description=Reconnect Wi-Fi when offline and a saved network is in range
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/wifi-watchdog
