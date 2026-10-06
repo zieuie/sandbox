@@ -7,7 +7,7 @@ them; the workarounds are listed so they can be removed once the library
 changes. Item numbers are stable, because other documents and the dashboard
 refer to them.
 
-**Open items come first, then completed ones.** Status reviewed 2026-10-04.
+**Open items come first, then completed ones.** Status reviewed 2026-10-04; item 26 added 2026-10-06.
 
 ## Deployment status
 
@@ -134,6 +134,33 @@ faces anything beyond the home network, **18** (leader authentication).
    - **Cause:** `lease_history` records an outcome (`engine retry`, `fail`, …)
      but no message, and `runs.error` is overwritten by later attempts.
    - **Possible change:** add an `error` column to `lease_history`.
+
+26. **Tile size is chosen by tile count alone, so cheap fields run overhead-bound.**
+    - **Today:** `scheduling.plan_tiles()` takes the *smallest* side in `TILE_SIDES`
+      (512 … 16384) whose tile count fits `max_tiles` and whose tile fits
+      `max_tile_bytes`. Raising the feeder's `max_tiles` to 100,000 (for 7¹³ and the
+      other big fields) made every field's tiles smaller.
+    - **Effect (5¹⁵, 2026-10-06):** side 2048, so 36,481 tiles.
+      - Each tile held its lease for about 2–3 s, of which 0.36 s was GPU kernel time.
+        The rest went to leasing, fetching inputs (median 0.25 s), packing (0.4–0.5 s),
+        publishing and leader round trips.
+      - GPUs sat at 3–13% use while the cluster finished about 30,000–36,000 tiles an
+        hour.
+      - The request rate also exposed the leader's listen backlog of 5 (now 1,024).
+    - **For comparison:** 31⁷ (side 4096, about 25 s of kernel per tile) kept the GPUs
+      busy at about 1,400 tiles an hour.
+    - **Wanted:** pick the side from the expected work per tile, not just the cap.
+      - **Rule:** the smallest side whose tiles cost at least about 10 s of GPU time
+        (estimated from the field's transitions and cells per tile, or from measured
+        `kernel_seconds` of comparable fields), within `max_tiles` and `max_tile_bytes`.
+      - **Unchanged:** the grid must stay wider than the slot count for most of the
+        field (it does for any side below budget / 41), and fields whose tiles are
+        already heavy (31⁷, 29⁷) keep their side.
+      - **For 5¹⁵:** side 4096 would mean 9,216 tiles at about 1.4 s of kernel each,
+        an estimated 40% less wall time with a 96-tile-wide grid.
+    - **Note:** the side is part of a root's identity, so a running field can't change
+      it; this applies to new roots only. A simulator for the choice belongs with
+      step 1 of docs/GPU_TILE_PLACEMENT_PLAN.md.
 
 ## Disk space: what is left
 
