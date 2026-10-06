@@ -411,6 +411,11 @@ class GPUWideTests(unittest.TestCase):
         # Another machine's free disk doesn't count: gawain has the disk but not the memory.
         self.assertIn("with the memory for it has", gpu_policy.blocker(
             self.wide_dp(7, 13), {}, today + [self.node("gawain", t1000, ram=8 * 1024**3, disk=859 * 10**9)]))
+        # Smaller fields fit everywhere, but a wide run still goes only to the largest GPU (merlin),
+        # sized for it: on 2026-10-06 5^15 was first planned for any P600 with 743 small blocks.
+        p600s = [self.node(f"p600-{i}", P600, ram=16 * 1024**3) for i in range(4)]
+        plan = gpu_policy.plan(self.wide_dp(5, 15), {}, today + p600s)
+        self.assertEqual((plan["hosts"], plan["gpu_memory_bytes"]), (["merlin"], gpus.usable_bytes(rtx)))
         # p = 2 can't mark 'unmatched' in the payload (F is a power of two).
         self.assertIsNone(gpu_policy.wide_plan(self.wide_dp(2, 37), {}, nodes, 4))
 

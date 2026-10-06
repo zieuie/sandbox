@@ -89,9 +89,10 @@ def wide_usable(node: dict) -> int:
 def wide_plan(dp: dict, settings: dict, nodes: list[dict], threads: int) -> dict | None:
     """Plan match_gpu_wide when the block matcher can't take the field (F, q, or rows in memory).
 
-    Any healthy machine with a usable GPU and memory for the wide matcher's minimum qualifies.
-    The run takes up to WIDE_HOST_FRACTION of the smallest qualifying host's memory: more memory
-    only means fewer row passes, in the solver and in kh_verify_wide.
+    Of the healthy machines with a usable GPU, memory for the wide matcher's minimum and disk for
+    the certificate, only those with the largest GPU are offered. The run takes up to
+    WIDE_HOST_FRACTION of the smallest of those hosts' memory: more memory only means fewer row
+    passes, in the solver and in kh_verify_wide.
     """
     if not settings.get("gpu_wide_matching", DEFAULTS["gpu_wide_matching"]):
         return None
@@ -114,7 +115,12 @@ def wide_plan(dp: dict, settings: dict, nodes: list[dict], threads: int) -> dict
         hosts.append((usable, wide_usable(node), node["node_name"]))
     if not hosts:
         return None
-    device = min(usable for usable, _, _ in hosts)
+    # A wide run takes hours and its time is set by the GPU and the passes, so it goes only to the
+    # machines with the largest GPU (merlin's 3060, not a P600 holding 743 small blocks), sized
+    # for them. The block matcher instead offers any machine with the memory: its runs are short.
+    largest = max(usable for usable, _, _ in hosts)
+    hosts = [host for host in hosts if host[0] == largest]
+    device = largest
     available = min(memory for _, memory, _ in hosts)
     host = wide_adapter.host_bytes(dp, threads, device, available)
     return dict(admitted=True, reason="admitted: GPU wide", program="match_gpu_wide", workers=1,
