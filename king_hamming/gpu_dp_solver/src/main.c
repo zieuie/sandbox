@@ -20,13 +20,37 @@
 extern const kh_cuda_image_t kh_dp_images[];
 extern const unsigned kh_dp_images_count;
 
-// Mirrors hot_t in kernels.cu.
+// A transition as the host prepares it; the device gets hot_t and bound_t (kernels.cu).
 typedef struct {
     uint32_t du;
     uint32_t dv;
     uint32_t id;
     uint32_t gain;
 } hot_transition_t;
+
+// Mirrors hot_t in kernels.cu.
+typedef struct {
+    uint64_t offset;   // du * width + dv
+    uint32_t id;
+    uint32_t gain;
+} device_transition_t;
+
+// Mirrors bound_t in kernels.cu.
+typedef struct {
+    uint32_t du;
+    uint32_t dv;
+} device_bound_t;
+
+// On Pascal, tables smaller than this stay in the original order (13^9's 1,838 and 23^7's 9,969
+// transitions measured no faster sorted; 31^7's 24,179 measured 1.34x faster sorted).
+#define ORDERED_TABLE_LIMIT 12000
+
+static int compare_offsets(const void *left, const void *right) {
+    const hot_transition_t *a = left, *b = right;
+    if (a->du != b->du) return a->du < b->du ? -1 : 1;
+    if (a->dv != b->dv) return a->dv < b->dv ? -1 : 1;
+    return (a->id > b->id) - (a->id < b->id);
+}
 
 typedef struct {
     kh_parameters_t parameters;
@@ -253,27 +277,62 @@ int main(int argc, char **argv) {
             transition->gain,
         };
     }
+    // Scan order for locality (see kernels.cu): by predecessor row, then column. The kernel
+    // breaks ties by original id, so the result is the same as in the original order.
+    // Sorted by offset except small tables on Pascal (the P600s), where the original order with
+    // strict '>' measured faster (docs/DP_KERNEL_PROFILE.md). KH_DP_ORDER=sorted|original overrides.
+    const char *order_text = getenv("KH_DP_ORDER");
+    uint32_t ordered = order_text != NULL ? strcmp(order_text, "original") == 0
+                                          : cuda.arch < 70 && transitions.count < ORDERED_TABLE_LIMIT;
+    if (!ordered) {
+        qsort(hot, transitions.count, sizeof *hot, compare_offsets);
+    }
+    // The device reads each predecessor at a fixed offset before the cell; near the DP's zero
+    // edges (a predecessor row or column below 1) it also needs du and dv to skip it.
+    device_transition_t *device_hot = malloc((size_t)transitions.count * sizeof *device_hot + 16);
+    device_bound_t *device_bounds = malloc((size_t)transitions.count * sizeof *device_bounds + 16);
+    if (device_hot == NULL || device_bounds == NULL) {
+        fprintf(stderr, "kh_gpu_dp_tile: cannot allocate precomputed transitions\n");
+        return 1;
+    }
+    uint32_t max_du = 0, max_dv = 0;
+    for (uint32_t index = 0; index < transitions.count; ++index) {
+        device_hot[index] = (device_transition_t){(uint64_t)hot[index].du * tile.width + hot[index].dv,
+                                                   hot[index].id, hot[index].gain};
+        device_bounds[index] = (device_bound_t){hot[index].du, hot[index].dv};
+        if (hot[index].du > max_du) max_du = hot[index].du;
+        if (hot[index].dv > max_dv) max_dv = hot[index].dv;
+    }
+    uint32_t checked = tile.first_u <= max_du || tile.first_v <= max_dv;
 
-    kh_dptr_t d_values = 0, d_choices = 0, d_hot = 0;
+    kh_dptr_t d_values = 0, d_choices = 0, d_hot = 0, d_bounds = 0;
     int status_code = 0;
     const char *stage = "allocate";
     if ((status_code = cuda.cuMemAlloc(&d_values, value_bytes)) == 0 &&
         (status_code = cuda.cuMemAlloc(&d_choices, choice_bytes)) == 0 &&
-        (status_code = cuda.cuMemAlloc(&d_hot, (size_t)transitions.count * sizeof *hot + 16)) == 0) {
+        (status_code = cuda.cuMemAlloc(&d_hot, (size_t)transitions.count * sizeof *device_hot + 16)) == 0 &&
+        (status_code = cuda.cuMemAlloc(&d_bounds, (size_t)transitions.count * sizeof *device_bounds + 16)) == 0) {
         stage = "upload";
         if ((status_code = cuda.cuMemcpyHtoD(d_values, tile.values, value_bytes)) == 0 &&
             (status_code = cuda.cuMemsetD8(d_choices, 0, choice_bytes)) == 0 &&
-            (status_code = cuda.cuMemcpyHtoD(d_hot, hot, (size_t)transitions.count * sizeof *hot)) == 0) {
+            (status_code = cuda.cuMemcpyHtoD(d_hot, device_hot, (size_t)transitions.count * sizeof *device_hot)) == 0 &&
+            (status_code = cuda.cuMemcpyHtoD(d_bounds, device_bounds,
+                                             (size_t)transitions.count * sizeof *device_bounds)) == 0) {
             stage = "compute";
-            uint32_t slices = transitions.count >= 1024 ? 32 : transitions.count >= 256 ? 16 : 8;
+            // Warps per block, each scanning a slice of the table. 16 measured best for large tables
+            // on the RTX 3060 and the P600 (2026-10-06, docs/DP_KERNEL_PROFILE.md); KH_DP_SLICES
+            // (1-32) overrides it for experiments.
+            uint32_t slices = transitions.count >= 256 ? 16 : 8;
+            const char *slices_text = getenv("KH_DP_SLICES");
+            if (slices_text != NULL && atoi(slices_text) >= 1 && atoi(slices_text) <= 32) slices = (uint32_t)atoi(slices_text);
             unsigned blocks = (unsigned)((tile.tile_width + 31) / 32);
             uint64_t width = tile.width, tile_width = tile.tile_width, total = choice_bytes / 4;
             uint32_t count = transitions.count;
             double last_report = now();
             progress(0, total, "computing");
             for (uint32_t u = tile.first_u; status_code == 0 && u <= tile.last_u; ++u) {
-                void *args[] = {&d_values, &d_choices, &d_hot, &count, &u, &tile.first_u, &tile.first_v,
-                                &tile.last_v, &tile.origin_u, &tile.origin_v, &width, &tile_width};
+                void *args[] = {&d_values, &d_choices, &d_hot, &d_bounds, &count, &checked, &ordered, &u, &tile.first_u,
+                                &tile.first_v, &tile.last_v, &tile.origin_u, &tile.origin_v, &width, &tile_width};
                 status_code = kh_cuda_launch(&cuda, row_kernel, blocks, slices * 32, args);
                 if (status_code == 0 && now() - last_report > 1.0) {
                     status_code = cuda.cuCtxSynchronize();
@@ -306,6 +365,9 @@ int main(int argc, char **argv) {
     cuda.cuMemFree(d_values);
     cuda.cuMemFree(d_choices);
     cuda.cuMemFree(d_hot);
+    cuda.cuMemFree(d_bounds);
+    free(device_hot);
+    free(device_bounds);
     kh_cuda_close(&cuda);
     double t_compute = now();
 

@@ -33,6 +33,10 @@ bounded by halo assembly and transfer
 Raw numbers are in `results/bench.jsonl`, `results/bench_4096.log` and
 `../gpu_match_solver/results/p600_bench.jsonl`.
 
+**2026-10-06: 1.58× faster on the RTX 3060 and 1.33× on a P600 for heavy fields (31⁷),
+byte-identical.** Profiled with Nsight Compute; see [docs/DP_KERNEL_PROFILE.md](../docs/DP_KERNEL_PROFILE.md).
+The table below predates it.
+
 ## Design
 
 Every transition `(a, b, t)` has `a, b, t ≥ 1`, so cell `(u, v)` depends only on
@@ -40,13 +44,16 @@ cells in strictly earlier rows. One kernel launch computes a whole tile row:
 
 - Each block owns 32 consecutive cells, one per lane. For a fixed transition,
   the lanes read 32 consecutive predecessor values, which coalesces.
-- The block's warps (8–32 of them, by transition count) split the ordered
-  transition table into contiguous slices. Each slice keeps its best candidate
-  and the first index that reaches it, using strict `>`.
-- Slices merge in order, again with strict `>`. The result is exactly the CPU
-  kernel's sequential rule: the earliest transition in scan order that attains
-  the maximum, choice 0 when no candidate beats the initial 0, and uint64
-  wraparound.
+- The block's warps (16 for tables of 256 or more transitions, else 8) split the
+  transition table into contiguous slices. Each slice keeps its best candidate and
+  its transition id; a tie goes to the smaller original id.
+- Slices merge with the same rule. The result is exactly the CPU kernel's
+  sequential rule: the earliest transition in the original order that attains the
+  maximum, choice 0 when no candidate beats the initial 0, and uint64 wraparound.
+- Because ties are settled by id, the scan order is free: the host sorts the table
+  by `(du, dv)` so a warp's loads reuse cache lines (except small tables on Pascal,
+  which keep the original order and plain strict `>`). Each transition carries its
+  precomputed offset, and interior tiles skip the per-transition bounds checks.
 - The whole halo-plus-tile rectangle stays on the device, and rows run in order
   on one stream. A 4096 tile with a 23² halo needs about 250 MB, which fits a
   P600.

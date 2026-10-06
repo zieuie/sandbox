@@ -7,12 +7,12 @@ it computes the paper's DP split, finds the bipartite matching that makes the co
 valid, and stores a compact certificate that anyone can check, proving a lower bound on
 M(q + 1, q).
 
-## Status (2026-10-05)
+## Status (2026-10-06)
 
-- **72 fields proved**, from 2³ up to 29⁷ (M(29⁷ + 1, 29⁷) ≥ 2,218,287,697,118,362). Every
+- **73 fields proved**, from 2³ up to 31⁷ (M(31⁷ + 1, 31⁷) ≥ 4,470,713,705,180,443). Every
   field matched with the first polynomial tried. The table is [`results.md`](results.md).
-- **Still running:** the DP for 31⁷, the last DP field. New DP fields are switched off
-  (feeder setting `new_dp_fields` = 0); 31⁷ still gets its matching.
+- **DP is wrapped up** (feeder setting `new_dp_fields` = 0). 5¹⁵ was added by hand on 10-06
+  as a full-width rehearsal for the wide matcher; its DP is done and its matching is next.
 - **Blocked:** 7¹³ has its DP value, but its matching exceeds the block matcher's limits (F,
   q ≥ 2³⁶, about 166 GB of field rows). A wide solver and verifier that lift all three are built
   and tested ([gpu_wide_match_solver/](gpu_wide_match_solver/README.md)). What's left: a full-width
