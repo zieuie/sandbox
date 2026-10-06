@@ -7,11 +7,11 @@ it computes the paper's DP split, finds the bipartite matching that makes the co
 valid, and stores a compact certificate that anyone can check, proving a lower bound on
 M(q + 1, q).
 
-## Status (2026-10-04)
+## Status (2026-10-05)
 
-- **71 fields proved**, from 2³ up to 13⁹ (M(13⁹ + 1, 13⁹) ≥ 1,038,436,628,063,094). Every
+- **72 fields proved**, from 2³ up to 29⁷ (M(29⁷ + 1, 29⁷) ≥ 2,218,287,697,118,362). Every
   field matched with the first polynomial tried. The table is [`results.md`](results.md).
-- **Still running:** the DP for 29⁷ and 31⁷.
+- **Still running:** the DP for 31⁷.
 - **Blocked:** 7¹³ has its DP value, but its matching exceeds the matcher's 2³⁶ limit and
   needs about 200 GB of RAM ([docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)).
 - **The cluster:** a leader on merlin and ten household machines, each with an NVIDIA GPU,

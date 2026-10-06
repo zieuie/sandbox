@@ -1,6 +1,6 @@
 # Results
 
-Lower bounds M(q + 1, q) ≥ N proved by the campaign, as of 2026-10-04. Each number N is
+Lower bounds M(q + 1, q) ≥ N proved by the campaign, as of 2026-10-05. Each number N is
 the exact number of permutations in the array (q + F²·θ, with F = p^⌊r/2⌋). A `^` means
 the field's matching certificate was found and independently verified, so the bound is
 proved; see [docs/MATCHING_CERTIFICATE.md](docs/MATCHING_CERTIFICATE.md) for why that is
@@ -19,7 +19,7 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 17 | 338,130^ | 1,642,523,986^ | 8,064,313,527,762^ | — | — | — | — | — | — | — | — | — | — | — |
 | 19 | 555,940^ | 3,776,181,296^ | 25,887,466,479,060^ | — | — | — | — | — | — | — | — | — | — | — |
 | 23 | 1,296,050^ | 15,667,458,067^ | 190,564,823,479,032^ | — | — | — | — | — | — | — | — | — | — | — |
-| 29 | 3,741,609^ | 90,969,067,658^ | (running) | — | — | — | — | — | — | — | — | — | — | — |
+| 29 | 3,741,609^ | 90,969,067,658^ | 2,218,287,697,118,362^ | — | — | — | — | — | — | — | — | — | — | — |
 | 31 | 5,053,899^ | 150,087,862,357^ | (running) | — | — | — | — | — | — | — | — | — | — | — |
 | 37 | 11,288,774^ | 569,651,235,950^ | — | — | — | — | — | — | — | — | — | — | — | — |
 | 41 | 17,862,306^ | — | — | — | — | — | — | — | — | — | — | — | — | — |
@@ -42,12 +42,14 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 113 | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **71 fields are proved.** Every one matched with the first polynomial tried; no Hall
+- **72 fields are proved.** Every one matched with the first polynomial tried; no Hall
   obstruction has ever been found.
 - **7¹³** has its DP value (27,357,428,724,361,309) but no matching yet: q = 9.7 × 10¹⁰ is
   above the matcher's 2³⁶ limit and needs about 200 GB of RAM (see
-  [docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)).
-- **29⁷ and 31⁷** were still in DP on 2026-10-04.
+  [docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)). A solver that could do it is planned in
+  [docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md).
+- **29⁷** was matched on 2026-10-05 (GPU blocks on merlin, 109 blocks) and verified.
+- **31⁷** was still in DP on 2026-10-05.
 - **107³, 109³ and 113³** were cancelled before their DP finished.
 
 Regenerate this table from the live leader database with

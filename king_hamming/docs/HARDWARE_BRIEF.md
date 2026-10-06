@@ -47,14 +47,14 @@ pellinore (Dell XPS 15 9570, GTX 1050 Ti Max-Q, 2 × 8 GB DDR4 SO-DIMMs) was ret
 
 ## Where the work stands
 
-- **Done:** 71 fields are fully DP'd, matched and certified. The largest is 13⁹
-  (q = 1.06 × 10¹⁰): a 19.9 GB certificate, matched on merlin's RTX 3060 using about
-  18 GB of host RAM. Its verification needed 16.5 GiB.
-- **DP in progress:** 29⁷ (q = 1.7 × 10¹⁰) is 37% done and 31⁷ (q = 2.75 × 10¹⁰) is
-  21% done. The whole cluster finishes about 1,300 tiles an hour, so they need about two
-  more days. Their matchings should fit merlin: about 12–18 GB of rows, plus about
-  35–55 GB of scratch per copy of the choices.
-- **Blocked: 7¹³** (q = 9.7 × 10¹⁰). Its DP is done, but no machine can match it:
+- **Done:** 72 fields are fully DP'd, matched and certified. The largest is 29⁷
+  (q = 1.72 × 10¹⁰, matched 2026-10-05): a 32.3 GB certificate, matched on merlin's RTX 3060
+  in 109 blocks using about 18 GB of host RAM. Before it, 13⁹ (q = 1.06 × 10¹⁰, a 19.9 GB
+  certificate) needed 16.5 GiB to verify.
+- **DP in progress:** 31⁷ (q = 2.75 × 10¹⁰) is 63% done on 2026-10-05 at 9 pm. At about
+  1,570 tiles an hour it should finish around mid-morning on 10-06. Its matching should fit
+  merlin, as 29⁷'s did.
+- **Blocked: 7¹³** (q = 9.7 × 10¹⁰). Its DP is done, but no machine can match it (a solver that could is planned in [GPU_WIDE_MATCHING_PLAN.md](GPU_WIDE_MATCHING_PLAN.md)):
   - **RAM:** about 166 GB of field rows plus a 12 GB bitmap, so about 180–200 GB on one
     machine.
   - **Disk:** about 190 GB of scratch choices, a 206 GB certificate, and copies, so about

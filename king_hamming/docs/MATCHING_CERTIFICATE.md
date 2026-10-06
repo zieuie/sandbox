@@ -200,8 +200,8 @@ requests that together can reach fewer positions than there are requests. The sa
 checker recounts that neighbourhood. It proves only that *this* shape cannot be
 matched with *this* polynomial.
 
-**In practice, none has failed.** As of 2026-10-04 the campaign has matched 71 fields,
-up to 13⁹, and every one succeeded with the first primitive polynomial tried. All 71
+**In practice, none has failed.** As of 2026-10-05 the campaign has matched 72 fields,
+up to 29⁷, and every one succeeded with the first primitive polynomial tried. All 72
 archived certificates are full matchings and none is a Hall witness (checked from each
 file's outcome field and the leader's run records). That is empirical support for the
 paper's remark that a matching has been found in every case tried, now at much larger
