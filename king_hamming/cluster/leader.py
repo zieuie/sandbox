@@ -31,6 +31,7 @@ import retention
 import replication
 import adapters
 import gpus
+import placement
 import thermal
 from resources import ResourceRequest, fits as resource_fits, normalized_slots
 
@@ -1319,6 +1320,12 @@ def make_handler(
                     ).fetchall()
                     candidates = locality_order(connection, node["node_name"],
                                                 [dict(candidate) for candidate in candidates], now)
+                    # Setting dp_tile_placement="ect": critical-path order, and critical tiles wait
+                    # for a GPU that would finish them sooner (cluster/placement.py).
+                    use_placement = placement.enabled(connection)
+                    placement_machines = None
+                    if use_placement:
+                        candidates = placement.order(candidates)
                     row = None
                     selected = []
                     live_compute = connection.execute(
@@ -1337,6 +1344,11 @@ def make_handler(
                         sharing = required == 1 and bool(adapter.allows_host_sharing(specification))
                         if adapter.needs_free_gpu(connection, specification) and gpus_all_leased(connection, node):
                             continue
+                        if use_placement and placement.tile_of(specification) is not None:
+                            if placement_machines is None:
+                                placement_machines = placement.gpu_machines(connection, now, lease_seconds)
+                            if placement.withhold(connection, dict(node), specification, placement_machines, now):
+                                continue
                         active_on_host = connection.execute(
                             "SELECT COUNT(*) AS count,COALESCE(SUM(reserved_memory_bytes),0) AS memory "
                             "FROM runs WHERE node_name=? AND state='running'",

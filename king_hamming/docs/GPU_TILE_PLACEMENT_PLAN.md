@@ -1,7 +1,56 @@
 # Plan: placing DP tiles on GPUs by completion time, dependencies and field progress
 
-Status: **proposal (2026-10-05)**, nothing implemented. Measurements are from the live
-campaign (29⁷ and 31⁷ DP, ten machines) on the night of 2026-10-04.
+Status (2026-10-06): **steps 1, 3 and 5 built** (simulator, critical-path order, earliest-completion
+placement with tail mode), **off by default**. Leader setting `dp_tile_placement`: `pull` (today's
+order) or `ect`. Step 4 (an in-flight cap) was dropped: the simulator showed it doesn't help (see
+"Simulation results" below). Proposed 2026-10-05, with measurements from the live campaign (29⁷ and
+31⁷ DP, ten machines) on the night of 2026-10-04.
+
+## Simulation results (2026-10-06)
+
+`dp_solver/placement_sim.py` replays a finished field: its tile DAG, every machine's slots and its
+one GPU (kernels in order of arrival), and each tile's fetch, kernel, pack and publish times as
+recorded. Kernel times move between GPUs by their measured ratio: P600 ×12, T1000 ×5.2, against
+merlin's 3060.
+
+**Replay of 31⁷ alone**, from 17:40 on 10-05 (after 29⁷'s DP) to the end. merlin's GPU is held
+until 20:12 by 29⁷'s matching, as it really was. The real run took **18.1 h**; the simulator gives
+19.2 h for today's policy (7% pessimistic), so it's close enough to compare policies.
+
+| Policy | Time | Last ~40 diagonals | merlin's GPU busy | P600s busy |
+|---|---|---|---|---|
+| today (pull, cheapest first) | 19.24 h | 97 min | 78% | 98% |
+| critical-path order only | 18.57 h | 95 min | 84% | 98% |
+| plus in-flight cap of 2 | 17.41 h | 60 min | 96% | 99% |
+| in-flight cap of 1 | 21.13 h | 53 min | 69% | 89% |
+| **`ect`, as built (no cap)** | **17.08 h** | **39 min** | **99.7%** | 98.5% |
+
+- **The gain is merlin's.** Under pull, the P600s hold tiles that merlin finishes 12 times faster,
+  so merlin's GPU waits. With `ect`, critical tiles wait a few seconds for merlin instead.
+- **The in-flight cap** is a blunt version of the same idea: at 2 it helps, at 1 it starves every
+  GPU, at 3–4 it does nothing. `ect` gets more without it, so it was dropped.
+- **For a field like 17⁹** (about 1.4 days of DP), 11% is roughly 4 hours, about an hour of it in
+  the tail.
+- **Run-to-run variation:** under 1% across 3 random orders of machines asking.
+
+**How `ect` decides** (`cluster/placement.py`):
+- **Order:** a field's tiles go lowest anti-diagonal first (ties by age). Reconstruction first,
+  priority and fairness between fields are the leader's as before.
+- **Critical tiles:** a tile on its field's 3 lowest unfinished anti-diagonals, or any tile once
+  820 or fewer remain (about the last 40 diagonals).
+- **The rule:** a critical tile is skipped for the asking machine when another live, unpaused GPU
+  machine would finish it sooner by more than one kernel on the fastest GPU. The estimate for a
+  machine is: wait for a slot if it's full, then its queue of tiles before their kernels, then its
+  overhead, the kernel and the overhead after.
+- **The model:** medians of each machine's last 200 completed tiles on that field (at least 5),
+  refreshed every 30 s. Running-tile counts are refreshed every 2 s. A machine with no history on
+  the field never has a tile held back, and machines whose GPU is held by a GPU lease (a matching)
+  are not counted as alternatives.
+- **Safety:** nothing is pushed, so a dead machine simply stops asking. Leases, fencing and
+  recovery are unchanged, and setting it back to `pull` takes effect at the next lease.
+
+**To turn it on:** `INSERT OR REPLACE INTO settings(key,value) VALUES('dp_tile_placement','ect')` in
+the leader database (or through a future dashboard toggle). No restart is needed.
 
 ## Why
 
