@@ -1,3 +1,15 @@
+# Linking duplicate certificates
+
+`link_certificates.py` turns archived certificates in `matching-results/` that are also in this
+machine's blob store into hard links of one file. It checks both copies against the leader's
+recorded hash first, and reports only unless `--apply`. On 2026-10-06 it found 69.6 GB of
+duplicates on merlin (13⁹, 29⁷ and five smaller ones). New certificates are linked as they are
+made (see [gpu_wide_match_solver](../../gpu_wide_match_solver/README.md), "In the campaign").
+
+```sh
+python3 cluster/ops/link_certificates.py --state cluster/deployments/continuous-campaign [--apply]
+```
+
 # Wi-Fi watchdog (all workers)
 
 `wifi_watchdog.py` is a standalone system service, installed on dp-101–108 and gawain on

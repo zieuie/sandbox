@@ -42,11 +42,23 @@ def contents(path: Path) -> bytes:
     return path.read_bytes() if path.stat().st_size <= INLINE_BYTES else b""
 
 
+def local_blob(digest: str, roots) -> Path | None:
+    """The artifact's file in a blob store on this machine (content-addressed: root/aa/rest), if any."""
+    for root in roots:
+        candidate = Path(root) / digest[:2] / digest[2:]
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def retrieve(run: dict, output: Path, maximum: int,
-             nodes: list[dict] | tuple = (), timeout: float = 60) -> bytes:
+             nodes: list[dict] | tuple = (), timeout: float = 60, local_roots=()) -> bytes:
     """Atomically retain an artifact from any live source after size/hash checks.
 
-    Returns its bytes if at most INLINE_BYTES, else b"" (the verified file is at output)."""
+    A copy already in a blob store on this machine (local_roots) on output's filesystem is
+    hash-checked and hard-linked rather than downloaded: blobs are immutable, and a 7^13 matching
+    certificate is 206 GB. Returns its bytes if at most INLINE_BYTES, else b"" (the verified
+    file is at output)."""
     digest = run.get("artifact_hash")
     if (not isinstance(digest, str) or len(digest) != 64 or maximum < 1 or
             not live_sources(run, nodes)):
@@ -59,6 +71,19 @@ def retrieve(run: dict, output: Path, maximum: int,
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp-" + uuid.uuid4().hex)
     errors = []
+    local = local_blob(digest, local_roots)
+    if local is not None and local.stat().st_dev == output.parent.stat().st_dev:
+        try:
+            size, checksum = file_digest(local)
+            if size > maximum or checksum != digest:
+                raise ValueError("local blob differs from the leader's record")
+            os.link(local, temporary)
+            temporary.replace(output)
+            return contents(output)
+        except (OSError, ValueError) as error:
+            errors.append(f"{local}: {error}")
+        finally:
+            temporary.unlink(missing_ok=True)
     try:
         for source in live_sources(run, nodes):
             temporary.unlink(missing_ok=True)

@@ -96,14 +96,16 @@ function phaseTable(run) {
 const GPU_STAGES = [['field', 'field build (CPU)'], ['upload', 'upload'], ['greedy', 'greedy'],
   ['augment', 'augmenting'], ['blocks', 'block matching'], ['exchange', 'exchange rounds'], ['output', 'payload write']];
 
-// Stages of a block GPU run, in order (keys from gpu_block_match_solver/cluster_solver.py; the agent
-// adds "verify"). Units say how a stage's done/total counts are shown.
+// Stages of a block or wide GPU run, in order (keys from gpu_block_match_solver/cluster_solver.py and
+// gpu_wide_match_solver; the agent adds "verify"). A wide run builds field rows once per pass.
+// Units say how a stage's done/total counts are shown.
 const BLOCK_STAGES = [
   ['gpu_wait', 'Waiting for the GPU', null],
   ['field', 'Building field rows (CPU)', 'labels'],
   ['blocks', 'Matching blocks (GPU)', 'blocks'],
   ['exchange', 'Exchange rounds (GPU)', 'rounds'],
   ['write', 'Writing the result (CPU)', 'requests'],
+  ['check', 'Checking the result (CPU)', 'requests'],
   ['publish', 'Publishing the certificate', 'bytes'],
   ['verify', 'Independent verification', null],
 ];

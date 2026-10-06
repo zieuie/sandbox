@@ -159,6 +159,28 @@ def main() -> int:
             output = directory / f"{khdp.stem}.khmatch"
             publish(output, header(dp, digest, metadata), payload)
             check_certificate(khdp.stem, dp, output, directory, rng)
+            # artifacts.verify (agent and feeder) switches to kh_verify_wide when kh_verify_khm1 can't
+            # take the field: forced here by pretending q is past its 2^36 limit.
+            from matching_solver import artifacts
+            original_limit = artifacts.NATIVE_MAX_Q
+            artifacts.NATIVE_MAX_Q = 1
+            try:
+                summary = artifacts.verify(output, dp, digest, 2**30)
+                assert summary["verified"] and summary["matched"] == summary["required"], summary
+                bad = directory / f"{khdp.stem}.flipped.khmatch"
+                data = bytearray(output.read_bytes())
+                data[len(data) // 2] ^= 0x10
+                body = bytes(data[:-32])
+                import hashlib
+                bad.write_bytes(body + hashlib.sha256(body).digest())   # valid checksum, wrong choice
+                try:
+                    artifacts.verify(bad, dp, digest, 2**30)
+                    raise AssertionError("artifacts.verify accepted a corrupted certificate via kh_verify_wide")
+                except ValueError:
+                    pass
+            finally:
+                artifacts.NATIVE_MAX_Q = original_limit
+            print(f"ok artifacts.verify via kh_verify_wide: {khdp.stem}")
         shutil.rmtree(directory, ignore_errors=True)
     print("ok check_verify")
     return 0

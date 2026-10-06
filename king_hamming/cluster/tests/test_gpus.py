@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check GPU registration, fencing, host locks, and match_gpu / match_gpu_blocks admission."""
+"""Check GPU registration, fencing, host locks, and match_gpu / match_gpu_blocks / match_gpu_wide admission."""
 
 from __future__ import annotations
 
@@ -239,14 +239,16 @@ class GPUBlockTests(unittest.TestCase):
 
     def setUp(self) -> None:
         from gpu_block_match_solver import adapter
-        patcher = unittest.mock.patch.object(adapter, "MIN_DEVICE_BYTES", MIB)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        from gpu_wide_match_solver import adapter as wide
+        for module in (adapter, wide):
+            patcher = unittest.mock.patch.object(module, "MIN_DEVICE_BYTES", MIB)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    def node(self, name: str, device: dict, ram: int = 16 * 1024**3) -> dict:
+    def node(self, name: str, device: dict, ram: int = 16 * 1024**3, disk: int = 2 * 1024**4) -> dict:
         import json
         return {"node_name": name, "state": "healthy", "compute_enabled": 1, "memory_bytes": ram,
-                "gpus_json": json.dumps([device])}
+                "gpus_json": json.dumps([device]), "storage_free_bytes": disk}
 
     def test_plan_uses_blocks_only_when_the_whole_field_does_not_fit(self) -> None:
         from campaigns import gpu_policy
@@ -259,7 +261,11 @@ class GPUBlockTests(unittest.TestCase):
         self.assertEqual(plan["workers"], 1)
         # A GPU that holds the field keeps the single-GPU program.
         self.assertEqual(gpu_policy.plan(dp, {}, [self.node("small", SMALL), self.node("p600", P600)])["program"], "match_gpu")
-        self.assertIsNone(gpu_policy.plan(dp, {"gpu_block_matching": False}, [self.node("small", SMALL)]))
+        # Without block matching the wide matcher takes it; with neither, nothing does.
+        self.assertEqual(gpu_policy.plan(dp, {"gpu_block_matching": False}, [self.node("small", SMALL)])["program"],
+                         "match_gpu_wide")
+        self.assertIsNone(gpu_policy.plan(dp, {"gpu_block_matching": False, "gpu_wide_matching": False},
+                                          [self.node("small", SMALL)]))
         self.assertIsNone(gpu_policy.plan(dp, {}, [self.node("small", SMALL, ram=64 * MIB)]))
         self.assertIsNone(gpu_policy.plan(dp, {}, [{**self.node("small", SMALL), "state": "unavailable"}]))
 
@@ -272,14 +278,18 @@ class GPUBlockTests(unittest.TestCase):
         self.assertIsNone(gpu_policy.blocker(dp, {"gpu_matching": False}, [self.node("small", SMALL)]))
         self.assertEqual(gpu_policy.blocker(dp, {}, [self.node("cpu", SMALL) | {"gpus_json": "[]"}]),
                          "no machine with a GPU is online")
-        self.assertIn("of host RAM; the largest GPU machine has",
-                      gpu_policy.blocker(dp, {}, [self.node("small", SMALL, ram=64 * MIB)]))
-        self.assertIn("block matching is turned off",
-                      gpu_policy.blocker(dp, {"gpu_block_matching": False}, [self.node("small", SMALL)]))
+        # Every binding limit is named: the block matcher's, then the wide matcher's.
+        note = gpu_policy.blocker(dp, {}, [self.node("small", SMALL, ram=64 * MIB)])
+        self.assertIn("block matching needs", note)
+        self.assertIn("wide matching needs at least", note)
+        off = {"gpu_block_matching": False, "gpu_wide_matching": False}
+        self.assertEqual(gpu_policy.blocker(dp, off, [self.node("small", SMALL)]),
+                         "block matching is turned off; wide matching is turned off")
         with unittest.mock.patch.object(adapter, "MAX_Q", dp["q"] - 1):
-            self.assertIsNone(gpu_policy.plan(dp, {}, [self.node("small", SMALL)]))
-            self.assertEqual(gpu_policy.blocker(dp, {}, [self.node("small", SMALL)]),
-                             f"q = {dp['q']:,} is above the block matcher's limit of {dp['q'] - 1:,}")
+            self.assertEqual(gpu_policy.plan(dp, {}, [self.node("small", SMALL)])["program"], "match_gpu_wide")
+            self.assertEqual(gpu_policy.blocker(dp, {"gpu_wide_matching": False}, [self.node("small", SMALL)]),
+                             f"q = {dp['q']:,} is above the block matcher's {dp['q'] - 1:,}; "
+                             "wide matching is turned off")
 
     def test_fields_above_2_32_go_to_block_mode_on_a_host_with_the_ram(self) -> None:
         from campaigns import gpu_policy
@@ -296,7 +306,9 @@ class GPUBlockTests(unittest.TestCase):
         # Rows of the used cells only (a_max = 5 of 13) and choices in a scratch file: under 20 GiB.
         self.assertLess(host_bytes(dp, 4), 20 * 1024**3)
         self.assertGreater(host_bytes(dp, 4, choice_file=False), 35 * 1024**3)
-        self.assertIn("of host RAM", gpu_policy.blocker(dp, {}, [self.node("small", rtx)]))
+        # A host without the block matcher's RAM takes it in row passes instead.
+        self.assertEqual(gpu_policy.plan(dp, {}, [self.node("small", rtx)])["program"], "match_gpu_wide")
+        self.assertIn("of host RAM", gpu_policy.blocker(dp, {"gpu_wide_matching": False}, [self.node("small", rtx)]))
         job = specification(big, "2,7,0,0,0,0,0,0,0,1", threads=4, gpu_memory_bytes=plan["gpu_memory_bytes"])
         GPUBlockMatchingAdapter().validate(job)
         with self.assertRaisesRegex(ValueError, "uint32 labels"):
@@ -346,6 +358,93 @@ class GPUBlockTests(unittest.TestCase):
         self.assertTrue(command[1].endswith("gpu_block_match_solver/cluster_solver.py"))
         self.assertIn("--poly", command)
 
+
+
+class GPUWideTests(unittest.TestCase):
+    """match_gpu_wide: planned past the block matcher's limits (F, q, rows in RAM), sized to the host."""
+
+    handler = GPUSchedulingTests.handler
+    register = GPUSchedulingTests.register
+    node = GPUBlockTests.node
+
+    def setUp(self) -> None:
+        from gpu_wide_match_solver import adapter
+        patcher = unittest.mock.patch.object(adapter, "MIN_DEVICE_BYTES", MIB)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def wide_dp(p: int, r: int) -> dict:
+        """A full-field DP document (every cell of every coset requested, so n = q), as for 5^15."""
+        f = p ** (r // 2)
+        return {"p": p, "r": r, "q": p ** r, "f": f, "runs": [{"a": p, "t": f, "repeat": 1}]}
+
+    def test_fields_past_the_block_matcher_go_wide_on_merlin_only(self) -> None:
+        from campaigns import gpu_policy
+        from gpu_wide_match_solver import adapter
+        rtx = {"index": 0, "name": "RTX 3060", "arch": 86, "total_bytes": 6 * 1024**3}
+        t1000 = {"index": 0, "name": "T1000", "arch": 75, "total_bytes": 4 * 1024**3}
+        nodes = [self.node("merlin", rtx, ram=40 * 1024**3), self.node("gawain", t1000, ram=8 * 1024**3),
+                 self.node("p600", P600, ram=8 * 1024**3)]
+        for p, r in ((7, 13), (5, 15)):
+            dp = self.wide_dp(p, r)
+            plan = gpu_policy.plan(dp, {}, nodes)
+            self.assertEqual((plan["program"], plan["hosts"]), ("match_gpu_wide", ["merlin"]), (p, r))
+            # Three quarters of merlin's memory after the reserve: rows in passes, not all at once.
+            self.assertEqual(plan["max_bytes"], gpu_policy.wide_usable(nodes[0]))
+            self.assertLess(plan["max_bytes"], adapter.all_rows_bytes(dp, 4))
+            self.assertGreater(plan["blocks"], 100)
+            self.assertIsNone(gpu_policy.blocker(dp, {}, nodes))
+        # 7^13 needs a 12 GB endpoint bitmap to verify, which gawain can't hold.
+        note = gpu_policy.blocker(self.wide_dp(7, 13), {}, nodes[1:])
+        self.assertIn("F = 117,649 is above the block matcher's 65,534", note)
+        self.assertIn("q = 96,889,010,407 is above the block matcher's", note)
+        self.assertIn("wide matching needs at least", note)
+        # The certificate must fit on the host's disk with the free-space floor to spare: today
+        # merlin has about 146 GB free, enough for 5^15 (65 GB) but not for 7^13 (206 GB).
+        today = [self.node("merlin", rtx, ram=40 * 1024**3, disk=146 * 10**9)]
+        self.assertEqual(gpu_policy.plan(self.wide_dp(5, 15), {}, today)["program"], "match_gpu_wide")
+        self.assertIsNone(gpu_policy.plan(self.wide_dp(7, 13), {}, today))
+        self.assertIn("certificate; the GPU machine with the memory for it has",
+                      gpu_policy.blocker(self.wide_dp(7, 13), {}, today))
+        self.assertGreater(gpu_policy.certificate_bytes(self.wide_dp(7, 13)), 200 * 10**9)
+        # Another machine's free disk doesn't count: gawain has the disk but not the memory.
+        self.assertIn("with the memory for it has", gpu_policy.blocker(
+            self.wide_dp(7, 13), {}, today + [self.node("gawain", t1000, ram=8 * 1024**3, disk=859 * 10**9)]))
+        # p = 2 can't mark 'unmatched' in the payload (F is a power of two).
+        self.assertIsNone(gpu_policy.wide_plan(self.wide_dp(2, 37), {}, nodes, 4))
+
+    def test_adapter_validates_and_runs_the_wide_bridge(self) -> None:
+        from gpu_wide_match_solver.adapter import GPUWideMatchingAdapter, minimum_host_bytes
+        from gpu_wide_match_solver.submit import specification
+        adapter = GPUWideMatchingAdapter()
+        job = specification(EXAMPLE, "2,4,0,0,0,1", threads=2, gpu_memory_bytes=20 * MIB)
+        adapter.validate(job)
+        self.assertEqual(job["program"], "match_gpu_wide")
+        self.assertEqual(adapter.resource_requirements(job)["gpu_memory_bytes"], 20 * MIB)
+        self.assertEqual(adapter.resource_requirements(job)["coordinator_memory_bytes"], job["arguments"]["max_bytes"])
+        command = adapter.command(job, Path("/x/out.khmatch"), None, 0)
+        self.assertTrue(command[1].endswith("gpu_wide_match_solver/cluster_solver.py"))
+        from matching_solver.artifacts import load_dp
+        dp, _ = load_dp(EXAMPLE)
+        small = specification(EXAMPLE, "2,4,0,0,0,1", threads=2, gpu_memory_bytes=20 * MIB,
+                              max_bytes=minimum_host_bytes(dp, 2, 20 * MIB) - 1)
+        with self.assertRaisesRegex(ValueError, "below the wide matcher's minimum"):
+            adapter.validate(small)
+        with self.assertRaises(ValueError):
+            adapter.validate(specification(EXAMPLE, "2,4,0,0,0,1", threads=2, gpu_memory_bytes=2 * MIB))
+        files = [target for _, target in adapter.runtime_files()]
+        self.assertIn("gpu_wide_match_solver/kh_verify_wide", files)
+
+    def test_wide_jobs_lease_on_a_device_that_fits(self) -> None:
+        from gpu_wide_match_solver.submit import specification
+        with tempfile.TemporaryDirectory() as directory:
+            database, handler = self.handler(directory)
+            self.register(handler, "small", [SMALL])
+            job = specification(EXAMPLE, "2,4,0,0,0,1", threads=2, gpu_memory_bytes=20 * MIB)
+            handler.dispatch_post("/v1/enqueue", {"specification": job, "priority": 100})
+            leased = handler.dispatch_post("/v1/lease", {"node_name": "small", "slot_id": 0})["job"]
+            self.assertEqual((leased["specification"]["program"], leased["gpu_index"]), ("match_gpu_wide", 0))
 
 
 class DPTileGPUAdmissionTests(unittest.TestCase):

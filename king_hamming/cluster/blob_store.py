@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 BLOCK_BYTES = 1024 * 1024
 SYNC_BYTES = 256 * 1024 * 1024  # large blobs write through; see matching_solver.artifacts.SYNC_BYTES
+LINK_BYTES = 1024**3            # store_blob(link=True) hard-links sources at least this big
 
 
 # Reject names that could escape the content-addressed storage tree.
@@ -70,11 +71,20 @@ def file_digest(path: Path, check: Callable[[], None] | None = None) -> str:
 
 # Copy an immutable source once while hashing, then publish only durable bytes.
 def store_blob(
-    source: Path, root: Path, check: Callable[[], None] | None = None,
+    source: Path, root: Path, check: Callable[[], None] | None = None, link: bool = False,
 ) -> tuple[str, Path]:
-    """Copy source with bounded memory; return its digest and fsynced CAS path."""
+    """Copy source with bounded memory; return its digest and fsynced CAS path.
+
+    With link=True, a source of at least LINK_BYTES on the store's filesystem is hashed and
+    hard-linked instead of copied. Only for results nothing writes again: a 7^13 matching
+    certificate is 206 GB, and a copy would need that much more disk on the same machine.
+    """
 
     root.mkdir(parents=True, exist_ok=True)
+    if link:
+        status = source.stat()
+        if status.st_size >= LINK_BYTES and status.st_dev == root.stat().st_dev:
+            return link_blob(source, root, check)
     descriptor, name = tempfile.mkstemp(prefix=".store-", dir=root)
     temporary = Path(name)
     digest = hashlib.sha256()
@@ -106,6 +116,30 @@ def store_blob(
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         # Replacement also repairs an existing file whose name survived disk corruption.
+        os.replace(temporary, destination)
+        sync_directory(destination.parent)
+        sync_directory(root)
+        return identity, destination
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def link_blob(source: Path, root: Path, check: Callable[[], None] | None = None) -> tuple[str, Path]:
+    """Hash an immutable source and hard-link it into the store; return its digest and path."""
+
+    before = source.stat()
+    identity = file_digest(source, check)
+    after = source.stat()
+    if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
+        raise ValueError("source changed while it was hashed")
+    with source.open("rb") as stream:   # its writer synced it; make sure before naming it a blob
+        os.fsync(stream.fileno())
+    destination = blob_path(root, identity)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = root / f".store-link-{os.getpid()}-{identity[:16]}"
+    temporary.unlink(missing_ok=True)
+    try:
+        os.link(source, temporary)
         os.replace(temporary, destination)
         sync_directory(destination.parent)
         sync_directory(root)

@@ -11,8 +11,9 @@ import json
 import sqlite3
 from typing import Callable
 
-MATCH_PROGRAMS = ("match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks")
-STAGE_KEYS = ("gpu_wait", "field", "blocks", "exchange", "write", "publish", "verify")
+MATCH_PROGRAMS = ("match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks", "match_gpu_wide")
+STAGE_KEYS = ("gpu_wait", "field", "blocks", "exchange", "write", "check", "publish", "verify")
+BLOCK_PROGRAMS = {"match_gpu_blocks", "match_gpu_wide"}   # bridges that report their stages
 QUIET_SECONDS = 300   # mirrors the "no-progress-warning" threshold in snapshot.solver_health
 
 
@@ -21,7 +22,7 @@ def number(value) -> float | int | None:
 
 
 def block_stages(run: dict, record: dict) -> list[dict]:
-    """The stages of a match_gpu_blocks run from its bridge's record (progress message), plus the
+    """The stages of a match_gpu_blocks or match_gpu_wide run from its bridge's record (progress message), plus the
     agent's verification, which follows publication: [{key, started, finished, done, total}]."""
     stages = []
     for item in record.get("stages") or []:
@@ -87,7 +88,7 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
                 machines.append(machine)
         gpu = None
         phase_rows = None
-        if description.get("program") in {"match_gpu", "match_gpu_blocks"}:
+        if description.get("program") in {"match_gpu", "match_gpu_blocks", "match_gpu_wide"}:
             gpu = {"index": run.get("gpu_index"), "device": None, "phases": None, "seconds": None}
             try:
                 summary = json.loads(run["progress_message"] or "{}")
@@ -96,7 +97,7 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
             if isinstance(summary, dict):
                 trace = summary.get("trace")
                 if isinstance(trace, list) and (run["state"] == "complete" or
-                                                description.get("program") == "match_gpu_blocks"):
+                                                description.get("program") in BLOCK_PROGRAMS):
                     # The chart reads checkpoint-like rows: [step, matched, time]. A GPU run has no
                     # checkpoints, so rebuild them from the kernel's own record of unmatched counts
                     # (a block run keeps it up to date while running).
@@ -108,7 +109,7 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
                            seconds=summary.get("seconds"), scans=summary.get("scans"),
                            blocks=summary.get("blocks"), rounds=summary.get("rounds"),
                            residual_round1=summary.get("residual_round1"))
-                if description.get("program") == "match_gpu_blocks":
+                if description.get("program") in BLOCK_PROGRAMS:
                     gpu["stages"] = block_stages(run, summary)
         health_label = health(run, now)
         if gpu and gpu.get("stages") and health_label in ("no-progress-warning", "stalled"):
@@ -127,7 +128,7 @@ def build_matching(connection: sqlite3.Connection, names: dict[str, str],
             "last_progress_at": run["last_progress_at"], "attempt": run.get("lease_attempt"),
             "error": (run["error"] or "")[:300] or None, "outcome": outcome,
             "machines": machines, "phases": phase_rows if phase_rows is not None else phases[run["run_id"]],
-            "step_label": ("block, then round" if description.get("program") == "match_gpu_blocks"
+            "step_label": ("block, then round" if description.get("program") in BLOCK_PROGRAMS
                            else "greedy, then phase" if gpu else "phase"), "resources": usage[run["run_id"]],
         })
     rank = {"running": 0, "stopping": 0, "queued": 1, "waiting": 1, "paused": 2}

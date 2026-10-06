@@ -116,6 +116,7 @@ Pipeline settings (optional; defaults shown):
 | `gpu_matching` | `true` | route GPU-sized fields to `match_gpu` |
 | `gpu_matching_threads` | `4` | CPU threads for field construction |
 | `gpu_block_matching` | `true` | when no GPU holds the whole field, plan `match_gpu_blocks` on the largest GPU |
+| `gpu_wide_matching` | `true` | past the block matcher's limits, plan `match_gpu_wide` (below) |
 
 With the 2026-10-02 fleet, Merlin's 3060 admitted fields up to about 180 M
 labels, including the previously blocked 3^17 and 2^27, and the P600 nodes up to
@@ -132,6 +133,19 @@ for 17^7, a P600 needs 9). On the 2026-10-02 fleet all five large fields were ad
 (11.1 GiB) on all ten, and 11^9 (13.3 GiB) on merlin and the P600 machines. The leader only
 places a job where its memory fits beside the DP tiles already reserved on that host, so the
 big ones in practice land on merlin.
+
+**Third tier (since 2026-10-06): `match_gpu_wide`** ([gpu_wide_match_solver](../gpu_wide_match_solver/README.md)).
+A field the block matcher refuses gets this plan:
+- **Why refused:** F above 65,534, q at or above 2³⁶, or its rows don't fit in RAM.
+- **Which hosts:** any healthy host whose GPU takes a block, whose memory after the reserve
+  covers the wide matcher's minimum, and **whose free disk holds the certificate plus
+  `minimum_free_bytes`**. The payload is written in place on that host: 206 GB for 7¹³.
+- **Memory:** the run asks for 75% of the smallest such host's memory after the reserve, so
+  about 28 GiB on merlin. More memory only means fewer row passes.
+- **On the dashboard:** the field's note lists every limit that binds, the block matcher's and
+  then the wide matcher's.
+- **Not copied:** the bridge publishes the certificate in place. The agent's blob store and
+  the feeder's archive hard-link it, and check it against its hash instead of copying it.
 
 Fields with more than 2^32 labels (up to 2^36) use 64-bit block matching, built for 13^9; see
 [MATCHING_13_9.md](MATCHING_13_9.md). 13^9 matched on merlin in about an hour of solver time

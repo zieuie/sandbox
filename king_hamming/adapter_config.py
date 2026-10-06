@@ -16,3 +16,5 @@ def configure(register):
     register(GPUMatchingAdapter())
     from gpu_block_match_solver.adapter import GPUBlockMatchingAdapter
     register(GPUBlockMatchingAdapter())
+    from gpu_wide_match_solver.adapter import GPUWideMatchingAdapter
+    register(GPUWideMatchingAdapter())

@@ -13,6 +13,10 @@ import tempfile
 from dp_solver.artifacts import dimensions, varint
 
 NATIVE_VERIFIER = Path(__file__).resolve().parent / "kh_verify_khm1"
+# Multi-pass, multi-threaded verifier for fields kh_verify_khm1 can't hold (rows above the memory
+# limit, q >= 2^36); built with gpu_wide_match_solver. Same arguments plus --threads, --row-bytes.
+WIDE_VERIFIER = Path(__file__).resolve().parent.parent / "gpu_wide_match_solver" / "kh_verify_wide"
+NATIVE_MAX_Q = 1 << 36
 NATIVE_MIN_LABELS = 1 << 24  # below this the Python verifier is fast enough
 # Large copies write through every SYNC_BYTES: gigabytes of dirty pages once delayed the
 # leader's SQLite fsyncs on the same disk past every lease (all leases expired at once).
@@ -45,6 +49,42 @@ def file_hash(path):
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.digest()
+
+
+# A payload written in place after a reserved header (kh_gpu_wide_kernel --payload-offset) is
+# published without copying it: at 7^13 a copy would be another 206 GB on merlin's disk.
+def publish_in_place(work, path, header, progress=None):
+    """Write header over work's zeroed prefix, append the checksum, and link work to fresh path.
+
+    work holds len(header) zero bytes and then the payload. progress, if given, is called with
+    (bytes hashed, file bytes). work is gone afterwards; path must not exist."""
+    work, path = Path(work), Path(path)
+    size = work.stat().st_size
+    with work.open("r+b") as stream:
+        if stream.read(len(header)) != bytes(len(header)):
+            raise ValueError("payload file lacks its reserved header space")
+        stream.seek(0)
+        stream.write(header)
+        stream.flush()
+        stream.seek(0)
+        digest, hashed = hashlib.sha256(), 0
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+            hashed += len(chunk)
+            if progress is not None:
+                progress(hashed, size)
+        if hashed != size:
+            raise ValueError("payload file changed while it was hashed")
+        stream.write(digest.digest())
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.link(work, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    work.unlink()
 
 
 # Publish complete artifacts without overwriting previous attempts.
@@ -259,6 +299,39 @@ def native_memory(dp, q, f):
     return 4 * f * amax * f + breakpoints + (q + 7) // 8 + 4 * dimensions(dp["p"], dp["r"])[2] + 64 * 1024 * 1024
 
 
+def wide_fixed_memory(dp, q, f, threads):
+    """Bytes kh_verify_wide needs before any rows: per-chunk offsets of every cell, the endpoint
+    bitmap, and slack. Mirrors src/verify_wide.c; each held row adds wide_row_bytes()."""
+    nbp, budget = (q - 1) >> 32, dimensions(dp["p"], dp["r"])[2]
+    return 4 * (2 * threads + nbp + 1) * budget + (q + 7) // 8 + 64 * 1024 * 1024
+
+
+def wide_row_bytes(q, f, threads):
+    nbp = (q - 1) >> 32
+    return 4 * (f + nbp) + 4 * (2 * threads + nbp + 1)
+
+
+def verify_threads():
+    """Threads for kh_verify_wide: KH_VERIFY_THREADS, else the machine's CPUs (at most 12)."""
+    value = os.environ.get("KH_VERIFY_THREADS")
+    return max(1, int(value)) if value else max(1, min(12, os.cpu_count() or 1))
+
+
+def wide_assigned(path, dp, polynomial, payload_start, row_bytes, threads):
+    """Run kh_verify_wide over path's packed choices in passes; return the endpoints it checked."""
+    with tempfile.TemporaryDirectory(prefix=".kh-verify-") as directory:
+        blocks = Path(directory) / "blocks.txt"
+        blocks.write_text(f"{len(dp['runs'])}\n" + "".join(
+            f"{run['a']} {run['t'] * run['repeat']}\n" for run in dp["runs"]))
+        done = subprocess.run(
+            [str(WIDE_VERIFIER), str(dp["p"]), str(dp["r"]), ",".join(map(str, polynomial)),
+             str(blocks), str(path), str(payload_start), "--threads", str(threads),
+             "--row-bytes", str(row_bytes)], capture_output=True, text=True)
+    if done.returncode:
+        raise ValueError(done.stderr.strip().removeprefix("kh_verify_wide: ") or "wide verification failed")
+    return int(json.loads(done.stdout)["assigned"])
+
+
 def native_assigned(path, dp, polynomial, payload_start):
     """Run kh_verify_khm1 over path's packed choices; return the number of distinct endpoints it checked."""
     with tempfile.TemporaryDirectory(prefix=".kh-verify-") as directory:
@@ -277,7 +350,8 @@ def native_assigned(path, dp, polynomial, payload_start):
 def verify(path, dp, dp_digest, max_bytes=2**31, hydrate=None, native=None):
     """Verify input path against dp/hash under max_bytes; optionally write TSV rows to hydrate stream; return summary.
 
-    Full matchings with q >= NATIVE_MIN_LABELS use kh_verify_khm1 when it is built (native=None);
+    Full matchings with q >= NATIVE_MIN_LABELS use kh_verify_khm1 when it is built (native=None),
+    or kh_verify_wide (in passes) when kh_verify_khm1 can't hold the field under max_bytes;
     native=True requires it and native=False forces this Python path. Hydration is Python-only.
     """
     path = Path(path)
@@ -318,12 +392,21 @@ def verify(path, dp, dp_digest, max_bytes=2**31, hydrate=None, native=None):
         if use_native and not NATIVE_VERIFIER.exists():
             raise ValueError("native verifier is not built")
         memory = native_memory(dp, q, f) if use_native else 4 * q + 4 * budget + 2 * ((q + 7) // 8) + 64 * 1024 * 1024
+        # Too big for kh_verify_khm1 (all rows at once, q < 2^36): kh_verify_wide in passes.
+        use_wide = use_native and (q >= NATIVE_MAX_Q or memory > max_bytes) and WIDE_VERIFIER.exists()
+        if use_wide:
+            threads = verify_threads()
+            fixed = wide_fixed_memory(dp, q, f, threads)
+            memory = fixed + wide_row_bytes(q, f, threads)
+            row_bytes = max_bytes - fixed
         if memory > max_bytes:
             raise ValueError(f"verification requires at least {memory} bytes; limit={max_bytes}")
         if not primitive(p, r, polynomial):
             raise ValueError("polynomial is not primitive with generator X")
         assigned = hall_left = hall_right = 0
-        if use_native:
+        if use_wide:
+            assigned = wide_assigned(path, dp, polynomial, payload_start, row_bytes, threads)
+        elif use_native:
             assigned = native_assigned(path, dp, polynomial, payload_start)
         else:
             cells = field_cells(p, r, polynomial)

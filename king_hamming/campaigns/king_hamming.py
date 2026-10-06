@@ -262,7 +262,11 @@ def archive_matching(state: Path, record: dict, attempt: dict, run: dict,
     count = request_count(dp)
     maximum = (count * (dp["f"] + 1).bit_length() + 7) // 8 + (count + 7) // 8 + 4096
     output = state / "matching-results" / f"{record['p']}_{record['r']}_{run['run_id']}.khmatch"
-    retrieve(run, output, maximum, nodes)
+    # A certificate in this machine's blob store (merlin's agent) is linked, not copied.
+    manifest = json.loads((state / "manifest.json").read_text())
+    local_roots = [Path(worker["root"]) / "blobs" for worker in manifest.get("workers", [])
+                   if worker.get("root") and (Path(worker["root"]) / "blobs").is_dir()]
+    retrieve(run, output, maximum, nodes, local_roots=local_roots)
     # A field matched under a larger plan (block GPU matching of 13^9 verifies in ~17 GB) is
     # verified under that plan's memory allowance, not the CPU matchers' limit.
     plan = attempt.get("plan") or {}
@@ -278,7 +282,7 @@ def enqueue_attempt(manifest: dict, pipeline: dict, record: dict,
     settings = pipeline["settings"]
     dp, _ = load_dp(Path(record["dp_artifact"]))
     workers = matching_worker_count(dp, settings) if plan is None else plan["workers"]
-    if plan is not None and (not plan["admitted"] or plan["program"] not in {"match", "match_partitioned", "match_gpu", "match_gpu_blocks"}):
+    if plan is not None and (not plan["admitted"] or plan["program"] not in {"match", "match_partitioned", "match_gpu", "match_gpu_blocks", "match_gpu_wide"}):
         raise ValueError("capacity policy cannot submit an inadmissible plan")
     if plan is not None and plan["program"] == "match_gpu":
         from gpu_match_solver.submit import specification as gpu_specification
@@ -288,6 +292,10 @@ def enqueue_attempt(manifest: dict, pipeline: dict, record: dict,
         from gpu_block_match_solver.submit import specification as block_specification
         job = block_specification(Path(record["dp_artifact"]), ",".join(map(str, polynomial)),
                                   plan["threads"], plan["max_bytes"], plan["gpu_memory_bytes"])
+    elif plan is not None and plan["program"] == "match_gpu_wide":
+        from gpu_wide_match_solver.submit import specification as wide_specification
+        job = wide_specification(Path(record["dp_artifact"]), ",".join(map(str, polynomial)),
+                                 plan["threads"], plan["max_bytes"], plan["gpu_memory_bytes"])
     elif plan is not None and plan["program"] == "match_partitioned":
         from matching_solver_multi.submit import specification as partitioned_specification
         job = partitioned_specification(
@@ -330,7 +338,7 @@ def recover_matching_attempts(pipeline: dict, runs: dict[str, dict]) -> None:
         specification = run.get("specification")
         if isinstance(specification, str):
             specification = json.loads(specification)
-        if not isinstance(specification, dict) or specification.get("program") not in {"match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks"}:
+        if not isinstance(specification, dict) or specification.get("program") not in {"match", "match_distributed", "match_partitioned", "match_gpu", "match_gpu_blocks", "match_gpu_wide"}:
             continue
         arguments = specification["arguments"]
         record = by_digest.get(arguments.get("dp_sha256"))

@@ -20,8 +20,21 @@ that the block solver can do should stay with it, because this one is slower for
 - **The scattered in-place writes** replace one sequential write.
 
 The design and the 7¹³ numbers are in
-[docs/GPU_WIDE_MATCHING_PLAN.md](../docs/GPU_WIDE_MATCHING_PLAN.md). It is **not wired into the
-campaign yet**: there is no adapter, and the feeder doesn't route to it.
+[docs/GPU_WIDE_MATCHING_PLAN.md](../docs/GPU_WIDE_MATCHING_PLAN.md).
+
+**In the campaign** (built 2026-10-06; deployed when merlin's agent next upgrades):
+- **Program:** `match_gpu_wide` (`adapter.py`, bridge `cluster_solver.py`, spec builder `submit.py`).
+- **Routing:** the feeder plans it when the block matcher refuses a field, on a host with the
+  GPU, the memory and the free disk for the certificate ([docs/GPU.md](../docs/GPU.md),
+  "Feeder routing").
+- **Publication:** the bridge passes `--payload-offset`, then writes the KHM1 header and
+  checksum around the payload in place (`artifacts.publish_in_place`).
+- **Linking:** the agent hard-links the result into its blob store (`store_blob(link=True)`),
+  and the feeder hard-links the archive from it (`retrieve(local_roots=...)`).
+- **Verification:** `artifacts.verify` uses `kh_verify_wide` whenever `kh_verify_khm1` can't
+  hold the field.
+- **End to end:** `tests/check_cluster.py --run` runs a forced multi-pass 13⁵ through a real
+  leader and GPU agent, and verifies it.
 
 ```sh
 make -C king_hamming/gpu_wide_match_solver          # kh_gpu_wide_kernel and kh_verify_wide
@@ -118,4 +131,5 @@ For 7¹³ (q = 9.7 × 10¹⁰, 166 GB of used rows) this predicts:
 | `src/field_walk.c`, `src/field_walk.h` | 64-bit field arithmetic, the count walk and per-pass placement walks |
 | `src/kernels.cu`, `src/kernels_images.c` | CUDA kernels (32-bit choices, binary-searched high part) and committed NVRTC images |
 | `src/verify_wide.c` | `kh_verify_wide`: independent multi-pass, multi-threaded verifier |
-| `tests/` | the checks above |
+| `adapter.py`, `cluster_solver.py`, `submit.py` | `match_gpu_wide` adapter, bridge (in-place publication), specification builder |
+| `tests/` | the checks above, and `check_cluster.py` (end to end) |

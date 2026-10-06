@@ -38,7 +38,7 @@ static void help(void) {
          "Usage: kh_gpu_wide_kernel P R BLOCKS.txt PAYLOAD.bin [--poly C0,...,Cr]\n"
          "       [--start N] [--threads N] [--max-bytes N] [--device N] [--salt N] [--row-bytes N]\n"
          "       [--block-device-bytes N] [--block-requests N] [--max-rounds N] [--max-residual N]\n"
-         "       [--max-rescue-passes N]\n"
+         "       [--max-rescue-passes N] [--payload-offset N]\n"
          "Example: printf '1\\n1 1\\n' > /tmp/blocks.txt\n"
          "         ./kh_gpu_wide_kernel 3 3 /tmp/blocks.txt /tmp/choices.bin\n"
          "Blocks file, payload and metadata JSON as kh_gpu_block_kernel. Exit 0: full matching (payload\n"
@@ -47,6 +47,8 @@ static void help(void) {
          "--max-rounds caps exchange rounds per pass (1: none); --max-rescue-passes (default 4) caps the\n"
          "passes that revisit blocks with free rights after the last pass. p = 2 is refused (F is a power\n"
          "of two, so the payload has no spare value for 'unmatched'): use kh_gpu_block_kernel.\n"
+         "--payload-offset N (at most 1 MiB) leaves N zero bytes before the payload, so a caller can\n"
+         "write a header there and publish the file in place instead of copying it.\n"
          "--test-cells FILE (tests only) replaces the field with q raw u32 labels, ascending per cell.\n"
          "--label-split-bits B (tests only, default 32) stores labels as B low bits plus breakpoints.");
 }
@@ -182,20 +184,22 @@ typedef struct {
     int fd;
     uint32_t bits;
     uint64_t sentinel, n, bytes;
+    uint64_t offset;           // the payload's first byte in the file (--payload-offset)
     uint64_t dirty;            // page bytes written since the last fdatasync
     uint8_t *buffer;
     size_t capacity;
 } store_t;
 
-static bool store_open(store_t *store, const char *path, uint64_t n, uint32_t bits) {
+static bool store_open(store_t *store, const char *path, uint64_t n, uint32_t bits, uint64_t offset) {
     memset(store, 0, sizeof *store);
     store->bits = bits;
     store->sentinel = (UINT64_C(1) << bits) - 1;
     store->n = n;
     store->bytes = (n * bits + 7) / 8;
+    store->offset = offset;
     store->fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (store->fd < 0) return false;
-    return ftruncate(store->fd, (off_t)store->bytes) == 0;
+    return ftruncate(store->fd, (off_t)(offset + store->bytes)) == 0;
 }
 
 static bool store_reserve(store_t *store, size_t bytes) {
@@ -231,7 +235,7 @@ static bool store_read(store_t *store, uint64_t first, uint64_t count, uint32_t 
     uint64_t bit = first * store->bits, end = bit + count * store->bits;
     uint64_t byte0 = bit >> 3, length = ((end + 7) >> 3) - byte0;
     if (end > store->n * store->bits || !store_reserve(store, length + 8) ||
-        !full_pread(store->fd, store->buffer, length, byte0)) {
+        !full_pread(store->fd, store->buffer, length, store->offset + byte0)) {
         return false;
     }
     const uint8_t *buffer = store->buffer;
@@ -260,8 +264,8 @@ static bool store_write(store_t *store, uint64_t first, uint64_t count, const ui
     uint32_t head = (uint32_t)(bit & 7), tail = (uint32_t)(end & 7);
     if (end > store->n * bits || !store_reserve(store, length + 8)) return false;
     uint8_t first_old = 0, last_old = 0;
-    if (head && !full_pread(store->fd, &first_old, 1, byte0)) return false;
-    if (tail && !full_pread(store->fd, &last_old, 1, byte1 - 1)) return false;
+    if (head && !full_pread(store->fd, &first_old, 1, store->offset + byte0)) return false;
+    if (tail && !full_pread(store->fd, &last_old, 1, store->offset + byte1 - 1)) return false;
     uint8_t *buffer = store->buffer;
     uint64_t accumulator = first_old & ((1u << head) - 1);
     uint32_t available = head;
@@ -278,7 +282,7 @@ static bool store_write(store_t *store, uint64_t first, uint64_t count, const ui
         }
     }
     if (available) buffer[at++] = (uint8_t)(accumulator | (last_old & ~((1u << available) - 1)));
-    if (at != length || !full_pwrite(store->fd, buffer, length, byte0)) return false;
+    if (at != length || !full_pwrite(store->fd, buffer, length, store->offset + byte0)) return false;
     uint64_t page = 4096;
     store->dirty += ((byte1 - 1) / page - byte0 / page + 1) * page;
     // Write back in bounded steps: gigabytes of dirty pages once stalled the leader's fsyncs.
@@ -1063,7 +1067,7 @@ static bool check_payload(bctx_t *x) {
     free(values);
     uint32_t tail = (uint32_t)((n * x->store.bits) & 7);
     uint8_t last = 0;
-    if (ok && tail) ok = full_pread(x->store.fd, &last, 1, x->store.bytes - 1) && (last >> tail) == 0;
+    if (ok && tail) ok = full_pread(x->store.fd, &last, 1, x->store.offset + x->store.bytes - 1) && (last >> tail) == 0;
     return ok && fsync(x->store.fd) == 0;
 }
 
@@ -1081,7 +1085,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     uint64_t p, r, threads = 1, start = 1, maximum = UINT64_C(2147483648), device = 0, salt = 0x9E3779B9u;
-    uint64_t block_budget = 0, split_bits = 32, row_bytes = 0;
+    uint64_t block_budget = 0, split_bits = 32, row_bytes = 0, payload_offset = 0;
     controls_t controls = {0, 16, UINT64_MAX, 4, 0};
     const char *poly_text = NULL, *test_cells = NULL, *error = NULL;
     kh_parameters_t parameters;
@@ -1121,6 +1125,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(option, "--max-residual")) controls.max_residual = value;
         else if (!strcmp(option, "--max-rescue-passes")) controls.max_rescue = value;
         else if (!strcmp(option, "--row-bytes")) row_bytes = value;
+        else if (!strcmp(option, "--payload-offset")) payload_offset = value;
         else if (!strcmp(option, "--label-split-bits")) split_bits = value;
         else {
             fprintf(stderr, "kh_gpu_wide_kernel: unsupported option %s\n", option);
@@ -1242,7 +1247,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "kh_gpu_wide_kernel: %s\n", error);
         return 1;
     }
-    if (!store_open(&bx.store, argv[4], n, bits)) {
+    if (payload_offset > (UINT64_C(1) << 20) || !store_open(&bx.store, argv[4], n, bits, payload_offset)) {
         fprintf(stderr, "kh_gpu_wide_kernel: cannot create the payload (it must not exist)\n");
         return 1;
     }

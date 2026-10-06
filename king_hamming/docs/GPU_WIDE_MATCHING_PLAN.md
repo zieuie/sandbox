@@ -1,9 +1,9 @@
 # Plan: a wide matching solver for 7¹³ and larger fields
 
-Status (2026-10-06): **solver and verifier built and tested** in
-[gpu_wide_match_solver/](../gpu_wide_match_solver/README.md). They are not wired into the campaign
-(section 7), and a full-width rehearsal is still to do (section 8). Disk is still the blocker for
-7¹³ itself (section 6). Designed on 2026-10-05; built the next day as planned, with CPU multi-pass
+Status (2026-10-06): **solver and verifier built, tested and wired into the campaign** (program
+`match_gpu_wide`, sections 6–7 below), awaiting rollout to merlin. 5¹⁵ (DP under way) is the
+full-width rehearsal and will go into the results table. 7¹³ waits for a second NVMe drive in
+merlin: the feeder only plans it on a host with disk for its 206 GB certificate. Designed on 2026-10-05; built the next day as planned, with CPU multi-pass
 rows, not GPU-built rows.
 
 ## Why a separate solver

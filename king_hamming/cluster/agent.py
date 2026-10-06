@@ -1193,7 +1193,8 @@ def run_job(
         finally:
             verifying_done.set()
         with storage_transaction(storage_root, keeper.check):
-            digest, path = store_blob(output, storage_root, keeper.check)
+            # A finished result is never written again, so a large one is linked, not copied.
+            digest, path = store_blob(output, storage_root, keeper.check, link=True)
             keeper.check()
             completion = {**identity, "artifact_hash": digest, "artifact_size": path.stat().st_size,
                           "artifact_location": f"{storage_url.rstrip('/')}/blobs/{digest}"}
