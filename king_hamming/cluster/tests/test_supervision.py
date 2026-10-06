@@ -7,6 +7,7 @@ import gc
 import os
 import sqlite3
 import sys
+import json
 import tempfile
 import threading
 import time
@@ -435,6 +436,35 @@ class SupervisionTests(unittest.TestCase):
             with leader.connect(database) as connection:
                 row = connection.execute("SELECT * FROM runs WHERE run_id=?", (queued["run_id"],)).fetchone()
                 self.assertEqual((row["last_progress_at"], row["last_solver_heartbeat"]), (420.0, 430.0))
+
+    def test_a_stage_moving_counts_as_progress(self) -> None:
+        """A wide matching run walks its field for minutes with no request matched yet."""
+
+        def message(*stages):
+            return json.dumps({"stages": [{"key": key, "done": done, "updated": 0.0} for key, done in stages]})
+
+        with tempfile.TemporaryDirectory(prefix="kh-status-test-") as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            handler.dispatch_post("/v1/register", {"node_name": "worker"})
+            queued = handler.dispatch_post("/v1/enqueue", {"specification": {"program": "demo"}})
+            job = handler.dispatch_post("/v1/lease", {"node_name": "worker"})["job"]
+            identity = {"run_id": queued["run_id"], "lease_token": job["lease_token"]}
+            reports = ((100.0, message(("field", 0))), (200.0, message(("field", 5))),
+                       (300.0, message(("field", 5))), (400.0, "not json"),
+                       (500.0, message(("field", 9), ("blocks", 0))), (600.0, message(("field", 9), ("blocks", 0))))
+            for now, text in reports:
+                with patch.object(leader.time, "time", return_value=now):
+                    handler.dispatch_post("/v1/progress", {**identity, "done": 0, "total": 10**7,
+                                                           "checkpoint_done": 0, "phase": "building field rows",
+                                                           "message": text})
+            with leader.connect(database) as connection:
+                row = connection.execute("SELECT * FROM runs WHERE run_id=?", (queued["run_id"],)).fetchone()
+                self.assertEqual((row["last_progress_at"], row["last_solver_heartbeat"]), (500.0, 600.0))
+        self.assertTrue(leader.stage_advanced(None, message(("field", 1))))
+        self.assertFalse(leader.stage_advanced(message(("field", 1)), "plain text"))
+        self.assertFalse(leader.stage_advanced(message(("field", 3)), message(("field", 3))))
 
     # Repeated heartbeats must not reset the mathematical-progress timestamp.
     def test_heartbeat_work_and_checkpoint_are_distinct(self) -> None:

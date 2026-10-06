@@ -249,6 +249,25 @@ STALL_SECONDS = 15.0          # the scheduler commits every few seconds when hea
 LAST_COMMIT = [time.time()]
 
 
+def stage_advanced(old: str | None, new: Any) -> bool:
+    """True if a stage-reporting solver's message (GPU block and wide matching) shows any stage
+    further along: a new stage, or more done in one. Their field walks run for minutes without
+    matching a request, so `done` alone would call them stuck."""
+    if not (isinstance(new, str) and new.startswith("{")):
+        return False
+
+    def stages(text: str | None) -> dict:
+        if not (isinstance(text, str) and text.startswith("{")):
+            return {}
+        try:
+            items = json.loads(text).get("stages")
+            return {item["key"]: item.get("done") or 0 for item in items if isinstance(item, dict)}
+        except (ValueError, TypeError, AttributeError, KeyError):
+            return {}
+    before, after = stages(old), stages(new)
+    return any(key not in before or done > before[key] for key, done in after.items())
+
+
 def expire_leases(connection, now: float) -> None:
     """recovery.expire, after forgiving a gap in which the leader committed nothing."""
 
@@ -1635,7 +1654,8 @@ def make_handler(
                         # A new phase is progress too: a tile that waited minutes for its GPU and has
                         # just started computing (from done=0 again) is not stuck.
                         advanced = (done > row["progress_done"] or
-                                    str(request.get("phase", "computing")) != row["progress_phase"])
+                                    str(request.get("phase", "computing")) != row["progress_phase"] or
+                                    stage_advanced(row["progress_message"], request.get("message")))
                         checkpoint_advanced = checkpoint_done > row["progress_checkpoint_done"]
                         connection.execute(
                             "UPDATE runs SET progress_done=?, progress_total=?, progress_message=?, "
