@@ -41,7 +41,17 @@ class OnlineTests(unittest.TestCase):
     def test_gateway_dropping_ping_but_answering_arp_is_online(self) -> None:
         runner = fake_runner({("ip", "-4", "route"): (0, ROUTE), ("ping",): (1, ""),
                               ("ip", "neigh"): (0, "192.168.4.1 lladdr c0:6f:98:00:00:01 REACHABLE\n")})
-        self.assertTrue(watchdog.online(runner))
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertTrue(watchdog.online(runner, Path(directory)))
+
+    def test_arp_alone_does_not_count_for_a_gateway_that_answers_pings(self) -> None:
+        # Half-connected Wi-Fi (midnights, 2026-10-06): the router's ARP entry stays fresh, no IP gets through.
+        arp = ("ip", "neigh"), (0, "192.168.4.1 lladdr c0:6f:98:00:00:01 REACHABLE\n")
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            self.assertTrue(watchdog.online(fake_runner({("ip", "-4", "route"): (0, ROUTE), ("ping",): (0, "")}), state))
+            broken = fake_runner({("ip", "-4", "route"): (0, ROUTE), ("ping",): (1, ""), arp[0]: arp[1]})
+            self.assertFalse(watchdog.online(broken, state))
 
     def test_no_default_route_is_offline(self) -> None:
         # Wi-Fi gone; the wired cluster link has no gateway, so it doesn't count.
@@ -88,14 +98,24 @@ class CheckTests(unittest.TestCase):
         return watchdog.check(state, probe, find, lambda device: acted.append(device) or f"reconnected {device}",
                               now, lambda _: None)
 
-    def test_online_clears_the_streak(self) -> None:
+    def test_offline_minutes_age_out_of_the_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state, acted = Path(directory), []
             for _ in range(2):
                 self.call(state, lambda: False, acted=acted)
-            self.assertEqual(self.call(state, lambda: True, acted=acted), "online")
-            self.assertEqual(watchdog.read_number(state / "failures"), 0)
+            for _ in range(4):
+                self.assertEqual(self.call(state, lambda: True, acted=acted), "online")
+            self.assertEqual(self.call(state, lambda: False, acted=acted), "offline 1/3")
             self.assertEqual(acted, [])
+
+    def test_a_flapping_link_is_still_reconnected(self) -> None:
+        # Offline, offline, a lucky online minute, offline: three of the last five.
+        with tempfile.TemporaryDirectory() as directory:
+            state, acted = Path(directory), []
+            results = [self.call(state, lambda value=value: value, acted=acted) for value in (False, False, True)]
+            self.assertEqual(results, ["offline 1/3", "offline 2/3", "online"])
+            self.assertEqual(self.call(state, lambda: False, acted=acted), "reconnected wlp3s0")
+            self.assertEqual(acted, ["wlp3s0"])
 
     def test_three_offline_minutes_then_reconnect_with_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

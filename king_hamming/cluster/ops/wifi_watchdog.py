@@ -4,9 +4,10 @@
 A standalone system service, independent of King Hamming and of any particular network: it
 knows no addresses, SSIDs or interface names. Every minute (wifi-watchdog.timer) it asks one
 question: does the current default gateway answer, over any interface? If so, nothing happens,
-whatever network the machine is on, wired or wireless. Only after three offline minutes in a
-row, a confirmation ten seconds later, and only when NetworkManager can see a Wi-Fi network it
-has saved credentials for, does it act: `nmcli device connect` on that Wi-Fi device, falling
+whatever network the machine is on, wired or wireless. Only after three offline minutes out of
+the last five (a half-connected link flaps, so they need not be in a row), a confirmation ten
+seconds later, and only when NetworkManager can see a Wi-Fi network it has saved credentials
+for, does it act: `nmcli device connect` on that Wi-Fi device, falling
 back to restarting NetworkManager if that fails. At most one attempt per ten minutes.
 
 This clears NetworkManager's "no-secrets" state, which otherwise blocks autoconnect until a
@@ -26,6 +27,7 @@ from typing import Callable, Optional
 
 STATE_DIR = Path("/run/wifi-watchdog")
 FAILURES_REQUIRED = 3
+WINDOW = 5                   # minutes of history: act on FAILURES_REQUIRED offline among them
 ACTION_COOLDOWN_SECONDS = 600
 CONFIRMATION_DELAY_SECONDS = 10
 
@@ -52,13 +54,32 @@ def gateways(runner: Runner = run) -> list[tuple[str, str]]:
     return found
 
 
-def online(runner: Runner = run) -> bool:
-    """True when any default gateway answers a ping, or at least answers ARP (some routers drop ICMP)."""
+def online(runner: Runner = run, state_dir: Optional[Path] = None) -> bool:
+    """True when any default gateway answers a ping, or at least answers ARP (some routers drop ICMP).
 
+    ARP counts only for a gateway that has never answered a ping since boot (remembered in
+    state_dir): a half-connected Wi-Fi link can keep the router's ARP entry fresh while no IP
+    traffic gets through (midnights, 2026-10-06), and a router that answers pings would answer
+    this one too if the link worked."""
+
+    state_dir = STATE_DIR if state_dir is None else state_dir
+    pingable_path = state_dir / "pingable"
+    try:
+        pingable = set(pingable_path.read_text().splitlines())
+    except OSError:
+        pingable = set()
     for gateway, device in gateways(runner):
+        key = f"{gateway} {device}"
         if runner(["ping", "-n", "-c", "1", "-W", "2", "-I", device, gateway], timeout=5).returncode == 0:
+            if key not in pingable:
+                try:
+                    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    with pingable_path.open("a") as stream:
+                        stream.write(key + "\n")
+                except OSError:
+                    pass
             return True
-        if "REACHABLE" in runner(["ip", "neigh", "show", "to", gateway, "dev", device]).stdout:
+        if key not in pingable and "REACHABLE" in runner(["ip", "neigh", "show", "to", gateway, "dev", device]).stdout:
             return True
     return False
 
@@ -126,20 +147,29 @@ def check(
     clock: Callable[[], float] = time.monotonic,
     pause: Callable[[float], None] = time.sleep,
 ) -> str:
-    """One minute's check: three offline checks, a confirmation, a saved network in range, a cooldown."""
+    """One minute's check: three offline of the last five, a confirmation, a saved network in range, a cooldown."""
 
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(state_dir, 0o700)
     with (state_dir / "lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        failures_path = state_dir / "failures"
+        history_path = state_dir / "history"     # one character a minute, newest last: 1 offline, 0 online
         action_path = state_dir / "last-action"
+        try:
+            history = "".join(ch for ch in history_path.read_text() if ch in "01")
+        except OSError:
+            history = ""
+
+        def remember(result: str) -> None:
+            history_path.write_text((history + result)[-WINDOW:] + "\n")
+
         if probe():
-            failures_path.write_text("0\n")
+            remember("0")
             return "online"
 
-        failures = read_number(failures_path) + 1
-        failures_path.write_text(f"{failures}\n")
+        history = (history + "1")[-WINDOW:]
+        history_path.write_text(history + "\n")
+        failures = history.count("1")
         if failures < FAILURES_REQUIRED:
             return f"offline {failures}/{FAILURES_REQUIRED}"
         last_action = read_number(action_path)
@@ -148,7 +178,7 @@ def check(
 
         pause(CONFIRMATION_DELAY_SECONDS)
         if probe():
-            failures_path.write_text("0\n")
+            remember("0")
             return "online again before acting"
         device = find()
         if device is None:
@@ -156,7 +186,8 @@ def check(
 
         # Record the attempt first: even a failed one must not repeat for ten minutes.
         action_path.write_text(f"{max(1, int(clock()))}\n")
-        failures_path.write_text("0\n")
+        history = ""
+        remember("")
         return act(device)
 
 

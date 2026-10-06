@@ -12,7 +12,7 @@ python3 cluster/ops/link_certificates.py --state cluster/deployments/continuous-
 
 # Wi-Fi watchdog (all workers)
 
-`wifi_watchdog.py` is a standalone system service, installed on dp-101–108 and gawain on
+`wifi_watchdog.py` (acts on 3 offline minutes of the last 5; ARP counts only for a gateway that has never answered ping) is a standalone system service, installed on dp-101–108 and gawain on
 2026-10-05 after a second Wi-Fi outage ([../../docs/NETWORK_OUTAGE_2026-10-02.md](../../docs/NETWORK_OUTAGE_2026-10-02.md)).
 It is independent of King Hamming and of any particular network: it names no addresses,
 SSIDs or interfaces, and never touches the agent or any other process.
