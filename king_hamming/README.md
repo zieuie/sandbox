@@ -9,7 +9,7 @@ M(q + 1, q).
 
 ## Status (2026-10-06)
 
-- **76 fields proved**, from 2³ up to 5¹⁵ (M(5¹⁵ + 1, 5¹⁵) ≥ 4,768,402,099,609,375). Every
+- **79 fields proved**, from 2³ up to 5¹⁵ (M(5¹⁵ + 1, 5¹⁵) ≥ 4,768,402,099,609,375). Every
   field matched with the first polynomial the solver could finish (5¹⁵ needed a solver fix). The table is [`results.md`](results.md).
 - **DP is wrapped up** (feeder setting `new_dp_fields` = 0). 5¹⁵ was added by hand on 10-06
   as a full-width rehearsal for the wide matcher; its DP is done and its matching is next.

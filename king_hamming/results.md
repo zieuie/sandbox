@@ -37,12 +37,12 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 97 | 859,201,653^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 101 | 1,041,542,502^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 103 | 1,125,933,170^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 107 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 109 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 113 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 107 | 1,336,613,505^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 109 | 1,466,091,638^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 113 | 1,709,437,106^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **76 fields are proved.** Every one matched with the first polynomial the solver could
+- **79 fields are proved.** Every one matched with the first polynomial the solver could
   finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
   found.
 - **7¹³** has its DP value (27,357,428,724,361,309) but no matching yet: q = 9.7 × 10¹⁰ is
@@ -61,7 +61,8 @@ Notes:
 - **2³¹ and 3¹⁹** were added on 2026-10-06 (Zooey) as the cheapest fields left, with DP on the
   P600s and gawain (about an hour each, 2048-cell tiles) and matching by GPU blocks on dp-102
   and dp-101 (about 20 minutes each); both verified.
-- **107³, 109³ and 113³** were cancelled before their DP finished.
+- **107³, 109³ and 113³** were cancelled before their DP finished in September; Zooey retried
+  them from the dashboard on 2026-10-06, and all three were matched and verified by 2026-10-07 08:00.
 
 Regenerate this table from the live leader database with
 `python3 campaigns/result_table.py` (read-only; it re-checks every certificate's hashes and
