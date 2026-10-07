@@ -12,8 +12,8 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 2 | 28^ | 192^ | 1,472^ | 11,264^ | 89,088^ | 704,512^ | 5,619,712^ | 44,826,624^ | 358,350,848^ | 2,864,709,632^ | 22,913,482,752^ | 183,274,307,584^ | 1,466,127,351,808^ | 11,728,481,943,552^ | 93,826,781,806,592^ |
 | 3 | 144^ | 3,483^ | 90,396^ | 2,407,887^ | 64,717,704^ | 1,744,720,803^ | 47,083,546,836^ | 1,271,040,530,967^ | 34,316,157,233,664^ | — | — | — | — | — | — |
-| 5 | 1,375^ | 159,375^ | 19,609,375^ | 2,443,359,375^ | 305,224,609,375^ | 38,148,193,359,375^ | 4,768,402,099,609,375 (running) | — | — | — | — | — | — | — | — |
-| 7 | 6,076^ | 1,990,429^ | 678,717,081^ | 232,569,366,743^ | 79,760,841,208,636^ | 27,357,428,724,361,309 | — | — | — | — | — | — | — | — | — |
+| 5 | 1,375^ | 159,375^ | 19,609,375^ | 2,443,359,375^ | 305,224,609,375^ | 38,148,193,359,375^ | 4,768,402,099,609,375^ | — | — | — | — | — | — | — | — |
+| 7 | 6,076^ | 1,990,429^ | 678,717,081^ | 232,569,366,743^ | 79,760,841,208,636^ | 27,357,428,724,361,309 (running) | — | — | — | — | — | — | — | — | — |
 | 11 | 47,190^ | 61,375,072^ | 81,534,323,464^ | 108,502,034,795,770^ | — | — | — | — | — | — | — | — | — | — | — |
 | 13 | 99,710^ | 215,407,062^ | 472,708,712,606^ | 1,038,436,628,063,094^ | — | — | — | — | — | — | — | — | — | — | — |
 | 17 | 338,130^ | 1,642,523,986^ | 8,064,313,527,762^ | — | — | — | — | — | — | — | — | — | — | — | — |
@@ -37,23 +37,27 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 97 | 859,201,653^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 101 | 1,041,542,502^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 103 | 1,125,933,170^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 107 | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 109 | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 113 | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 107 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 109 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 113 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **75 fields are proved.** Every one matched with the first polynomial tried; no Hall
-  obstruction has ever been found.
+- **76 fields are proved.** Every one matched with the first polynomial the solver could
+  finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
+  found.
 - **7¹³** has its DP value (27,357,428,724,361,309) but no matching yet: q = 9.7 × 10¹⁰ is
   above the matcher's 2³⁶ limit and needs about 200 GB of RAM (see
   [docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)). A solver that lifts those limits is built
-  ([gpu_wide_match_solver/](gpu_wide_match_solver/README.md)), but not yet run on it
+  ([gpu_wide_match_solver/](gpu_wide_match_solver/README.md)), and its matching has been running
+  on merlin since 2026-10-07 01:26, with the 191.7 GiB certificate on merlin's second drive
   ([docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md)).
 - **29⁷** was matched on 2026-10-05 (GPU blocks on merlin, 109 blocks) and verified.
 - **31⁷** was matched on 2026-10-06 (GPU blocks on merlin, 181 blocks) and verified: the
   campaign's last DP field from the regular frontier.
-- **5¹⁵** has its DP value (submitted directly on 2026-10-06, after `new_dp_fields` was set
-  to 0); its matching needs the wide matcher (F = 78,125).
+- **5¹⁵** was matched on 2026-10-07 by the wide GPU matcher on merlin (236 blocks, 3 passes;
+  its third polynomial, 3,4,3,0,…,1) and verified. The first two polynomials ended short from a
+  block-layout defect, not the field: see
+  [docs/WIDE_MATCHING_SPARSE_TAIL.md](docs/WIDE_MATCHING_SPARSE_TAIL.md).
 - **2³¹ and 3¹⁹** were added on 2026-10-06 (Zooey) as the cheapest fields left, with DP on the
   P600s and gawain (about an hour each, 2048-cell tiles) and matching by GPU blocks on dp-102
   and dp-101 (about 20 minutes each); both verified.

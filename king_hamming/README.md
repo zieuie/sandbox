@@ -9,8 +9,8 @@ M(q + 1, q).
 
 ## Status (2026-10-06)
 
-- **75 fields proved**, from 2³ up to 31⁷ (M(31⁷ + 1, 31⁷) ≥ 4,470,713,705,180,443). Every
-  field matched with the first polynomial tried. The table is [`results.md`](results.md).
+- **76 fields proved**, from 2³ up to 5¹⁵ (M(5¹⁵ + 1, 5¹⁵) ≥ 4,768,402,099,609,375). Every
+  field matched with the first polynomial the solver could finish (5¹⁵ needed a solver fix). The table is [`results.md`](results.md).
 - **DP is wrapped up** (feeder setting `new_dp_fields` = 0). 5¹⁵ was added by hand on 10-06
   as a full-width rehearsal for the wide matcher; its DP is done and its matching is next.
 - **Blocked:** 7¹³ has its DP value, but its matching exceeds the block matcher's limits (F,

@@ -200,8 +200,10 @@ requests that together can reach fewer positions than there are requests. The sa
 checker recounts that neighbourhood. It proves only that *this* shape cannot be
 matched with *this* polynomial.
 
-**In practice, none has failed.** As of 2026-10-06 the campaign has matched 75 fields,
-up to 31⁷, and every one succeeded with the first primitive polynomial tried. All 73
+**In practice, none has failed.** As of 2026-10-07 the campaign has matched 76 fields,
+up to 5¹⁵, and every one succeeded with the first primitive polynomial the solver could finish
+(5¹⁵'s first two ended short from a solver defect, not a Hall obstruction:
+[WIDE_MATCHING_SPARSE_TAIL.md](WIDE_MATCHING_SPARSE_TAIL.md)). All 73
 archived certificates are full matchings and none is a Hall witness (checked from each
 file's outcome field and the leader's run records). That is empirical support for the
 paper's remark that a matching has been found in every case tried, now at much larger

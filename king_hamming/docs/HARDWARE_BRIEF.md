@@ -47,7 +47,8 @@ pellinore (Dell XPS 15 9570, GTX 1050 Ti Max-Q, 2 × 8 GB DDR4 SO-DIMMs) was ret
 
 ## Where the work stands
 
-- **Done:** 75 fields are fully DP'd, matched and certified. The largest is 31⁷
+- **Done:** 76 fields are fully DP'd, matched and certified. The largest is 5¹⁵
+  (q = 3.05 × 10¹⁰, matched 2026-10-07 by the wide matcher, a 64.8 GB certificate); then 31⁷
   (q = 2.75 × 10¹⁰, matched 2026-10-06, a 51.6 GB certificate); before it 29⁷
   (q = 1.72 × 10¹⁰, matched 2026-10-05): a 32.3 GB certificate, matched on merlin's RTX 3060
   in 109 blocks using about 18 GB of host RAM. Before it, 13⁹ (q = 1.06 × 10¹⁰, a 19.9 GB
