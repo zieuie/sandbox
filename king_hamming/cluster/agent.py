@@ -1163,6 +1163,10 @@ def run_job(
             if adapter.retry_elsewhere(specification):
                 if int(job.get("engine_failures", 0)) >= 1:
                     raise RuntimeError(f"distributed solver failed after retry: {result['stderr'].strip()}")
+                # The leader keeps no error for a retried run, so this log is the only record of why.
+                tail = result["stderr"].strip()[-4000:]
+                print(f"solver for {run_id} exited {return_code}; requeued for a retry. stderr tail:\n{tail}",
+                      file=sys.stderr, flush=True)
                 request_json(leader, "/v1/requeue", {
                     **identity, "reason": outcome.value,
                 })
