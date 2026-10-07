@@ -155,7 +155,11 @@ label used once.
 
 **At full scale (5¹⁵, run `db7f496a`, 22:56):** `blocks=236 sparse=4 sparse_cells=69398
 import_cells=746 passes=3`. The other 8,727 tail cells share a block with dense cells, so their
-window is large and they match normally. The result goes below once the run ends.
+window is large and they match normally.
+- **Pass 1 (23:34):** 87 dense blocks imported their slice, 78,072 tail requests, and matched
+  everything (`round-1 residual=0`). The 130,122 still pending are exactly the other passes' slices
+  (69,398 × 3 = 208,194 tail requests in all). The old kernel left 187,478 after pass 3.
+- The final result goes here once the run ends.
 
 ## Related fixes made along the way
 
