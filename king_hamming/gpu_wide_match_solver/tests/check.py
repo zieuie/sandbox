@@ -170,7 +170,10 @@ def block_synthetic(rng: random.Random, p: int, r: int, directory: Path, index: 
     adjacency = [neighbors(cells, q, f, coset, cell) for coset, cell in reqs]
     payload = directory / f"bsynthetic{index}.bin"
     cap = max(1, n // rng.choice([2, 3, 4, 6]))
-    options = ["--test-cells", str(table), "--block-requests", str(cap), "--max-residual", str(n)]
+    # Plain windows (each block's own size): the oracle below checks exactly that mechanism, and tiny
+    # random graphs would otherwise trip the sparse-block handling (blocks_sparse_tail covers it).
+    options = ["--test-cells", str(table), "--block-requests", str(cap), "--max-residual", str(n),
+               "--sparse-density", "0"]
     split = 32
     if index % 3 == 1:  # narrow label words: breakpoints rebuild the labels, as for q > 2^32
         narrowest = next(bits for bits in range(1, 33) if (q - 1) >> bits <= 256)
@@ -250,6 +253,33 @@ def blocks_skewed(directory: Path) -> dict:
     return metadata
 
 
+def blocks_sparse_tail(directory: Path) -> None:
+    """5^15's shape where its tail can't share a block: 3^15 (n = q) with 2F cells of 3,280 requests
+    and F cells of one, under a device budget the tail's rows (19 MB) far exceed. Before the sparse
+    handling, those tail blocks matched into windows of their own size, with about 0.14 neighbours a
+    request there, and every row budget ended about 2,270 requests short (5^15: 187,166). Now the
+    tail's requests are imported by the dense blocks of each pass: a full matching, verified, in one
+    pass or several."""
+    p, r, q = 3, 15, 3 ** 15
+    blocks = directory / "sparse_tail.blocks"
+    write_blocks(blocks, [(2, 3279), (3, 1)])
+    for row_bytes in (None, 40_000_000, 15_000_000):
+        payload = directory / f"sparse_tail.{row_bytes}.bin"
+        extra = ["--row-bytes", str(row_bytes)] if row_bytes else []
+        completed = subprocess.run([str(KERNEL), str(p), str(r), str(blocks), str(payload), "--threads", "4",
+                                    "--block-device-bytes", str(25_600_000), *extra],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        metadata = json.loads(next(line for line in completed.stdout.splitlines() if '"engine"' in line))
+        layout = next(line for line in completed.stderr.splitlines() if line.startswith("blocks="))
+        assert completed.returncode == 0 and metadata["matched"] == q, (completed.returncode, metadata["matched"], layout)
+        assert " sparse=0 " not in layout and (row_bytes is None or metadata["passes"] >= 2), layout
+        poly = ",".join(map(str, metadata["polynomial"]))
+        checked = subprocess.run([str(HERE / "kh_verify_wide"), str(p), str(r), poly, str(blocks), str(payload), "0",
+                                  "--threads", "4"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert checked.returncode == 0 and json.loads(checked.stdout)["assigned"] == q, checked.stderr
+        print(f"ok sparse tail: {layout.split(' cells_per_pass')[0]}, full matching, verified")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, epilog="Example: python3 tests/check.py --run")
     parser.add_argument("--run", action="store_true")
@@ -271,6 +301,7 @@ def main() -> int:
         blocks_fixture(ROOT / "matching_solver/examples/13_5.khdp", "2,4,0,0,0,1", directory, 100000, 3,
                        split_bits=11, pass_cells=500, tag=".split.passes")
         blocks_skewed(directory)
+        blocks_sparse_tail(directory)
         rng = random.Random(arguments.seed)
         shapes = [(3, 3), (5, 3), (3, 5), (7, 3), (3, 7), (11, 3)]   # p = 2 is refused (F a power of two)
         seen = []

@@ -24,7 +24,11 @@
 
 #define FREE UINT32_MAX
 #define NOCHOICE UINT32_MAX
-#define EXTRA_MAX 256
+#define EXTRA_MAX 256           // import cells per block (rows of requests it imports); more with sparse blocks
+// A block whose requests average fewer neighbours than this inside its own window (F * m / q) is
+// sparse: it can't match into a window of its own size (5^15's tail: 3 requests a cell, ~0.14).
+// --sparse-density overrides it; 0 turns sparse handling off.
+#define SPARSE_DENSITY 4.0
 #define MAX_ROUNDS_LIMIT 4096
 #define SYNC_BYTES (UINT64_C(64) << 20)
 
@@ -38,7 +42,7 @@ static void help(void) {
          "Usage: kh_gpu_wide_kernel P R BLOCKS.txt PAYLOAD.bin [--poly C0,...,Cr]\n"
          "       [--start N] [--threads N] [--max-bytes N] [--device N] [--salt N] [--row-bytes N]\n"
          "       [--block-device-bytes N] [--block-requests N] [--max-rounds N] [--max-residual N]\n"
-         "       [--max-rescue-passes N] [--payload-offset N]\n"
+         "       [--max-rescue-passes N] [--payload-offset N] [--sparse-density N]\n"
          "Example: printf '1\\n1 1\\n' > /tmp/blocks.txt\n"
          "         ./kh_gpu_wide_kernel 3 3 /tmp/blocks.txt /tmp/choices.bin\n"
          "Blocks file, payload and metadata JSON as kh_gpu_block_kernel. Exit 0: full matching (payload\n"
@@ -49,6 +53,9 @@ static void help(void) {
          "of two, so the payload has no spare value for 'unmatched'): use kh_gpu_block_kernel.\n"
          "--payload-offset N (at most 1 MiB) leaves N zero bytes before the payload, so a caller can\n"
          "write a header there and publish the file in place instead of copying it.\n"
+         "--sparse-density N (default 4; 0 turns it off): a block whose requests average fewer than N\n"
+         "neighbours in a window of its own size is sparse. It gets no window; each pass's dense blocks\n"
+         "import its requests in their first run, into windows enlarged by as many rights.\n"
          "--test-cells FILE (tests only) replaces the field with q raw u32 labels, ascending per cell.\n"
          "--label-split-bits B (tests only, default 32) stores labels as B low bits plus breakpoints.");
 }
@@ -332,8 +339,9 @@ typedef struct {
     uint32_t c_lo, c_hi, nseg;
     uint64_t m, rlo, rhi, matched;
     uint32_t *segj, *lfirst, *lcoset, *lwidth;
-    uint32_t extra[EXTRA_MAX];
+    uint32_t *extra;           // x->extra_cap cells
     uint32_t nextra;
+    bool sparse;               // no window; its requests are imported by the dense blocks of a pass
     member_t *imp;
     size_t nimp;
     uint64_t imp_limit;
@@ -355,6 +363,9 @@ typedef struct {
     uint32_t salt, threads;
     block_t *blocks;
     uint32_t nblock;
+    uint32_t extra_cap;        // import cells per block (EXTRA_MAX, more when there are sparse blocks)
+    uint32_t nsparse;          // sparse blocks
+    double sparse_density;     // SPARSE_DENSITY unless --sparse-density
     uint64_t phases, scans, matched;
 } bctx_t;
 
@@ -628,9 +639,13 @@ static bool run_block(bctx_t *x, uint32_t b, const member_t *fresh, size_t nfres
 }
 
 // Device bytes for a block; mirrors block_cost() in kh_gpu_block_kernel with 4-byte choices.
-static uint64_t block_cost(uint64_t f, uint64_t nbp, uint64_t cells, uint64_t m, uint64_t window) {
+static uint64_t block_cost(const bctx_t *x, uint64_t cells, uint64_t m, uint64_t window) {
     uint64_t imports = m / 64 + 64;
-    return 4 * (f + nbp) * (cells + EXTRA_MAX) + 35 * (m + imports) + 4 * window + UINT64_C(16777216);
+    return 4 * (x->f + x->nbp) * (cells + x->extra_cap) + 35 * (m + imports) + 4 * window + UINT64_C(16777216);
+}
+
+static bool is_sparse(const bctx_t *x, uint64_t m) {
+    return (double)x->f * (double)m < x->sparse_density * (double)x->q;
 }
 
 // A cell's share of block_cost(): its rows, plus its requests' state and window.
@@ -644,7 +659,7 @@ static uint64_t cell_cost(const bctx_t *x, uint64_t requests) {
 // request counts would put every sparse cell, and all their rows, into one block.
 static bool cut_blocks(bctx_t *x, uint32_t count, uint64_t budget, const uint64_t *per_cell, uint64_t ncells,
                        uint32_t *bounds) {
-    uint64_t f = x->f, total = 0;
+    uint64_t total = 0;
     for (uint64_t c = 0; c < ncells; ++c) total += cell_cost(x, per_cell[c]);
     uint64_t c = 0, cumulative = 0;
     for (uint32_t k = 0; k < count; ++k) {
@@ -659,7 +674,7 @@ static bool cut_blocks(bctx_t *x, uint32_t count, uint64_t budget, const uint64_
         uint64_t window = m + (k + 1 == count ? x->q - x->n : 0);
         // Local request and right indices are 32-bit, below the FREE/RESERVED/INACTIVE sentinels.
         if (c == start || m + m / 64 + 64 >= UINT32_MAX - 3 || window >= UINT32_MAX - 3 ||
-            block_cost(f, x->nbp, c - start, m, window) > budget) {
+            block_cost(x, c - start, m, window) > budget) {
             return false;
         }
         bounds[k] = (uint32_t)c;
@@ -682,23 +697,81 @@ static bool layout_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, con
     for (uint32_t j = 0; j < x->nblocks_dp; ++j) {
         for (uint64_t c = 0; c < x->bwidth[j]; ++c) per_cell[c] += x->copies[j];
     }
-    uint64_t count = max_requests ? (x->n + max_requests - 1) / max_requests : 1;
-    if (count == 0) count = 1;
-    if (count > ncells) count = ncells;
-    for (;; ++count) {
-        if (count > ncells || count >= UINT32_MAX) {
+    uint64_t first_count = max_requests ? (x->n + max_requests - 1) / max_requests : 1;
+    if (first_count == 0) first_count = 1;
+    if (first_count > ncells) first_count = ncells;
+    uint64_t count = first_count, plain_count = 0;
+    uint32_t *plain = NULL;    // the layout without sparse handling, kept to fall back on
+    x->extra_cap = EXTRA_MAX;
+    for (uint32_t attempt = 0;; ++attempt) {
+        bool cut = false;
+        for (;; ++count) {
+            if (count > ncells || count >= UINT32_MAX) break;
+            uint32_t *grown = realloc(bounds, count * 4);
+            if (grown == NULL) {
+                free(per_cell); free(bounds);
+                *error = "host allocation failed";
+                return false;
+            }
+            bounds = grown;
+            if (cut_blocks(x, (uint32_t)count, budget, per_cell, ncells, bounds)) {
+                cut = true;
+                break;
+            }
+        }
+        if (!cut && attempt == 0) {
             free(per_cell); free(bounds);
             *error = "no block layout fits the device budget";
             return false;
         }
-        uint32_t *grown = realloc(bounds, count * 4);
+        if (!cut) break;   // no layout with room for the imports: fall back to the plain one
+        if (attempt == 0) {
+            plain = malloc(count * sizeof *plain);
+            if (plain == NULL) {
+                free(per_cell); free(bounds);
+                *error = "host allocation failed";
+                return false;
+            }
+            memcpy(plain, bounds, count * sizeof *plain);
+            plain_count = count;
+        }
+        // Sparse blocks' requests are imported by the dense blocks, about (sparse cells / dense
+        // blocks) cells each: leave room for those rows (with slack for uneven grouping) and cut again.
+        uint64_t sparse_cells = 0, dense = 0;
+        for (uint64_t k = 0; k < count; ++k) {
+            uint64_t start = k == 0 ? 0 : bounds[k - 1], m = 0;
+            for (uint64_t c = start; c < bounds[k]; ++c) m += per_cell[c];
+            if (is_sparse(x, m)) sparse_cells += bounds[k] - start; else ++dense;
+        }
+        if (sparse_cells == 0 && attempt > 0) {   // the wider cut has no sparse block left: use it
+            free(plain);
+            plain = NULL;
+            break;
+        }
+        // No sparse block, or none dense to import into (tiny fields): every block keeps its window.
+        if (sparse_cells == 0 || dense == 0) break;
+        uint64_t need = EXTRA_MAX + (sparse_cells + dense - 1) / dense * 3 / 2 + 16;
+        if (need <= x->extra_cap) {
+            free(plain);
+            plain = NULL;
+            break;
+        }
+        if (attempt == 8 || need >= UINT32_MAX / 2) break;
+        x->extra_cap = (uint32_t)need;
+        count = first_count;
+    }
+    if (plain != NULL) {   // the sparse layout didn't settle: every block keeps its own window
+        uint32_t *grown = realloc(bounds, plain_count * sizeof *bounds);
         if (grown == NULL) {
-            free(per_cell); free(bounds);
+            free(per_cell); free(bounds); free(plain);
             *error = "host allocation failed";
             return false;
         }
         bounds = grown;
-        if (cut_blocks(x, (uint32_t)count, budget, per_cell, ncells, bounds)) break;
+        memcpy(bounds, plain, plain_count * sizeof *bounds);
+        count = plain_count;
+        x->extra_cap = EXTRA_MAX;
+        free(plain);
     }
     x->blocks = calloc(count, sizeof *x->blocks);
     if (x->blocks == NULL) {
@@ -717,11 +790,14 @@ static bool layout_blocks(bctx_t *x, uint64_t budget, uint64_t max_requests, con
         rlo += blk->m;
         blk->rhi = rlo;
         blk->imp_limit = blk->m / 64 + 64;
+        blk->sparse = is_sparse(x, blk->m) && x->extra_cap > EXTRA_MAX;
+        x->nsparse += blk->sparse;
+        blk->extra = calloc(x->extra_cap, 4);
         blk->segj = calloc(x->nblocks_dp, 4);
         blk->lfirst = calloc(x->nblocks_dp, 4);
         blk->lcoset = calloc(x->nblocks_dp, 4);
         blk->lwidth = calloc(x->nblocks_dp, 4);
-        if (!blk->segj || !blk->lfirst || !blk->lcoset || !blk->lwidth) {
+        if (!blk->extra || !blk->segj || !blk->lfirst || !blk->lcoset || !blk->lwidth) {
             free(per_cell); free(bounds);
             *error = "host allocation failed";
             return false;
@@ -846,7 +922,7 @@ static bool exchange(bctx_t *x, const bool *target, members_t *pending, uint64_t
                 uint32_t slot;
                 if (cap[b] == 0 || blk->nimp + nfresh[b] >= blk->imp_limit) continue;
                 if (!slot_of(blk, cell, &slot)) {
-                    if (blk->nextra == EXTRA_MAX) continue;
+                    if (blk->nextra == x->extra_cap) continue;
                     blk->extra[blk->nextra++] = cell;
                 }
                 if (fresh[b] == NULL && (fresh[b] = malloc(blk->imp_limit * sizeof **fresh)) == NULL) {
@@ -904,6 +980,108 @@ static uint64_t add_pending_cells(const bctx_t *x, const members_t *pending, uin
     return count;
 }
 
+// First sparse cell (index into the sparse cell list) of a pass's slice: slices are proportional to
+// the pass's dense blocks, since each dense block has room for about the same number of import cells.
+static uint64_t slice_start(uint64_t nscells, uint32_t ndense, const uint32_t *pass_start, uint32_t pass) {
+    return (uint64_t)((__uint128_t)nscells * pass_start[pass] / ndense);
+}
+
+// Requests in one cell: one per copy of every DP run as wide as the cell.
+static uint64_t cell_requests(const bctx_t *x, uint64_t cell) {
+    uint64_t requests = 0;
+    for (uint32_t j = 0; j < x->nblocks_dp; ++j) {
+        if (cell < x->bwidth[j]) requests += x->copies[j];
+    }
+    return requests;
+}
+
+typedef struct {
+    uint32_t cell;
+    size_t index;
+} cell_member_t;
+
+static int compare_cell_member(const void *left, const void *right) {
+    const cell_member_t *a = left, *b = right;
+    if (a->cell != b->cell) return (a->cell > b->cell) - (a->cell < b->cell);
+    return (a->index > b->index) - (a->index < b->index);
+}
+
+// Round 1 of a pass with sparse blocks: give the pending requests of the pass's sparse cells
+// [cell_lo, cell_hi] (their rows are in this pass) to the pass's dense blocks, up to the rights
+// each window has beyond its own requests. A cell's requests go to one block where they fit, so
+// each block needs few import cells. They stay in `pending` until drop_matched().
+static bool assign_sparse(bctx_t *x, const members_t *pending, const uint32_t *dense, uint32_t ndense,
+                          uint64_t cell_lo, uint64_t cell_hi, members_t *fresh) {
+    cell_member_t *list = malloc((pending->count + 1) * sizeof *list);
+    uint64_t *cap = calloc(ndense, sizeof *cap);
+    if (list == NULL || cap == NULL) {
+        free(list); free(cap);
+        return false;
+    }
+    size_t count = 0;
+    for (size_t i = 0; i < pending->count; ++i) {
+        member_t m = pending->items[i];
+        if (!x->blocks[m.home].sparse) continue;
+        uint32_t cell = member_cell(x, m);
+        if (cell < cell_lo || cell > cell_hi || x->rows.slot[cell] == FW_NO_SLOT) continue;
+        list[count++] = (cell_member_t){cell, i};
+    }
+    qsort(list, count, sizeof *list, compare_cell_member);
+    for (uint32_t k = 0; k < ndense; ++k) {
+        const block_t *blk = &x->blocks[dense[k]];
+        uint64_t window = blk->rhi - blk->rlo, used = blk->m + blk->nimp + fresh[dense[k]].count;
+        cap[k] = window > used ? window - used : 0;
+    }
+    uint32_t k = 0;
+    bool ok = true;
+    for (size_t i = 0; ok && i < count;) {
+        size_t group = i;
+        while (group < count && list[group].cell == list[i].cell) ++group;
+        for (; ok && i < group; ++i) {
+            // The current block if it has room (rights, and an import cell for this one), else the next.
+            uint32_t tries = 0;
+            for (; tries < ndense; ++tries, k = (k + 1) % ndense) {
+                block_t *blk = &x->blocks[dense[k]];
+                uint32_t slot;
+                if (cap[k] == 0 || blk->nimp + fresh[dense[k]].count >= blk->imp_limit) continue;
+                if (slot_of(blk, list[i].cell, &slot)) break;
+                if (blk->nextra < x->extra_cap) {
+                    blk->extra[blk->nextra++] = list[i].cell;
+                    break;
+                }
+            }
+            if (tries == ndense) break;   // no room left in this pass: exchange and rescue passes take the rest
+            --cap[k];
+            ok = members_push(&fresh[dense[k]], pending->items[list[i].index]);
+        }
+        i = group;
+        k = (k + 1) % ndense;   // spread cells round the blocks
+    }
+    free(list);
+    free(cap);
+    return ok;
+}
+
+// Removes pending requests the payload now shows as matched (imported in round 1).
+static bool drop_matched(bctx_t *x, members_t *pending) {
+    size_t kept = 0;
+    for (size_t i = 0; i < pending->count; ++i) {
+        member_t m = pending->items[i];
+        uint32_t value;
+        if (!store_read(&x->store, canonical(x, &x->blocks[m.home], m.li), 1, &value)) return false;
+        if (value == NOCHOICE) pending->items[kept++] = m;
+    }
+    pending->count = kept;
+    return true;
+}
+
+// Pending requests whose rows this pass holds (the pass's round-1 residual).
+static size_t pending_with_rows(const bctx_t *x, const members_t *pending) {
+    size_t count = 0;
+    for (size_t i = 0; i < pending->count; ++i) count += x->rows.slot[member_cell(x, pending->items[i])] != FW_NO_SLOT;
+    return count;
+}
+
 typedef struct {
     uint64_t max_requests, max_rounds, max_residual, max_rescue, row_budget;
 } controls_t;
@@ -941,68 +1119,185 @@ static int match_passes(bctx_t *x, const controls_t *controls, log_t *log, total
             goto done;
         }
     }
-    // Plan: consecutive blocks while their cells fit 15/16 of the room (the rest is for carried cells).
+    // Sparse blocks (see SPARSE_DENSITY) never run: their requests start out pending, and each pass
+    // carries a slice of their cells, whose requests the pass's dense blocks import in round 1, into
+    // windows enlarged by exactly that many rights. Without sparse blocks, `order` is every block.
+    uint32_t *order = malloc(((uint64_t)pn + 1) * sizeof *order), ndense = 0;
     uint32_t *pass_start = malloc(((uint64_t)pn + 1) * sizeof *pass_start), npasses = 0;
-    if (pass_start == NULL) goto done;
-    for (uint32_t b = 0; b < pn;) {
-        uint64_t held = 0;
-        pass_start[npasses++] = b;
-        do {
-            held += x->blocks[b].c_hi - x->blocks[b].c_lo;
-            ++b;
-        } while (b < pn && held + (x->blocks[b].c_hi - x->blocks[b].c_lo) <= room - room / 16);
+    uint64_t *scells = NULL, nscells = 0;
+    members_t *fresh = calloc(pn, sizeof *fresh);
+    if (order == NULL || pass_start == NULL || fresh == NULL) {
+        free(order); free(pass_start); free(fresh);
+        fprintf(stderr, "kh_gpu_wide_kernel: host allocation failed\n");
+        goto done;
     }
-    pass_start[npasses] = pn;
+    for (uint32_t b = 0; b < pn; ++b) {
+        if (!x->blocks[b].sparse) order[ndense++] = b;
+        else nscells += x->blocks[b].c_hi - x->blocks[b].c_lo;
+    }
+    // Plan: consecutive dense blocks while their cells, plus the pass's slice of the sparse cells
+    // (proportional to its dense blocks; see slice_start), fit the room less 1/16 for carried cells.
+    for (uint32_t k = 0; k < ndense;) {
+        uint64_t held = x->blocks[order[k]].c_hi - x->blocks[order[k]].c_lo;
+        pass_start[npasses] = k;
+        uint64_t s0 = (uint64_t)((__uint128_t)nscells * k / ndense);
+        if (held + (uint64_t)((__uint128_t)nscells * (k + 1) / ndense) - s0 > room) {   // checked above without the slice
+            free(order); free(pass_start); free(fresh);
+            fprintf(stderr, "kh_gpu_wide_kernel: a block and its share of the sparse cells exceed the row budget\n");
+            goto done;
+        }
+        ++npasses;
+        for (++k; k < ndense; ++k) {
+            uint64_t cells_k = x->blocks[order[k]].c_hi - x->blocks[order[k]].c_lo;
+            uint64_t slice = (uint64_t)((__uint128_t)nscells * (k + 1) / ndense) - s0;
+            if (held + cells_k + slice > room - room / 16) break;
+            held += cells_k;
+        }
+    }
+    pass_start[npasses] = ndense;
     totals->passes = npasses;
-    fprintf(stderr, "blocks=%u passes=%u cells_per_pass<=%" PRIu64 "\n", pn, npasses, room);
+    if (x->nsparse != 0) {
+        scells = malloc(nscells * sizeof *scells);
+        if (scells == NULL) {
+            free(order); free(pass_start); free(fresh);
+            fprintf(stderr, "kh_gpu_wide_kernel: host allocation failed\n");
+            goto done;
+        }
+        nscells = 0;
+        for (uint32_t b = 0; b < pn; ++b) {
+            if (!x->blocks[b].sparse) continue;
+            for (uint64_t cell = x->blocks[b].c_lo; cell < x->blocks[b].c_hi; ++cell) scells[nscells++] = cell;
+        }
+        // Windows: a pass's dense blocks share its slice's requests in proportion to their own.
+        uint64_t *window = calloc(pn, sizeof *window);
+        if (window == NULL) {
+            free(order); free(pass_start); free(fresh); free(scells);
+            fprintf(stderr, "kh_gpu_wide_kernel: host allocation failed\n");
+            goto done;
+        }
+        for (uint32_t pass = 0; pass < npasses; ++pass) {
+            uint64_t s0 = slice_start(nscells, ndense, pass_start, pass), carried = 0, own = 0;
+            uint64_t s1 = slice_start(nscells, ndense, pass_start, pass + 1);
+            for (uint64_t index = s0; index < s1; ++index) carried += cell_requests(x, scells[index]);
+            for (uint32_t k = pass_start[pass]; k < pass_start[pass + 1]; ++k) own += x->blocks[order[k]].m;
+            uint64_t given = 0;
+            for (uint32_t k = pass_start[pass]; k < pass_start[pass + 1]; ++k) {
+                block_t *blk = &x->blocks[order[k]];
+                uint64_t share = k + 1 == pass_start[pass + 1] ? carried - given
+                                                               : (uint64_t)((__uint128_t)carried * blk->m / own);
+                given += share;
+                window[order[k]] = blk->m + share;
+                if (blk->imp_limit < share + 64) blk->imp_limit = share + 64;
+            }
+        }
+        window[order[ndense - 1]] += x->q - x->n;   // spare rights (n < q) go to the last dense window
+        uint64_t rlo = 0;
+        bool too_wide = false;
+        for (uint32_t b = 0; b < pn; ++b) {
+            x->blocks[b].rlo = rlo;
+            rlo += window[b];
+            x->blocks[b].rhi = rlo;
+            too_wide |= window[b] >= UINT32_MAX - 3 || x->blocks[b].m + x->blocks[b].imp_limit >= UINT32_MAX - 3;
+        }
+        free(window);
+        if (too_wide || rlo != x->q) {
+            free(order); free(pass_start); free(fresh); free(scells);
+            fprintf(stderr, "kh_gpu_wide_kernel: sparse windows don't fit 32-bit local indices\n");
+            goto done;
+        }
+        // The sparse blocks' requests: unmatched in the payload, and pending.
+        for (uint32_t b = 0; b < pn; ++b) {
+            block_t *blk = &x->blocks[b];
+            if (!blk->sparse) continue;
+            uint32_t *none = malloc(blk->m * sizeof *none + 4);
+            bool ok = none != NULL;
+            for (uint64_t li = 0; ok && li < blk->m; ++li) none[li] = NOCHOICE;
+            ok = ok && block_own_io(x, blk, none, true);
+            for (uint64_t li = 0; ok && li < blk->m; ++li) ok = members_push(pending, (member_t){b, (uint32_t)li, 0});
+            free(none);
+            blk->ran = true;
+            if (!ok || !trace_push(log, x->n - x->matched)) {
+                free(order); free(pass_start); free(fresh); free(scells);
+                fprintf(stderr, "kh_gpu_wide_kernel: sparse block setup failed\n");
+                goto done;
+            }
+        }
+    }
+    fprintf(stderr, "blocks=%u sparse=%u sparse_cells=%" PRIu64 " import_cells=%u passes=%u cells_per_pass<=%" PRIu64 "\n",
+            pn, x->nsparse, nscells, x->extra_cap, npasses, room);
     bool stuck = false;
     for (uint32_t pass = 0; pass < npasses && !stuck; ++pass) {
-        uint32_t b0 = pass_start[pass], b1 = pass_start[pass + 1];
-        uint64_t lo = x->blocks[b0].c_lo, hi = x->blocks[b1 - 1].c_hi, count = 0;
-        for (uint64_t cell = lo; cell < hi; ++cell) cells[count++] = cell;
+        uint32_t k0 = pass_start[pass], k1 = pass_start[pass + 1];
+        uint64_t lo = x->blocks[order[k0]].c_lo, hi = x->blocks[order[k1 - 1]].c_hi, count = 0;
+        for (uint32_t k = k0; k < k1; ++k) {
+            for (uint64_t cell = x->blocks[order[k]].c_lo; cell < x->blocks[order[k]].c_hi; ++cell) cells[count++] = cell;
+        }
+        uint64_t s0 = slice_start(nscells, ndense, pass_start, pass);
+        uint64_t s1 = slice_start(nscells, ndense, pass_start, pass + 1);
+        for (uint64_t index = s0; index < s1; ++index) cells[count++] = scells[index];
         count = unique_sorted(cells, add_pending_cells(x, pending, lo, hi, cells, count, room - count));
         pass_progress_t context = {x->matched, x->n, ""};
         snprintf(context.phase, sizeof context.phase, "pass %u/%u rows", pass + 1, npasses);
         double started = now();
         if (!build_rows(x, cells, count, &context, &error)) {
             fprintf(stderr, "kh_gpu_wide_kernel: %s\n", error);
-            free(pass_start);
+            free(order); free(pass_start); free(fresh); free(scells);
             goto done;
         }
         totals->rows += now() - started;
         started = now();
-        size_t before = pending->count;
-        for (uint32_t b = b0; b < b1; ++b) {
-            if (!run_block(x, b, NULL, 0, pending)) {
+        size_t before = pending->count, pass_imports = 0;
+        if (s1 > s0 && !assign_sparse(x, pending, order + k0, k1 - k0, scells[s0], scells[s1 - 1], fresh)) {
+            fprintf(stderr, "kh_gpu_wide_kernel: %s\n", gpu->error ? gpu->error : "host allocation failed");
+            free(order); free(pass_start); free(fresh); free(scells);
+            goto done;
+        }
+        for (uint32_t k = k0; k < k1; ++k) {
+            uint32_t b = order[k];
+            if (!run_block(x, b, fresh[b].items, fresh[b].count, pending)) {
                 fprintf(stderr, "kh_gpu_wide_kernel: %s\n", gpu->error);
-                free(pass_start);
+                free(order); free(pass_start); free(fresh); free(scells);
                 goto done;
             }
+            fresh[b].count = 0;
             char phase[64];
             snprintf(phase, sizeof phase, "block %u/%u", b + 1, pn);
             progress(x->matched, x->n, phase, "blocks", b + 1, pn);
             fprintf(stderr, "block %u/%u cells=[%u,%u) requests=%" PRIu64 " matched=%" PRIu64 "\n",
                     b + 1, pn, x->blocks[b].c_lo, x->blocks[b].c_hi, x->blocks[b].m, x->blocks[b].matched);
+            pass_imports += x->blocks[b].nimp;
             if (!trace_push(log, x->n - x->matched)) goto done;
         }
+        if (x->nsparse != 0 && !drop_matched(x, pending)) {
+            fprintf(stderr, "kh_gpu_wide_kernel: payload read failed\n");
+            free(order); free(pass_start); free(fresh); free(scells);
+            goto done;
+        }
         totals->blocks += now() - started;
-        totals->residual1 += pending->count - before;
-        fprintf(stderr, "pass %u/%u blocks [%u,%u) cells=%" PRIu64 " round-1 residual=%zu pending=%zu\n",
-                pass + 1, npasses, b0, b1, count, pending->count - before, pending->count);
+        size_t residual = pending_with_rows(x, pending);
+        totals->residual1 += x->nsparse != 0 ? residual : pending->count - before;
+        fprintf(stderr, "pass %u/%u blocks [%u,%u) cells=%" PRIu64 " round-1 residual=%zu pending=%zu%s",
+                pass + 1, npasses, order[k0], order[k1 - 1] + 1, count,
+                x->nsparse != 0 ? residual : pending->count - before, pending->count, x->nsparse ? "" : "\n");
+        if (x->nsparse != 0) fprintf(stderr, " sparse_imported=%zu\n", pass_imports);
         if (pending->count > controls->max_residual) {
             stuck = true;   // a hopeless field: don't spend the remaining walks on it
             break;
         }
         memset(target, 0, pn * sizeof *target);
-        for (uint32_t b = b0; b < b1; ++b) target[b] = true;
+        for (uint32_t k = k0; k < k1; ++k) target[order[k]] = true;
         started = now();
         if (!exchange(x, target, pending, controls->max_rounds, pass + 1, log)) {
             fprintf(stderr, "kh_gpu_wide_kernel: %s\n", gpu->error);
-            free(pass_start);
+            free(order); free(pass_start); free(fresh); free(scells);
             goto done;
         }
         totals->exchange += now() - started;
     }
+    for (uint32_t b = 0; b < pn; ++b) free(fresh[b].items);
+    free(fresh);
+    free(order);
+    free(scells);
     free(pass_start);
     // Rescue passes: blocks with free rights, most free first, plus the pending requests' rows.
     for (uint64_t rescue = 0; !stuck && pending->count != 0 && controls->max_rounds > 1 &&
@@ -1093,6 +1388,7 @@ int main(int argc, char **argv) {
     }
     uint64_t p, r, threads = 1, start = 1, maximum = UINT64_C(2147483648), device = 0, salt = 0x9E3779B9u;
     uint64_t block_budget = 0, split_bits = 32, row_bytes = 0, payload_offset = 0;
+    double sparse_density = SPARSE_DENSITY;
     controls_t controls = {0, 16, UINT64_MAX, 4, 0};
     const char *poly_text = NULL, *test_cells = NULL, *error = NULL;
     kh_parameters_t parameters;
@@ -1131,6 +1427,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(option, "--max-rounds")) controls.max_rounds = value;
         else if (!strcmp(option, "--max-residual")) controls.max_residual = value;
         else if (!strcmp(option, "--max-rescue-passes")) controls.max_rescue = value;
+        else if (!strcmp(option, "--sparse-density")) sparse_density = (double)value;
         else if (!strcmp(option, "--row-bytes")) row_bytes = value;
         else if (!strcmp(option, "--payload-offset")) payload_offset = value;
         else if (!strcmp(option, "--label-split-bits")) split_bits = value;
@@ -1224,6 +1521,7 @@ int main(int argc, char **argv) {
     bx.nbp = (uint32_t)((q - 1) >> split_bits);
     bx.salt = (uint32_t)salt;
     bx.threads = (uint32_t)threads;
+    bx.sparse_density = sparse_density;
     totals_t totals = {0};
     progress(0, n, "field", "field", 0, q - 1);
     if (test_cells != NULL) {

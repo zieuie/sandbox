@@ -93,8 +93,13 @@ def preferred_attempt(entries: list[dict], runs: dict[str, dict],
         _, entry, run = max(complete, key=lambda item: (durable_work(item[2]), item[0]))
         return entry, run
     active = [item for item in available if item[2]["state"] not in TERMINAL]
-    pool = active or available
-    _, entry, run = max(pool, key=lambda item: (durable_work(item[2]), item[0]))
+    if active:
+        _, entry, run = max(active, key=lambda item: (durable_work(item[2]), item[0]))
+        return entry, run
+    # All ended: the newest decides what comes next. Ranking by work here sent 5^15 back to an
+    # older polynomial that had matched 59 more requests, so the feeder resubmitted the newest
+    # one (the leader returned the same failed run) instead of moving on.
+    _, entry, run = max(available, key=lambda item: item[0])
     return entry, run
 
 
@@ -381,7 +386,8 @@ def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
                 # The block exchange can end short for one field and still succeed for another
                 # primitive polynomial, so move on rather than rerun the same deterministic attempt.
                 latest["incomplete"] = True
-                if sum(bool(item.get("incomplete")) for item in attempts) >= settings["max_matching_attempts"]:
+                if sum(bool(item.get("incomplete")) and not item.get("not_counted")
+                       for item in attempts) >= settings["max_matching_attempts"]:
                     record["matching_failure"] = run.get("error") or run["state"]
                     counts["failed_terminal"] += 1
                     continue

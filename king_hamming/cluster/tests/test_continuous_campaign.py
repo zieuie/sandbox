@@ -200,6 +200,36 @@ class ContinuousCampaignTests(unittest.TestCase):
                 Path("unused"), manifest, runs, nodes, pipeline), {"retried": 1})
         self.assertNotIn("matching_failure", record)
 
+    def test_after_two_incomplete_polynomials_the_third_is_tried(self) -> None:
+        """The newest ended attempt decides, even if an older one matched more (5^15, 2026-10-06)."""
+
+        source = ROOT.parent / "matching_solver/examples/13_5.khdp"
+        settings = dict(campaign.DEFAULTS)
+        settings.update(matching_workers=2, matching_threads=1, matching_retry_seconds=1, max_matching_attempts=3)
+        first = [2, 4, 0, 0, 0, 1]
+        second = campaign.next_primitive(13, 5, 13**5, first)
+        message = "gpu_wide_match_solver/cluster_solver.py: wide matching incomplete: 59 requests unmatched"
+        record = {"p": 13, "r": 5, "q": 13**5, "dp_artifact": str(source),
+                  "matching_attempts": [{"run_id": "short-1", "poly": first, "incomplete": True},
+                                        {"run_id": "short-2", "poly": second}]}
+        pipeline = {"settings": settings, "fields": {"13^5": record}}
+        manifest = {"leader": "http://private", "entries": []}
+        nodes = [{"compute_enabled": True, "state": "healthy"} for _ in range(2)]
+        runs = {"short-1": {"run_id": "short-1", "state": "failed", "finished": 1, "error": message,
+                            "progress_done": 900, "progress_total": 1000},
+                "short-2": {"run_id": "short-2", "state": "failed", "finished": 2, "error": message,
+                            "progress_done": 800, "progress_total": 1000}}
+        submissions = []
+
+        def fake_request(_leader, route, value=None):
+            submissions.append(value)
+            return {"run_id": "third", "state": "queued", "reused": False}
+
+        with patch.object(campaign, "request", side_effect=fake_request):
+            self.assertEqual(campaign.advance_matching(Path("unused"), manifest, runs, nodes, pipeline), {"submitted": 1})
+        self.assertEqual(record["matching_attempts"][-1]["poly"], campaign.next_primitive(13, 5, 13**5, second))
+        self.assertNotIn(record["matching_attempts"][-1]["poly"], (first, second))
+
     def test_incomplete_wide_matching_moves_to_the_next_polynomial(self) -> None:
         self.test_incomplete_block_matching_moves_to_the_next_polynomial(
             "gpu_wide_match_solver/cluster_solver.py: wide matching incomplete: 7 requests unmatched after 31 rounds")
