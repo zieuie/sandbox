@@ -87,7 +87,9 @@ class Model:
         lowest, unfinished = connection.execute(
             "SELECT MIN(t.row+t.column),COUNT(*) FROM distributed_tiles t LEFT JOIN runs c ON c.run_id=t.child_run_id "
             "WHERE t.parent_run_id=? AND (c.state IS NULL OR c.state<>'complete')", (root,)).fetchone()
-        value = {"lowest": lowest, "unfinished": unfinished or 0, "at": now}
+        ready = connection.execute(
+            "SELECT COUNT(*) FROM runs WHERE parent_run_id=? AND state='queued'", (root,)).fetchone()[0]
+        value = {"lowest": lowest, "unfinished": unfinished or 0, "ready": ready or 0, "at": now}
         with self.lock:
             self.fields[root] = value
         return value
@@ -188,7 +190,11 @@ def withhold(connection, node: dict, specification: dict, candidates: list[dict]
     if not others:
         return False
     fastest_kernel = min(model.kernels[(name, key)] for (name, key) in model.kernels if key == root)
-    return mine > min(others) + fastest_kernel
+    sooner = sum(mine > other + fastest_kernel for other in others)
+    # Hold it only if the machines that would finish it sooner can also take the field's other
+    # ready tiles: one per machine. With 23 ready tiles and one faster GPU (107^3's tail on
+    # 2026-10-07: gawain at 30 s a tile, P600s at 48 s), holding each back idled eight GPUs.
+    return sooner > 0 and progress.get("ready", 0) <= sooner
 
 
 def gpu_machines(connection, now: float, lease_seconds: float) -> list[dict[str, Any]]:

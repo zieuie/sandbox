@@ -123,6 +123,21 @@ class LeaseTests(unittest.TestCase):
             connection.execute("DELETE FROM runs WHERE run_id LIKE 'history-slow-%'")
         self.assertIsNotNone(self.lease("slow"))
 
+    def test_many_ready_tiles_are_not_held_for_one_faster_gpu(self) -> None:
+        # 107^3's tail (2026-10-07): 23 ready tiles, gawain at 30 s a tile and eight P600s at 48 s.
+        # Holding every one back for gawain idled the P600s; hold only what the faster GPUs can take.
+        now = time.time()
+        model = placement.Model()
+        model.kernels.update({("fast", "r"): 30.0, ("slow", "r"): 48.0})
+        model.overheads.update({"fast": (2.0, 3.0), "slow": (60.0, 3.0)})   # deep r = 3 halos over Wi-Fi
+        model.kernels_at["r"] = now
+        model.running = (now, {})
+        fast, slow = ({"node_name": name, "slots_json": "[{}, {}]"} for name in ("fast", "slow"))
+        specification = json.loads(candidate(0, 0, root="r")["specification"])
+        for ready, held in ((1, True), (23, False)):
+            model.fields["r"] = {"lowest": 0, "unfinished": 300, "ready": ready, "at": now}
+            self.assertEqual(placement.withhold(None, slow, specification, [fast, slow], now, model), held, ready)
+
     def test_completion_estimate(self) -> None:
         model = placement.Model()
         model.kernels[("n", "r")] = 10.0
