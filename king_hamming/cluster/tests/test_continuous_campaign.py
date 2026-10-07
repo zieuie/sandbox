@@ -200,7 +200,11 @@ class ContinuousCampaignTests(unittest.TestCase):
                 Path("unused"), manifest, runs, nodes, pipeline), {"retried": 1})
         self.assertNotIn("matching_failure", record)
 
-    def test_incomplete_block_matching_moves_to_the_next_polynomial(self) -> None:
+    def test_incomplete_wide_matching_moves_to_the_next_polynomial(self) -> None:
+        self.test_incomplete_block_matching_moves_to_the_next_polynomial(
+            "gpu_wide_match_solver/cluster_solver.py: wide matching incomplete: 7 requests unmatched after 31 rounds")
+
+    def test_incomplete_block_matching_moves_to_the_next_polynomial(self, message: str | None = None) -> None:
         """An incomplete block run is deterministic: try another polynomial, and stop after the limit."""
 
         source = ROOT.parent / "matching_solver/examples/13_5.khdp"
@@ -212,7 +216,7 @@ class ContinuousCampaignTests(unittest.TestCase):
         pipeline = {"settings": settings, "fields": {"13^5": record}}
         manifest = {"leader": "http://private", "entries": []}
         nodes = [{"compute_enabled": True, "state": "healthy"} for _ in range(2)]
-        message = "gpu_block_match_solver/cluster_solver.py: block matching incomplete: 7 requests unmatched"
+        message = message or "gpu_block_match_solver/cluster_solver.py: block matching incomplete: 7 requests unmatched"
         runs = {"short-1": {"run_id": "short-1", "state": "failed", "finished": 1, "error": message}}
         submissions = []
 

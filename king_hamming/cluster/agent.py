@@ -629,6 +629,9 @@ def replicate_once(
     return True
 
 
+# A GPU matching that ends short is deterministic: the same attempt would end the same way, so it
+# fails at once (the feeder then tries another polynomial) instead of being requeued for a rerun.
+DETERMINISTIC_FAILURES = ("block matching incomplete", "wide matching incomplete")
 # At most one solver progress report per this many seconds is sent to the leader.
 PROGRESS_SPACING_SECONDS = float(os.environ.get("KH_PROGRESS_SECONDS", "5"))
 
@@ -1161,6 +1164,9 @@ def run_job(
                 raise RuntimeError(f"solver exited {return_code} after restart: {result['stderr'].strip()}")
 
             if adapter.retry_elsewhere(specification):
+                if any(text in result["stderr"] for text in DETERMINISTIC_FAILURES):
+                    # The same attempt would end the same way (5^15 ran 75 minutes twice to learn this).
+                    raise RuntimeError(f"solver result is final, not retried: {result['stderr'].strip()}")
                 if int(job.get("engine_failures", 0)) >= 1:
                     raise RuntimeError(f"distributed solver failed after retry: {result['stderr'].strip()}")
                 # The leader keeps no error for a retried run, so this log is the only record of why.

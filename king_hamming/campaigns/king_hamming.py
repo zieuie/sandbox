@@ -348,6 +348,9 @@ def recover_matching_attempts(pipeline: dict, runs: dict[str, dict]) -> None:
                                            "state": run["state"], "recovered": True})
 
 
+# A deterministic short result (block or wide GPU matching): retrying the same polynomial repeats it.
+INCOMPLETE = ("block matching incomplete", "wide matching incomplete")
+
 def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
                      nodes: list[dict], pipeline: dict, policy=None) -> dict[str, int]:
     """Archive outcomes, retry obstructions, and submit ready fields."""
@@ -374,7 +377,7 @@ def advance_matching(state: Path, manifest: dict, runs: dict[str, dict],
                 continue
             latest, run = selected
             latest["state"] = run["state"]
-            if run["state"] == "failed" and "block matching incomplete" in (run.get("error") or ""):
+            if run["state"] == "failed" and any(text in (run.get("error") or "") for text in INCOMPLETE):
                 # The block exchange can end short for one field and still succeed for another
                 # primitive polynomial, so move on rather than rerun the same deterministic attempt.
                 latest["incomplete"] = True
