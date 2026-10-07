@@ -62,7 +62,15 @@ make -C king_hamming/cuda toolchain && make -C king_hamming/gpu_wide_match_solve
 1. **Count walk:** one walk over all q labels records, for every thread's chunk of labels, how
    many fall in each cell. This fixes where each chunk's labels go in every row.
    (`src/field_walk.c`: `fw_walk_prepare`.)
-2. **Layout:** the used cells are cut into blocks that fit the GPU, as in the block solver.
+2. **Layout:** the used cells are cut into blocks of about equal GPU cost (rows, plus requests).
+   - **Sparse blocks:** a block whose requests average fewer than 4 neighbours in a window of its
+     own size (F·m/q < 4; `--sparse-density`) gets no window and never runs. 5¹⁵'s tail, F cells
+     of 3 requests each, is the case: about 0.14 neighbours a request.
+   - Their requests start out pending. Each pass carries a slice of their cells, proportional to
+     its dense blocks, and those blocks import them in their first run, into windows enlarged by
+     exactly as many rights. Blocks get more import cells to fit (`import_cells` in the log).
+   - Fields without sparse blocks lay out exactly as before. The full story is in
+     [docs/WIDE_MATCHING_SPARSE_TAIL.md](../docs/WIDE_MATCHING_SPARSE_TAIL.md).
 3. **Passes:** consecutive blocks are grouped so their rows fit `--row-bytes`. Each pass is one
    placement walk for its cells (`fw_walk_rows`), plus the cells of requests carried in from
    earlier passes.
@@ -88,7 +96,8 @@ block's device self-check), and `kh_verify_wide` checks every endpoint.
 requests then have nowhere to go, since every other window is full, and the run ends incomplete
 (exit 4). The block solver behaves the same way. Small blocks show it: 7⁵ in blocks of 3,000
 leaves 9. Production blocks (about 10⁸ requests on the 3060) had a round-1 residual of 0 on
-11⁹, 13⁹ and 29⁷.
+11⁹, 13⁹, 29⁷ and 31⁷. Leftovers come from blocks with few neighbours per request in their window,
+which is why sparse blocks are handled separately (above).
 
 ## Measured (merlin, 2026-10-06, alongside DP tiles)
 
