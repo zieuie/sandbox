@@ -68,6 +68,48 @@ class ArchiveLinkTests(unittest.TestCase):
             self.assertFalse(other.exists())
 
 
+SHM = Path("/dev/shm")
+
+
+@unittest.skipUnless(SHM.is_dir() and SHM.stat().st_dev != Path(tempfile.gettempdir()).stat().st_dev,
+                     "needs a second filesystem (/dev/shm)")
+class SecondDriveTests(unittest.TestCase):
+    """merlin's /mnt/khdata: 7^13's 206 GB certificate fits on neither disk twice (2026-10-07)."""
+
+    def test_a_result_on_the_large_drive_is_parked_symlinked_archived_and_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory(dir=SHM) as drive, \
+                unittest.mock.patch.object(blob_store, "LINK_BYTES", 1000), \
+                unittest.mock.patch.object(artifact_resolver, "LINK_BYTES", 1000):
+            root, large = Path(directory) / "blobs", Path(drive)
+            work = large / "work" / "run" / "token"
+            work.mkdir(parents=True)
+            result = work / "result.bin"
+            data = os.urandom(5000)
+            result.write_bytes(data)
+            # Without the large root it would be copied onto the store's disk; with it, parked.
+            digest, path = blob_store.store_blob(result, root, link=True, large_root=large)
+            self.assertEqual(digest, hashlib.sha256(data).hexdigest())
+            self.assertTrue(path.is_symlink())
+            self.assertEqual(path.resolve(), (large / "blobs" / digest).resolve())
+            self.assertFalse(result.exists())                               # moved, not copied
+            self.assertEqual(path.read_bytes(), data)
+            # The feeder's archive on the other disk: checked, then symlinked.
+            run = {"artifact_hash": digest, "artifact_location": "http://127.0.0.1:9/blobs/" + digest}
+            output = Path(directory) / "matching-results" / "7_13.khmatch"
+            artifact_resolver.retrieve(run, output, 10_000, local_roots=[root])
+            self.assertTrue(output.is_symlink())
+            self.assertEqual(output.read_bytes(), data)
+            # Storing the same result again (a rerun) keeps one parked copy.
+            again = work / "again.bin"
+            again.write_bytes(data)
+            self.assertEqual(blob_store.store_blob(again, root, link=True, large_root=large), (digest, path))
+            self.assertEqual(len(list((large / "blobs").iterdir())), 1)
+            # Garbage collection removes the link and the parked bytes.
+            self.assertEqual(blob_store.remove_blob(path), len(data))
+            self.assertFalse(path.exists() or path.is_symlink())
+            self.assertFalse((large / "blobs" / digest).exists())
+
+
 class InPlacePublishTests(unittest.TestCase):
     def test_in_place_publication_matches_a_copied_one(self) -> None:
         dp, digest = artifacts.load_dp(EXAMPLE)

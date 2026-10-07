@@ -86,6 +86,11 @@ def wide_usable(node: dict) -> int:
     return int((ram - HOST_RESERVE_BYTES) * WIDE_HOST_FRACTION) if ram > HOST_RESERVE_BYTES else 0
 
 
+def wide_disk(node: dict) -> int:
+    """Disk a wide matching certificate can use on node: its large-result drive if it has one."""
+    return max(int(node.get("storage_free_bytes") or 0), int(node.get("large_free_bytes") or 0))
+
+
 def wide_plan(dp: dict, settings: dict, nodes: list[dict], threads: int) -> dict | None:
     """Plan match_gpu_wide when the block matcher can't take the field (F, q, or rows in memory).
 
@@ -108,8 +113,9 @@ def wide_plan(dp: dict, settings: dict, nodes: list[dict], threads: int) -> dict
         if wide_usable(node) < wide_adapter.minimum_host_bytes(dp, threads, usable):
             continue
         # The certificate is written in place on this host's disk (206 GB for 7^13): it must fit
-        # with the feeder's free-space floor to spare, or the run would fill the disk mid-way.
-        if int(node.get("storage_free_bytes") or 0) < certificate_bytes(dp) + int(
+        # with the feeder's free-space floor to spare, or the run would fill the disk mid-way. A
+        # host with a large-result drive (merlin's /mnt/khdata) writes it there instead.
+        if wide_disk(node) < certificate_bytes(dp) + int(
                 settings.get("minimum_free_bytes", DEFAULT_MINIMUM_FREE_BYTES)):
             continue
         hosts.append((usable, wide_usable(node), node["node_name"]))
@@ -183,7 +189,7 @@ def blocker(dp: dict, settings: dict, nodes: list[dict]) -> str | None:
             limits.append(f"wide matching needs at least {gib(need)} of host RAM; the largest GPU machine "
                           f"allows {gib(usable)}")
         else:
-            disk = max(int(node.get("storage_free_bytes") or 0) for node in roomy)
+            disk = max(wide_disk(node) for node in roomy)
             limits.append(f"wide matching writes a {gib(certificate_bytes(dp))} certificate; the GPU machine "
                           f"with the memory for it has {gib(disk)} of free disk, and {gib(floor)} must stay free")
     return "; ".join(limits)

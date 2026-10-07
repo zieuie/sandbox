@@ -98,6 +98,23 @@ class PushedCopyTests(unittest.TestCase):
         self.produce("a")
         self.assertEqual(self.reserved(), ["wifi"])
 
+    def test_a_copy_goes_only_where_it_fits(self) -> None:
+        # 7^13's 206 GB certificate must not be sent to a worker with 186 GB free (2026-10-06).
+        with leader.connect(self.database) as connection:
+            connection.execute("UPDATE nodes SET storage_free_bytes=?", (100 * 2**30,))
+            connection.execute("UPDATE nodes SET storage_free_bytes=? WHERE node_name='c'", (500 * 2**30,))
+        with mock.patch.object(leader, "DEFAULT_DISK_FLOOR_BYTES", 0):
+            self.produce("a")
+            with leader.connect(self.database) as connection:
+                connection.execute("UPDATE artifacts SET size=?", (206 * 10**9,))
+                connection.execute("DELETE FROM replica_transfers")
+                leader.push_copy(connection, self.digest, time.time(), 60.0)
+        self.assertEqual(self.reserved(), ["c"])
+        with leader.connect(self.database) as connection:
+            node = connection.execute("SELECT * FROM nodes WHERE node_name='b'").fetchone()
+            self.assertFalse(replication.has_room(node, 0, 206 * 10**9))
+            self.assertTrue(replication.has_room(node, 0, 10**9))
+
     def test_an_empty_scan_holds_the_next_one(self) -> None:
         with mock.patch.object(replication, "select_candidate", return_value=None) as scan:
             self.assertIsNone(self.poll("b"))

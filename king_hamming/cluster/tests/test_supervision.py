@@ -466,6 +466,25 @@ class SupervisionTests(unittest.TestCase):
         self.assertFalse(leader.stage_advanced(message(("field", 1)), "plain text"))
         self.assertFalse(leader.stage_advanced(message(("field", 3)), message(("field", 3))))
 
+    def test_heartbeat_records_a_large_drive(self) -> None:
+        """merlin reports its second drive's free space; machines without one leave it NULL."""
+
+        with tempfile.TemporaryDirectory(prefix="kh-status-test-") as directory:
+            database = Path(directory) / "leader.sqlite"
+            leader.initialize(database, 1800)
+            handler = object.__new__(leader.make_handler(database))
+            for name in ("merlin", "p600"):
+                handler.dispatch_post("/v1/register", {"node_name": name})
+                with leader.connect(database) as connection:
+                    session = connection.execute("SELECT session_id FROM nodes WHERE node_name=?", (name,)).fetchone()[0]
+                beat = {"node_name": name, "session_id": session, "storage_free_bytes": 10}
+                if name == "merlin":
+                    beat["large_free_bytes"] = 234 * 1024**3
+                handler.dispatch_post("/v1/heartbeat", beat)
+            with leader.connect(database) as connection:
+                self.assertEqual(dict(connection.execute("SELECT node_name,large_free_bytes FROM nodes")),
+                                 {"merlin": 234 * 1024**3, "p600": None})
+
     # Repeated heartbeats must not reset the mathematical-progress timestamp.
     def test_heartbeat_work_and_checkpoint_are_distinct(self) -> None:
         """Persist status timestamps separately and latch stop across a quick resume."""

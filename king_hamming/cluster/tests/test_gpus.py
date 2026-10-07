@@ -408,6 +408,10 @@ class GPUWideTests(unittest.TestCase):
         self.assertIn("certificate; the GPU machine with the memory for it has",
                       gpu_policy.blocker(self.wide_dp(7, 13), {}, today))
         self.assertGreater(gpu_policy.certificate_bytes(self.wide_dp(7, 13)), 200 * 10**9)
+        # merlin's second drive (/mnt/khdata, 234 GiB free) is reported as large_free_bytes, and
+        # the certificate is written there: 7^13 becomes admissible on it.
+        drive = [dict(today[0], large_free_bytes=234 * 1024**3)]
+        self.assertEqual(gpu_policy.plan(self.wide_dp(7, 13), {}, drive)["hosts"], ["merlin"])
         # Another machine's free disk doesn't count: gawain has the disk but not the memory.
         self.assertIn("with the memory for it has", gpu_policy.blocker(
             self.wide_dp(7, 13), {}, today + [self.node("gawain", t1000, ram=8 * 1024**3, disk=859 * 10**9)]))

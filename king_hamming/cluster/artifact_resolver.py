@@ -25,6 +25,7 @@ def live_sources(run: dict, nodes: list[dict] | tuple = ()) -> tuple[str, ...]:
 # certificate is 20 GB) stay on disk and are hashed and copied in bounded pieces.
 INLINE_BYTES = 64 * 1024 * 1024
 SYNC_BYTES = 256 * 1024 * 1024
+LINK_BYTES = 1024**3                 # as blob_store.LINK_BYTES: a parked blob is linked, not copied
 
 
 def file_digest(path: Path) -> tuple[int, str]:
@@ -78,6 +79,21 @@ def retrieve(run: dict, output: Path, maximum: int,
             if size > maximum or checksum != digest:
                 raise ValueError("local blob differs from the leader's record")
             os.link(local, temporary)
+            temporary.replace(output)
+            return contents(output)
+        except (OSError, ValueError) as error:
+            errors.append(f"{local}: {error}")
+        finally:
+            temporary.unlink(missing_ok=True)
+    elif local is not None and local.stat().st_size >= LINK_BYTES:
+        # A blob parked on another drive (blob_store.park_blob: 7^13's certificate on merlin's
+        # /mnt/khdata): checked, then linked by name, since neither disk has room for a copy.
+        try:
+            target = local.resolve()
+            size, checksum = file_digest(target)
+            if size > maximum or checksum != digest:
+                raise ValueError("local blob differs from the leader's record")
+            os.symlink(target, temporary)
             temporary.replace(output)
             return contents(output)
         except (OSError, ValueError) as error:

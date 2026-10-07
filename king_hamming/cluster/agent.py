@@ -25,7 +25,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from common import calculation_id, canonical_json, store_blob
-from blob_store import blob_path, fetch_blob, file_digest, storage_transaction, sync_directory
+from blob_store import blob_path, fetch_blob, file_digest, remove_blob, storage_transaction, sync_directory
 import adapters
 import logstamp
 import gpus
@@ -390,6 +390,9 @@ def heartbeat_loop(
         try:
             free = shutil.disk_usage(node_record["storage_root"]).free
             beat = {**node_record, "storage_free_bytes": free}
+            large = large_root()
+            if large is not None:
+                beat["large_free_bytes"] = shutil.disk_usage(large).free
             if node_record.get("gpus"):
                 beat["gpu_stats"] = gpus.sample()  # for the dashboard's GPU graph; the leader ignores it if unknown
             beat["thermal"] = thermal.sample()      # CPU and NVMe temperatures for the heat gauges
@@ -629,6 +632,22 @@ def replicate_once(
     return True
 
 
+# A machine with a second drive for very large results (merlin's /mnt/khdata, for 7^13's 206 GB
+# certificate) names it in this file. Wide matching runs work there, and their result is parked
+# there and symlinked into the blob store (blob_store.park_blob) instead of hard-linked.
+LARGE_ROOT_FILE = Path.home() / ".local/share/king_hamming/large_root"
+LARGE_OUTPUT_PROGRAMS = {"match_gpu_wide"}
+
+
+def large_root() -> Path | None:
+    """The configured large-result drive, if this machine has one and it is mounted."""
+    try:
+        path = Path(LARGE_ROOT_FILE.read_text().strip())
+    except OSError:
+        return None
+    return path if path.is_absolute() and path.is_dir() and os.path.ismount(path) else None
+
+
 # A GPU matching that ends short is deterministic: the same attempt would end the same way, so it
 # fails at once (the feeder then tries another polynomial) instead of being requeued for a rerun.
 DETERMINISTIC_FAILURES = ("block matching incomplete", "wide matching incomplete")
@@ -721,11 +740,9 @@ def collect_garbage_locked(
     for digest in plan["blob_hashes"]:
         path = blob_path(storage_root, digest)
 
-        if path.exists():
-            size = path.stat().st_size
-            path.unlink()
+        if path.exists() or path.is_symlink():
+            removed += remove_blob(path)
             directories.add(path.parent)
-            removed += size
 
         completed.append(digest)
 
@@ -761,6 +778,9 @@ def replication_loop(
 
             if work_root is not None and time.monotonic() >= next_sweep:
                 swept = sweep_work(leader, node_record, work_root)
+                large = large_root()
+                if large is not None and (large / "work").is_dir():
+                    swept += sweep_work(leader, node_record, large / "work")
                 if swept:
                     print(f"removed {swept} finished run directories", flush=True)
                 next_sweep = time.monotonic() + (GC_SPIN_SECONDS if swept >= SWEEP_BATCH else SWEEP_INTERVAL)
@@ -1038,7 +1058,8 @@ def run_job(
     run_id = job["run_id"]
     token = job["lease_token"]
     identity = {"run_id": run_id, "lease_token": token}
-    run_directory = work_root / run_id / token
+    large = large_root() if job["specification"].get("program") in LARGE_OUTPUT_PROGRAMS else None
+    run_directory = (large / "work" if large is not None else work_root) / run_id / token
     run_directory.mkdir(parents=True, exist_ok=False)
     output = run_directory / "result.bin"
     checkpoint = run_directory / "solver.checkpoint.json"
@@ -1206,7 +1227,7 @@ def run_job(
             verifying_done.set()
         with storage_transaction(storage_root, keeper.check):
             # A finished result is never written again, so a large one is linked, not copied.
-            digest, path = store_blob(output, storage_root, keeper.check, link=True)
+            digest, path = store_blob(output, storage_root, keeper.check, link=True, large_root=large)
             keeper.check()
             completion = {**identity, "artifact_hash": digest, "artifact_size": path.stat().st_size,
                           "artifact_location": f"{storage_url.rstrip('/')}/blobs/{digest}"}

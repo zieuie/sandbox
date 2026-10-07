@@ -120,6 +120,17 @@ def cached_candidates(connection: sqlite3.Connection, now: float, lease_seconds:
         return rows
 
 
+def room_needed(disk_floor_bytes: int, size) -> int:
+    """Free space a node needs to take a copy: the floor plus the copy itself. Without the size a
+    206 GB certificate (7^13) could be sent to a worker with 186 GB free and fill its disk."""
+    return max(0, int(disk_floor_bytes)) + max(0, int(size or 0))
+
+
+def has_room(node, disk_floor_bytes: int, size) -> bool:
+    free = node["storage_free_bytes"]
+    return free is None or free < 0 or free >= room_needed(disk_floor_bytes, size)
+
+
 def select_candidate(connection: sqlite3.Connection, node: sqlite3.Row, now: float,
                      lease_seconds: float, grace_seconds: float,
                      disk_floor_bytes: int = 0) -> dict | None:
@@ -138,6 +149,8 @@ def select_candidate(connection: sqlite3.Connection, node: sqlite3.Row, now: flo
             "SELECT COUNT(*) FROM replicas r JOIN nodes n USING(node_name) "
             "WHERE r.artifact_hash=? AND n.last_heartbeat>?", (digest, now - grace_seconds)).fetchone()[0]
         if live >= entry["target_replicas"]:
+            continue
+        if not has_room(node, disk_floor_bytes, entry["size"]):
             continue
         row = entry
         break
@@ -189,7 +202,7 @@ def reserve_candidate(connection: sqlite3.Connection, node: sqlite3.Row,
         "WHERE r.artifact_hash=a.artifact_hash AND n.last_heartbeat>?)<a.target_replicas",
         (digest, node["node_name"], now - grace_seconds),
     ).fetchone()
-    if row is None:
+    if row is None or not has_room(node, disk_floor_bytes, row["size"]):
         return None
     source_groups = [record[0] for record in connection.execute(
         "SELECT DISTINCT n.private_group FROM replicas r JOIN nodes n USING(node_name) "
@@ -232,7 +245,7 @@ def push_next_copy(connection: sqlite3.Connection, digest: str, now: float,
     """
 
     artifact = connection.execute(
-        "SELECT target_replicas FROM artifacts WHERE artifact_hash=?", (digest,)).fetchone()
+        "SELECT target_replicas,size FROM artifacts WHERE artifact_hash=?", (digest,)).fetchone()
     if artifact is None:
         return None
     connection.execute(
@@ -258,7 +271,7 @@ def push_next_copy(connection: sqlite3.Connection, digest: str, now: float,
         "SELECT node_name,session_id,private_group FROM nodes n WHERE last_heartbeat>? "
         "AND (storage_free_bytes IS NULL OR storage_free_bytes<0 OR storage_free_bytes>=?) "
         "AND NOT EXISTS (SELECT 1 FROM node_dispatch_pauses pause WHERE pause.node_name=n.node_name)",
-        (now - lease_seconds, disk_floor_bytes)) if row[0] not in holders]
+        (now - lease_seconds, room_needed(disk_floor_bytes, artifact[1]))) if row[0] not in holders]
     if not candidates:
         return None
     # Keep copies on a producer's private LAN when it has room, as the scan does.

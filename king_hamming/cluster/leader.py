@@ -555,6 +555,9 @@ def initialize(
             connection.execute("ALTER TABLE nodes ADD COLUMN storage_free_bytes INTEGER NOT NULL DEFAULT 0")
         if "gpus_json" not in node_columns:
             connection.execute("ALTER TABLE nodes ADD COLUMN gpus_json TEXT NOT NULL DEFAULT '[]'")
+        if "large_free_bytes" not in node_columns:
+            # Free space on a node's large-result drive (merlin's /mnt/khdata), if it has one.
+            connection.execute("ALTER TABLE nodes ADD COLUMN large_free_bytes INTEGER")
         if "private_address" not in node_columns:
             connection.execute("ALTER TABLE nodes ADD COLUMN private_address TEXT NOT NULL DEFAULT ''")
         if "private_group" not in node_columns:
@@ -1128,6 +1131,9 @@ def make_handler(
                                 (request["node_name"], stat["index"], stat["util_percent"],
                                  stat["memory_used_bytes"], stat.get("temp_c"), now))
                         connection.execute("DELETE FROM gpu_usage_samples WHERE recorded<?", (now - 7 * 86400,))
+                    if route == "/v1/heartbeat" and isinstance(request.get("large_free_bytes"), int):
+                        connection.execute("UPDATE nodes SET large_free_bytes=? WHERE node_name=?",
+                                           (max(0, request["large_free_bytes"]), request["node_name"]))
                     heat = thermal.normalized(request.get("thermal")) if route == "/v1/heartbeat" else {}
                     if heat and now - LAST_THERMAL.get(request["node_name"], 0.0) >= THERMAL_SECONDS:
                         # CPU and NVMe temperatures for the heat gauges: one row a minute, kept 7 days.
