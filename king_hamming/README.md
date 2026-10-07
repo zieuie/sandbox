@@ -9,7 +9,7 @@ M(q + 1, q).
 
 ## Status (2026-10-06)
 
-- **73 fields proved**, from 2³ up to 31⁷ (M(31⁷ + 1, 31⁷) ≥ 4,470,713,705,180,443). Every
+- **75 fields proved**, from 2³ up to 31⁷ (M(31⁷ + 1, 31⁷) ≥ 4,470,713,705,180,443). Every
   field matched with the first polynomial tried. The table is [`results.md`](results.md).
 - **DP is wrapped up** (feeder setting `new_dp_fields` = 0). 5¹⁵ was added by hand on 10-06
   as a full-width rehearsal for the wide matcher; its DP is done and its matching is next.
