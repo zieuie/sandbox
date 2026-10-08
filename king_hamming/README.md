@@ -9,15 +9,15 @@ M(q + 1, q).
 
 ## Status (2026-10-06)
 
-- **79 fields proved**, from 2³ up to 5¹⁵ (M(5¹⁵ + 1, 5¹⁵) ≥ 4,768,402,099,609,375). Every
+- **82 fields proved**, from 2³ up to 7¹³ (M(7¹³ + 1, 7¹³) ≥ 27,357,428,724,361,309). Every
   field matched with the first polynomial the solver could finish (5¹⁵ needed a solver fix). The table is [`results.md`](results.md).
-- **DP is wrapped up** (feeder setting `new_dp_fields` = 0). 5¹⁵ was added by hand on 10-06
-  as a full-width rehearsal for the wide matcher; its DP is done and its matching is next.
-- **Blocked:** 7¹³ has its DP value, but its matching exceeds the block matcher's limits (F,
-  q ≥ 2³⁶, about 166 GB of field rows). A wide solver and verifier that lift all three are built
-  and tested ([gpu_wide_match_solver/](gpu_wide_match_solver/README.md)). What's left: a full-width
-  rehearsal, campaign integration, and disk for a 206 GB certificate
-  ([docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md)).
+- **New fields:** the feeder's own frontier is off (`new_dp_fields` = 0). Since 2026-10-07 the
+  hourly check starts the quickest fields not yet calculated, any p or r, two at a time
+  (`campaigns/next_field.py`). Fields no matcher takes yet (2³³, 2³⁵: p = 2 past F = 65,534) get
+  their DP value only.
+- **7¹³ matched** on 2026-10-07 with the wide solver and verifier
+  ([gpu_wide_match_solver/](gpu_wide_match_solver/README.md)), its 206 GB certificate on merlin's
+  second drive ([docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md)).
 - **The cluster:** a leader on merlin and ten household machines, each with an NVIDIA GPU,
   joined by Wi-Fi (control) and a 1 Gb/s switch (data). A dashboard on merlin shows and
   controls the campaign.
