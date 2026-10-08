@@ -31,6 +31,18 @@ class RankingTests(unittest.TestCase):
         self.assertIsNotNone(next_field.matchable(3, 23, 3**23, 3**11, 96 * 10**9))
         self.assertIsNone(next_field.matchable(41, 5, 41**5, 41**2, 96 * 10**9))
 
+    def test_every_field_counts_even_past_r_31_and_without_a_matcher(self) -> None:
+        # Zooey (2026-10-07): any field not calculated, regardless of p, r or the feeder's limits.
+        from dp_solver import scheduling
+        self.assertEqual(scheduling.dp_estimate({"arguments": {"p": 2, "r": 33}})["budget"], 2**17)
+        found = {(item["p"], item["r"]): item for item in next_field.candidates(set(), SETTINGS, 100 * 2**30)}
+        self.assertIn((2, 33), found)
+        self.assertIsNotNone(found[(2, 33)]["dp_only"])      # no matcher takes it yet: DP value only
+        self.assertEqual(found[(2, 33)]["match_hours"], 0.0)
+        self.assertIsNone(found[(41, 5)]["dp_only"])
+        # Tiles that wouldn't fit the workers' disks rule a field out.
+        self.assertNotIn((2, 33), {(i["p"], i["r"]) for i in next_field.candidates(set(), SETTINGS, 100 * 2**30, 10**6)})
+
     def test_deep_halos_cost_time(self) -> None:
         # 107^3 (halo 11,449 rows) at side 512 took 8.5 h; a light field of similar work, far less.
         self.assertGreater(next_field.dp_hours(107, 3, 512, 1.61e14), 4)

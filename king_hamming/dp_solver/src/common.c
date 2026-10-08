@@ -61,7 +61,7 @@ static bool is_prime(uint32_t value) {
  *
  * Parameters:
  *   p: Candidate prime in 2..UINT16_MAX.
- *   r: Candidate odd extension degree in 3..31.
+ *   r: Candidate odd extension degree in 3..63 (q must also fit 64 bits).
  *   output: Output structure receiving q, F, and B on success.
  *   error: Output pointer receiving a static diagnostic string on failure.
  *
@@ -77,8 +77,10 @@ bool kh_parameters_dp64(uint32_t p, uint32_t r, kh_parameters_t *output, const c
         *error = "p must be prime";
         return false;
     }
-    if (r < 3 || !(r & 1) || r > 31) {
-        *error = "r must be an odd integer in 3..31";
+    // r itself is only bounded by q < 2^64 and the budget's width, both checked below; 31 was an
+    // arbitrary cap (2026-10-07: 2^33 and 2^35 are cheap fields).
+    if (r < 3 || !(r & 1) || r > 63) {
+        *error = "r must be an odd integer in 3..63";
         return false;
     }
     uint64_t q = 1;

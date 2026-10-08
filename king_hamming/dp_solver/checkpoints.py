@@ -24,7 +24,7 @@ def dp_dimensions(specification: dict[str, Any]) -> dict[str, int]:
     r = int(arguments["r"])
     tile = int(arguments.get("tile_side", 4096))
 
-    if not 2 <= p <= 1621 or not 3 <= r <= 31 or r % 2 == 0 or not 1 <= tile <= 0xFFFFFFFF:
+    if not 2 <= p <= 1621 or not 3 <= r <= 63 or r % 2 == 0 or not 1 <= tile <= 0xFFFFFFFF:
         raise ValueError("invalid DP checkpoint parameters")
 
     if any(p % divisor == 0 for divisor in range(2, int(p**0.5) + 1)):

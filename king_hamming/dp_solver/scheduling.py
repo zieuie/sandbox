@@ -41,8 +41,8 @@ def dp_estimate(specification: dict[str, Any]) -> dict[str, int]:
     p = arguments["p"]
     r = arguments["r"]
 
-    if not is_prime(p) or p > 1621 or type(r) is not int or r < 3 or r > 31 or r % 2 == 0:
-        raise ValueError("DP requires prime p and odd r between 3 and 31")
+    if not is_prime(p) or p > 1621 or type(r) is not int or r < 3 or r > 63 or r % 2 == 0:
+        raise ValueError("DP requires prime p and odd r between 3 and 63")
 
     q = p**r
 
@@ -145,7 +145,7 @@ def regional_campaign(max_prime: int, max_exponent: int, max_visits: int,
     if tile_format not in STORED_BYTES_PER_CELL:
         raise ValueError("tile_format must be 1 or 2")
     if (min(max_prime, max_exponent, max_visits, threads, max_tile_bytes, max_tiles) <= 0 or
-            max_prime > 1621 or max_exponent > 31 or max_exponent < 3 or
+            max_prime > 1621 or max_exponent > 63 or max_exponent < 3 or
             max_exponent % 2 == 0 or max_visits > 2**64 - 1):
         raise ValueError("invalid regional DP frontier")
     primes = [p for p in range(2, max_prime + 1) if is_prime(p)]

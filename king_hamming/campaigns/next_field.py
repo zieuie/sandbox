@@ -3,17 +3,23 @@
 "if there's room to start a new field, please start the next smallest (meaning quickest) field
 that hasn't been calculated").
 
-Run at each hourly check. Without --submit it only reports. A field qualifies if its DP fits the
-tile limits, its matching fits a matcher (q, F, p = 2) and its certificate fits a disk, and it has
-never been submitted (the manifest; a field Zooey paused, like 3^21, is left alone). There is room
-when no DP root is active (queued, waiting or running) apart from paused ones.
+Run at each hourly check. Without --submit it only reports. Every field counts, whatever its p or
+r (Zooey: "regardless of the size of p or r or any other constraint which the feeder was
+previously hung up on"), as long as the DP solver can compute it at all (p^3 and q within 64-bit
+widths) and its tiles fit the workers' disks. Fields no matcher can take yet (p = 2 past F =
+65,534, q past 2^40, a certificate larger than the matching host's disk) still get their DP
+value, a table entry without the ^, and are ranked by DP time alone. A field already submitted (the
+manifest, or any root in the leader; Zooey's paused 3^21 among them) is never started again. There
+is room when no DP root is active (queued, waiting or running) apart from paused ones.
 
 Fields are ranked by estimated hours, DP plus matching, from a model fitted on 2026-10-03..07
 fields (GPU era, 9 DP GPUs):
 - compute: raw visits / (5.8e13 per GPU-hour), from 31^7 (2.54e16 visits, 438 GPU-hours);
 - tile overhead: 0.0005 h + 0.0058 h per unit of halo/side, from 5^15 (36,481 tiles in 1.9 h)
   and the deep halos of 37^5 (side 512, 19 h) and 107^3..113^3 (side 512, 6-9 h);
-- the critical path: 2 * tiles-per-side - 1 tiles one after another;
+- the critical path: 2 * tiles-per-side - 1 tiles one after another, each taking about
+  20 s + 10 s * (side / 2048)^2 of fetching and publishing plus its share of compute, times 0.8
+  for overlap (light fields are latency-bound: 2^31 took 0.95 h on almost no arithmetic);
 - matching: about an hour per 2e10 requests on the block matcher (31^7, 5^15), at least 10
   minutes; fields only the wide matcher takes (F above 65,534 or q from 2^36) about 5.5e9 an hour
   plus verification, from 7^13 (9.7e10 requests: 17.5 h, then about 4 h of checks on its drive).
@@ -48,7 +54,10 @@ WIDE_REQUESTS_PER_HOUR = 5.5e9
 WIDE_VERIFY_HOURS_PER_REQUEST = 4 / 9.7e10
 MIN_MATCH_HOURS = 1 / 6
 MIN_TILES = 16                 # enough tiles to spread over the fleet
-MAX_PRIME, MAX_EXPONENT = 1621, 31
+TILE_LATENCY_SECONDS = 20.0    # fetch, launch and publish of one tile at side 2048 ...
+TILE_AREA_SECONDS = 10.0       # ... plus this much per (side / 2048)^2
+CRITICAL_OVERLAP = 0.8
+MAX_PRIME, MAX_EXPONENT = 1621, 63   # the DP's own limits (p^3 and q in 64 bits)
 BLOCK_MAX_Q, WIDE_MAX_Q, BLOCK_MAX_F = 2**36 - 1, 2**40 - 1, 65534
 ACTIVE = ("queued", "waiting", "running", "stopping")
 
@@ -67,10 +76,13 @@ def dp_hours(p: int, r: int, side: int, visits: float) -> float:
     budget = scheduling.dp_estimate({"arguments": {"p": p, "r": r}})["budget"]
     per_side = -(-budget // side)
     tiles = per_side * per_side
-    overhead = TILE_BASE_HOURS + TILE_HALO_HOURS * (p * p) / side
+    area = max(1.0, (side / 2048) ** 2)
+    halo = TILE_HALO_HOURS * (p * p) / side
     compute = visits / VISITS_PER_GPU_HOUR
-    tile_hours = compute / tiles + overhead
-    return max((compute + tiles * overhead) / GPUS, (2 * per_side - 1) * tile_hours)
+    throughput = (compute + tiles * (TILE_BASE_HOURS * area + halo)) / GPUS
+    latency = (TILE_LATENCY_SECONDS + TILE_AREA_SECONDS * (side / 2048) ** 2) / 3600
+    critical = (2 * per_side - 1) * (latency + halo + compute / tiles) * CRITICAL_OVERLAP
+    return max(throughput, critical)
 
 
 def certificate_bytes(q: int, f: int) -> int:
@@ -90,8 +102,10 @@ def matchable(p: int, r: int, q: int, f: int, disk_bytes: int) -> str | None:
     return None
 
 
-def candidates(known: set[tuple[int, int]], settings: dict, disk_bytes: int) -> list[dict]:
-    """Every field not yet submitted that could be calculated and matched, quickest first."""
+def candidates(known: set[tuple[int, int]], settings: dict, disk_bytes: int,
+               worker_disk_bytes: int | None = None) -> list[dict]:
+    """Every field not yet submitted that the DP can compute, quickest first. Fields no matcher can
+    take yet are included with their reason in "dp_only" and no matching time."""
     found = []
     max_tile_bytes = int(settings.get("max_tile_bytes", 2 * 1024**3))
     max_tiles = int(settings.get("max_tiles", scheduling.DEFAULT_MAX_TILES))
@@ -107,13 +121,15 @@ def candidates(known: set[tuple[int, int]], settings: dict, disk_bytes: int) -> 
             q, f = estimate["q"], p ** (r // 2)
             if estimate["raw_visits"] / VISITS_PER_GPU_HOUR / GPUS > 24 * 30:
                 break   # over a month of DP: not a candidate, nor anything larger in this row
-            if matchable(p, r, q, f, disk_bytes) is not None:
-                continue
+            dp_only = matchable(p, r, q, f, disk_bytes)
             best = None
             for side in scheduling.TILE_SIDES:
                 plan = scheduling.plan_tiles(p, r, threads, max_tile_bytes, max_tiles, sides=(side,))
                 if plan is None or (plan["tiles"] < MIN_TILES and side != scheduling.TILE_SIDES[0]):
                     continue
+                stored = 3 * scheduling.stored_bytes(p, r, side, int(settings.get("tile_format", 2)))
+                if worker_disk_bytes is not None and stored > worker_disk_bytes:
+                    continue   # three copies of its tiles must fit the workers' disks
                 hours = dp_hours(p, r, side, estimate["raw_visits"])
                 if best is None or hours < best["dp_hours"]:
                     best = {"p": p, "r": r, "q": q, "side": side, "tiles": plan["tiles"],
@@ -122,8 +138,10 @@ def candidates(known: set[tuple[int, int]], settings: dict, disk_bytes: int) -> 
             if best is None:
                 continue
             wide = f > BLOCK_MAX_F or q > BLOCK_MAX_Q
-            best["match_hours"] = max(MIN_MATCH_HOURS, q / WIDE_REQUESTS_PER_HOUR + q * WIDE_VERIFY_HOURS_PER_REQUEST
-                                      if wide else q / MATCH_REQUESTS_PER_HOUR)
+            best["dp_only"] = dp_only
+            best["match_hours"] = 0.0 if dp_only else max(
+                MIN_MATCH_HOURS, q / WIDE_REQUESTS_PER_HOUR + q * WIDE_VERIFY_HOURS_PER_REQUEST
+                if wide else q / MATCH_REQUESTS_PER_HOUR)
             best["hours"] = best["dp_hours"] + best["match_hours"]
             found.append(best)
     return sorted(found, key=lambda item: (item["hours"], item["q"]))
@@ -136,6 +154,15 @@ def specification(item: dict, settings: dict) -> dict:
         "max_visits": max(10**15, int(item["visits"])), "max_tile_bytes": item["reserve"],
         "artifact_format": "KHD1", "max_tiles": int(settings.get("max_tiles", scheduling.DEFAULT_MAX_TILES)),
         "tile_format": int(settings.get("tile_format", 2))}}
+
+
+def worker_disk(connection: sqlite3.Connection) -> int:
+    """Half the free disk of the DP workers (machines other than the largest-GPU host): room for
+    three copies of a field's tiles alongside everything else."""
+    rows = connection.execute("SELECT gpus_json,storage_free_bytes FROM nodes WHERE gpus_json NOT IN ('','[]') "
+                              "AND last_heartbeat > strftime('%s','now') - 600").fetchall()
+    sizes = [max([int(g.get("total_bytes", 0)) for g in json.loads(gpus)] or [0]) for gpus, _ in rows]
+    return sum(max(0, int(free or 0)) for (_, free), size in zip(rows, sizes) if size != max(sizes)) // 2
 
 
 def room(connection: sqlite3.Connection) -> tuple[bool, str]:
@@ -207,10 +234,11 @@ def main() -> int:
     known |= {(int(p), int(r)) for p, r in connection.execute(   # any root the leader has, in any state
         "SELECT json_extract(specification,'$.arguments.p'),json_extract(specification,'$.arguments.r') "
         "FROM runs WHERE parent_run_id IS NULL AND json_extract(specification,'$.program')='dp_distributed'")}
-    found = candidates(known, settings, largest_free_disk(connection))
+    found = candidates(known, settings, largest_free_disk(connection), worker_disk(connection))
     for item in found[:arguments.show]:
+        matching = (f"DP only: {item['dp_only']}" if item["dp_only"] else f"matching {item['match_hours']:.1f} h")
         print(f"{item['p']}^{item['r']}: about {item['hours']:.1f} h (DP {item['dp_hours']:.1f} h on "
-              f"{item['tiles']} tiles of {item['side']}, matching {item['match_hours']:.1f} h), q = {item['q']:.3g}")
+              f"{item['tiles']} tiles of {item['side']}, {matching}), q = {item['q']:.3g}")
     ok, why = room(connection)
     print(f"room: {'yes' if ok else 'no'} ({why})")
     if not (arguments.submit and ok and found):

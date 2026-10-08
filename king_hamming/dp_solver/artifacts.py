@@ -10,7 +10,7 @@ from typing import Any
 def dimensions(p: int, r: int) -> tuple[int, int, int]:
     """Return q,F,B for a supported nontrivial odd prime power; reject malformed inputs."""
 
-    if type(p) is not int or type(r) is not int or p<2 or p>1621 or r<3 or r>31 or r%2==0 or any(p%d==0 for d in range(2,int(p**0.5)+1)):
+    if type(p) is not int or type(r) is not int or p<2 or p>1621 or r<3 or r>63 or r%2==0 or any(p%d==0 for d in range(2,int(p**0.5)+1)):
         raise ValueError("invalid DP prime or extension degree")
     q=p**r
     f=p**(r//2)
