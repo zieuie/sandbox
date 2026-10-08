@@ -10,7 +10,10 @@ widths) and its tiles fit the workers' disks. Fields no matcher can take yet (p 
 65,534, q past 2^40, a certificate larger than the matching host's disk) still get their DP
 value, a table entry without the ^, and are ranked by DP time alone. A field already submitted (the
 manifest, or any root in the leader; Zooey's paused 3^21 among them) is never started again. There
-is room when no DP root is active (queued, waiting or running) apart from paused ones.
+is room while fewer than MAX_ACTIVE DP roots are active (queued, waiting or running; paused ones
+don't count): Zooey, 2026-10-08, "feel free to start two fields, or have two fields running". A
+field's first and last diagonals hold few tiles, so a second field keeps the GPUs busy. One field is
+started per run.
 
 Fields are ranked by estimated hours, DP plus matching, from a model fitted on 2026-10-03..07
 fields (GPU era, 9 DP GPUs):
@@ -60,6 +63,7 @@ CRITICAL_OVERLAP = 0.8
 MAX_PRIME, MAX_EXPONENT = 1621, 63   # the DP's own limits (p^3 and q in 64 bits)
 BLOCK_MAX_Q, WIDE_MAX_Q, BLOCK_MAX_F = 2**36 - 1, 2**40 - 1, 65534
 ACTIVE = ("queued", "waiting", "running", "stopping")
+MAX_ACTIVE = 2
 
 
 def primes(limit: int) -> list[int]:
@@ -166,14 +170,15 @@ def worker_disk(connection: sqlite3.Connection) -> int:
 
 
 def room(connection: sqlite3.Connection) -> tuple[bool, str]:
-    """Room for a new field: no DP root active (paused ones don't count)."""
+    """Room for a new field: fewer than MAX_ACTIVE DP roots active (paused ones don't count)."""
     active = connection.execute(
         "SELECT json_extract(specification,'$.arguments.p'),json_extract(specification,'$.arguments.r') "
         "FROM runs WHERE parent_run_id IS NULL AND json_extract(specification,'$.program')='dp_distributed' "
         f"AND state IN ({','.join('?' * len(ACTIVE))})", ACTIVE).fetchall()
-    if active:
-        return False, "DP running: " + ", ".join(f"{p}^{r}" for p, r in active)
-    return True, "no DP running"
+    running = ", ".join(f"{p}^{r}" for p, r in active)
+    if len(active) >= MAX_ACTIVE:
+        return False, f"{len(active)} fields in DP: {running}"
+    return True, f"DP running: {running}" if active else "no DP running"
 
 
 def largest_free_disk(connection: sqlite3.Connection) -> int:

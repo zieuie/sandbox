@@ -63,7 +63,8 @@ class RoomTests(unittest.TestCase):
 
     def test_paused_dp_leaves_room_running_dp_does_not(self) -> None:
         self.assertTrue(next_field.room(self.database([("paused", 3, 21), ("complete", 7, 13)], []))[0])
-        busy, why = next_field.room(self.database([("waiting", 41, 5)], []))
+        self.assertTrue(next_field.room(self.database([("waiting", 41, 5)], []))[0])   # one of two
+        busy, why = next_field.room(self.database([("waiting", 41, 5), ("running", 2, 33)], []))
         self.assertFalse(busy)
         self.assertIn("41^5", why)
 
