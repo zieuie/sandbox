@@ -12,8 +12,8 @@ value, a table entry without the ^, and are ranked by DP time alone. A field alr
 manifest, or any root in the leader; Zooey's paused 3^21 among them) is never started again. There
 is room while fewer than MAX_ACTIVE DP roots are active (queued, waiting or running; paused ones
 don't count): Zooey, 2026-10-08, "feel free to start two fields, or have two fields running". A
-field's first and last diagonals hold few tiles, so a second field keeps the GPUs busy. One field is
-started per run.
+field's first and last diagonals hold few tiles, so a second field keeps the GPUs busy. --submit
+fills every free slot, quickest first.
 
 Fields are ranked by estimated hours, DP plus matching, from a model fitted on 2026-10-03..07
 fields (GPU era, 9 DP GPUs):
@@ -246,7 +246,7 @@ def main() -> int:
               f"{item['tiles']} tiles of {item['side']}, {matching}), q = {item['q']:.3g}")
     ok, why = room(connection)
     print(f"room: {'yes' if ok else 'no'} ({why})")
-    if not (arguments.submit and ok and found):
+    if not arguments.submit:
         return 0
     runtimes = {row[0] for row in connection.execute(
         "SELECT runtime_version FROM nodes WHERE compute_enabled=1 AND last_heartbeat > strftime('%s','now') - 600")}
@@ -254,11 +254,16 @@ def main() -> int:
         # r above 31 needs the 2026-10-07 DP; a mixed fleet could hand its tiles to an older agent.
         found = [item for item in found if item["r"] <= 31]
         print(f"fleet runs {len(runtimes)} runtimes: fields with r above 31 wait for one runtime")
-        if not found:
-            return 0
-    item = found[0]
+    while ok and found:
+        item = found.pop(0)
+        submit(state, manifest["leader"], item, settings, pending)
+        ok, why = room(connection)
+    return 0
+
+
+def submit(state: Path, leader: str, item: dict, settings: dict, pending: list) -> None:
     spec = specification(item, settings)
-    request = urllib.request.Request(manifest["leader"].rstrip("/") + "/v1/enqueue",
+    request = urllib.request.Request(leader.rstrip("/") + "/v1/enqueue",
                                      data=json.dumps({"specification": spec}).encode(),
                                      headers={"Content-Type": "application/json"})
     result = json.load(urllib.request.urlopen(request, timeout=60))
@@ -268,7 +273,6 @@ def main() -> int:
     temporary.replace(state / PENDING)
     left = record_pending(state)
     print(f"submitted {item['p']}^{item['r']}: {result}" + (" (manifest entry pending the feeder's lock)" if left else ""))
-    return 0
 
 
 if __name__ == "__main__":
