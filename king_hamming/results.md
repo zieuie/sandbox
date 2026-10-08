@@ -61,9 +61,9 @@ Notes:
 - **2³¹ and 3¹⁹** were added on 2026-10-06 (Zooey) as the cheapest fields left, with DP on the
   P600s and gawain (about an hour each, 2048-cell tiles) and matching by GPU blocks on dp-102
   and dp-101 (about 20 minutes each); both verified.
-- **41⁵, 43⁵, 47⁵, 127³ and 131³** (2026-10-08) and **2³³, 2³⁵, 2³⁷, 3²³** were started by the hourly
-  yet calculated" rule (`campaigns/next_field.py`). 41⁵ and 43⁵ matched on a single GPU in
-  minutes. 2³³ and 2³⁵ have DP values only (no `^`): no matcher takes p = 2 past F = 65,534 yet
+- **41⁵, 43⁵, 47⁵, 127³ and 131³** (2026-10-08) and **2³³, 2³⁵, 2³⁷, 3²³** were started by the
+  hourly "quickest field not yet calculated" rule (`campaigns/next_field.py`). The five proved
+  fields matched on a single GPU in minutes. 2³³ and 2³⁵ have DP values only (no `^`): no matcher takes p = 2 past F = 65,534 yet
   (the wide matcher refuses p = 2, since F is a power of two). They are the first fields with
   r above 31; the DP's old cap of 31 had no width reason and was lifted on 2026-10-08.
 - **107³, 109³ and 113³** were cancelled before their DP finished in September; Zooey retried
