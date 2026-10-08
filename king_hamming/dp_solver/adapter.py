@@ -137,6 +137,37 @@ class DPAdapter(SolverAdapter):
         """
         return specification["program"] == "dp_tile" and not distributed.cpu_fallback_allowed(connection)
 
+    def gpu_misfit(self, connection, node, specification, alive_after):
+        """True if this tile can't fit node's GPU while some live, undrained node's GPU can hold it.
+
+        The tile solver falls back to its CPUs when the tile doesn't fit the device (the same
+        footprint as distributed_solver.gpu_fits): 127^3's later tiles hold a 16,129-row halo,
+        about 2.6 GB, past a P600's 1.5 GB, and one ran 75+ minutes on two cores (about 5 h in
+        all) where merlin's GPU takes 2-3 minutes. With nowhere it fits, nothing changes."""
+        if specification["program"] != "dp_tile":
+            return False
+        import gpus
+        arguments = specification["arguments"]
+        try:
+            target = tile(arguments["p"], arguments["r"], arguments["tile_side"],
+                          arguments["row"], arguments["column"])
+        except (KeyError, ValueError, TypeError):
+            return False
+        need = target.halo_bytes + target.value_bytes // 2 + arguments["p"] ** 3 * 24 + 32 * 1024**2
+
+        def largest(row):
+            return max([gpus.usable_bytes(item) for item in gpus.from_record(row)] or [0])
+
+        if largest(node) >= need:
+            return False
+        for row in connection.execute(
+                "SELECT gpus_json FROM nodes n WHERE compute_enabled=1 AND last_heartbeat>? "
+                "AND NOT EXISTS (SELECT 1 FROM node_dispatch_pauses pause WHERE pause.node_name=n.node_name)",
+                (alive_after,)):
+            if largest(row) >= need:
+                return True
+        return False
+
     def cpu_width(self, specification, available):
         """Use spare cores, bounded by the halo, native stacks and an optional cap.
 

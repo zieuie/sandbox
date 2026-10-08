@@ -1369,6 +1369,9 @@ def make_handler(
                         sharing = required == 1 and bool(adapter.allows_host_sharing(specification))
                         if adapter.needs_free_gpu(connection, specification) and gpus_all_leased(connection, node):
                             continue
+                        if (hasattr(adapter, "gpu_misfit") and
+                                adapter.gpu_misfit(connection, node, specification, now - lease_seconds)):
+                            continue   # leave it for a machine whose GPU holds it, not this one's CPUs
                         if use_placement and placement.tile_of(specification) is not None:
                             if placement_machines is None:
                                 placement_machines = placement.gpu_machines(connection, now, lease_seconds)

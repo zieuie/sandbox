@@ -510,5 +510,36 @@ class DPTileGPUWaitTests(unittest.TestCase):
             self.assertEqual(distributed_solver.gpu_wait_seconds(23, rectangle, 2), 7.0)
 
 
+
+class TileFitTests(unittest.TestCase):
+    """A DP tile too big for a node's GPU goes to a node whose GPU holds it (127^3, 2026-10-08)."""
+
+    def test_heavy_tiles_skip_small_gpus_only_while_a_big_one_is_live(self) -> None:
+        import json
+        import sqlite3
+        import time
+        from dp_solver.adapter import DPAdapter
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE nodes(node_name, gpus_json, compute_enabled, last_heartbeat)")
+        connection.execute("CREATE TABLE node_dispatch_pauses(node_name)")
+        now = time.time()
+        rtx = {"index": 0, "name": "RTX 3060", "arch": 86, "total_bytes": 6 * 1024**3}
+        for name, device in (("p600", P600), ("merlin", rtx)):
+            connection.execute("INSERT INTO nodes VALUES(?,?,1,?)", (name, json.dumps([device]), now))
+        p600 = connection.execute("SELECT * FROM nodes WHERE node_name='p600'").fetchone()
+        merlin = connection.execute("SELECT * FROM nodes WHERE node_name='merlin'").fetchone()
+        adapter = object.__new__(DPAdapter)
+
+        def spec(row, column):
+            return {"program": "dp_tile", "arguments": {"p": 127, "r": 3, "tile_side": 2048,
+                                                        "row": row, "column": column}}
+
+        self.assertTrue(adapter.gpu_misfit(connection, p600, spec(7, 7), now - 60))    # 2.0 GiB halo
+        self.assertFalse(adapter.gpu_misfit(connection, merlin, spec(7, 7), now - 60))
+        self.assertFalse(adapter.gpu_misfit(connection, p600, spec(0, 0), now - 60))   # small, fits
+        connection.execute("INSERT INTO node_dispatch_pauses VALUES('merlin')")         # no big GPU live:
+        self.assertFalse(adapter.gpu_misfit(connection, p600, spec(7, 7), now - 60))   # CPU fallback as before
+
 if __name__ == "__main__":
     unittest.main()
