@@ -79,7 +79,12 @@ def records(deployments: Path) -> dict[tuple[int, int], dict]:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
             root_clause = " WHERE parent_run_id IS NULL" if "parent_run_id" in columns else ""
             query = "SELECT run_id,specification,state,artifact_hash FROM runs" + root_clause
-            for run_id, encoded, state, artifact_hash in connection.execute(query):
+            # Read every row first and end the read transaction before hashing certificates: a read
+            # held open for the 45-minute hash of 7^13's 206 GB certificate kept the live leader from
+            # checkpointing its WAL, and writes queued until they timed out (2026-10-08, twice).
+            rows = connection.execute(query).fetchall()
+            connection.close()
+            for run_id, encoded, state, artifact_hash in rows:
                 specification = json.loads(encoded)
                 program = specification.get("program")
                 if program in DP_PROGRAMS:
