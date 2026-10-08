@@ -45,12 +45,10 @@ Notes:
 - **79 fields are proved.** Every one matched with the first polynomial the solver could
   finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
   found.
-- **7¹³** has its DP value (27,357,428,724,361,309) but no matching yet: q = 9.7 × 10¹⁰ is
-  above the matcher's 2³⁶ limit and needs about 200 GB of RAM (see
-  [docs/HARDWARE_BRIEF.md](docs/HARDWARE_BRIEF.md)). A solver that lifts those limits is built
-  ([gpu_wide_match_solver/](gpu_wide_match_solver/README.md)), and its matching has been running
-  on merlin since 2026-10-07 01:26, with the 191.7 GiB certificate on merlin's second drive
-  ([docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md)).
+- **7¹³** was matched on 2026-10-07 by the wide GPU matcher on merlin (723 blocks, 7 passes,
+  about 17.5 h; the 191.7 GiB certificate is on merlin's second drive) and verified by the agent
+  (`kh_verify_wide`). The feeder's own independent check is running; the table gets its `^`
+  when that finishes ([docs/GPU_WIDE_MATCHING_PLAN.md](docs/GPU_WIDE_MATCHING_PLAN.md)).
 - **29⁷** was matched on 2026-10-05 (GPU blocks on merlin, 109 blocks) and verified.
 - **31⁷** was matched on 2026-10-06 (GPU blocks on merlin, 181 blocks) and verified: the
   campaign's last DP field from the regular frontier.
