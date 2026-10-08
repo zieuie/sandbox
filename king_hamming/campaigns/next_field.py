@@ -21,8 +21,10 @@ fields (GPU era, 9 DP GPUs):
 - tile overhead: 0.0005 h + 0.0058 h per unit of halo/side, from 5^15 (36,481 tiles in 1.9 h)
   and the deep halos of 37^5 (side 512, 19 h) and 107^3..113^3 (side 512, 6-9 h);
 - the critical path: 2 * tiles-per-side - 1 tiles one after another, each taking about
-  20 s + 10 s * (side / 2048)^2 of fetching and publishing plus its share of compute, times 0.8
-  for overlap (light fields are latency-bound: 2^31 took 0.95 h on almost no arithmetic);
+  20 s + 10 s * (side / 2048)^2 of fetching and publishing plus its compute at a P600's rate
+  (2.4e13 visits an hour, from 107^3's tiles: a chain waits on its slowest tiles), times 0.8 for
+  overlap. Light fields are latency-bound (2^31 took 0.95 h on almost no arithmetic), and fields
+  with few heavy tiles compute-bound (127^3: about 5 h, which the fleet-average rate put at 2.5);
 - matching: about an hour per 2e10 requests on the block matcher (31^7, 5^15), at least 10
   minutes; fields only the wide matcher takes (F above 65,534 or q from 2^36) about 5.5e9 an hour
   plus verification, from 7^13 (9.7e10 requests: 17.5 h, then about 4 h of checks on its drive).
@@ -50,6 +52,7 @@ from dp_solver import scheduling  # noqa: E402
 
 GPUS = 9                       # DP GPUs (merlin is kept for matching)
 VISITS_PER_GPU_HOUR = 5.8e13
+VISITS_PER_SLOW_GPU_HOUR = 2.4e13   # a P600 on heavy tiles (107^3: 3.2e11 visits in 48 s)
 TILE_BASE_HOURS = 0.0005
 TILE_HALO_HOURS = 0.0058       # per unit of halo rows / tile side
 MATCH_REQUESTS_PER_HOUR = 2e10
@@ -85,7 +88,8 @@ def dp_hours(p: int, r: int, side: int, visits: float) -> float:
     compute = visits / VISITS_PER_GPU_HOUR
     throughput = (compute + tiles * (TILE_BASE_HOURS * area + halo)) / GPUS
     latency = (TILE_LATENCY_SECONDS + TILE_AREA_SECONDS * (side / 2048) ** 2) / 3600
-    critical = (2 * per_side - 1) * (latency + halo + compute / tiles) * CRITICAL_OVERLAP
+    slow = visits / VISITS_PER_SLOW_GPU_HOUR / tiles
+    critical = (2 * per_side - 1) * (latency + halo + slow) * CRITICAL_OVERLAP
     return max(throughput, critical)
 
 
