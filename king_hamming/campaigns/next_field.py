@@ -243,6 +243,14 @@ def main() -> int:
     print(f"room: {'yes' if ok else 'no'} ({why})")
     if not (arguments.submit and ok and found):
         return 0
+    runtimes = {row[0] for row in connection.execute(
+        "SELECT runtime_version FROM nodes WHERE compute_enabled=1 AND last_heartbeat > strftime('%s','now') - 600")}
+    if len(runtimes) > 1:
+        # r above 31 needs the 2026-10-07 DP; a mixed fleet could hand its tiles to an older agent.
+        found = [item for item in found if item["r"] <= 31]
+        print(f"fleet runs {len(runtimes)} runtimes: fields with r above 31 wait for one runtime")
+        if not found:
+            return 0
     item = found[0]
     spec = specification(item, settings)
     request = urllib.request.Request(manifest["leader"].rstrip("/") + "/v1/enqueue",
