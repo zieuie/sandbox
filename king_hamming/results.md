@@ -25,7 +25,7 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 41 | 17,862,306^ | 1,228,544,806,926^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 43 | 22,143,624^ | 1,756,432,945,357^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 47 | 32,845,621^ | 3,401,742,737,444^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 53 | 55,899,100^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 53 | 55,899,100^ | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 59 | 90,659,164^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 61 | 105,776,867^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 67 | 161,478,308^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
@@ -42,11 +42,12 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 113 | 1,709,437,106^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 127 | 2,874,865,218^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 131 | 3,356,485,668^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 137 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 139 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 137 | 4,045,883,178^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 139 | 4,326,551,530^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 149 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **86 fields are proved.** Every one matched with the first polynomial the solver could
+- **88 fields are proved.** Every one matched with the first polynomial the solver could
   finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
   found.
 - **7¹³** was matched on 2026-10-07 by the wide GPU matcher on merlin (723 blocks, 7 passes,
@@ -63,7 +64,7 @@ Notes:
 - **2³¹ and 3¹⁹** were added on 2026-10-06 (Zooey) as the cheapest fields left, with DP on the
   P600s and gawain (about an hour each, 2048-cell tiles) and matching by GPU blocks on dp-102
   and dp-101 (about 20 minutes each); both verified.
-- **41⁵, 43⁵, 47⁵, 127³, 131³ and 3²¹** (2026-10-08) and **2³³, 2³⁵, 2³⁷, 3²³** were started by the
+- **41⁵, 43⁵, 47⁵, 127³, 131³, 137³, 139³ and 3²¹** (2026-10-08) and **2³³, 2³⁵, 2³⁷, 3²³** were started by the
   hourly "quickest field not yet calculated" rule (`campaigns/next_field.py`). 3²¹ (restarted with
   4096-cell tiles at Zooey's request) matched with the wide matcher; the others on a single GPU in
   minutes. 2³³, 2³⁵, 2³⁷ and 3²³ have DP values only (no `^`):

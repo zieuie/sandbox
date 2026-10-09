@@ -47,7 +47,7 @@ pellinore (Dell XPS 15 9570, GTX 1050 Ti Max-Q, 2 × 8 GB DDR4 SO-DIMMs) was ret
 
 ## Where the work stands
 
-- **Done:** 86 fields are fully DP'd, matched and certified. The largest is 7¹³
+- **Done:** 88 fields are fully DP'd, matched and certified. The largest is 7¹³
   (q = 9.7 × 10¹⁰, matched 2026-10-07 by the wide matcher, a 206 GB certificate on merlin's second
   drive); then 5¹⁵
   (q = 3.05 × 10¹⁰, matched 2026-10-07 by the wide matcher, a 64.8 GB certificate); then 31⁷
