@@ -147,6 +147,15 @@ class LeaseTests(unittest.TestCase):
         busy, idle = ({"node_name": name, "slots_json": "[{}, {}, {}, {}]"} for name in ("busy", "idle"))
         running = {"busy": {"before": 2, "computing": 1, "total": 3}}
         self.assertEqual(placement.completion(idle, "r", running, model), 1.0 + 1400.0 + 5.0)
+        # A fast machine's history doesn't make an unknown one look fast: the slowest known counts,
+        # or the same GPU model's median when there is one (11:10: a P600 took a critical tile
+        # because the field median was merlin's).
+        model.kernels[("merlin", "r")] = 300.0
+        self.assertEqual(placement.completion(idle, "r", running, model), 1.0 + 1400.0 + 5.0)
+        model.gpu_names.update({"merlin": "RTX 3060", "busy": "Quadro P600"})
+        twin = {"node_name": "twin", "slots_json": "[{}]",
+                "gpus_json": '[{"index": 0, "name": "RTX 3060", "total_bytes": 6442450944}]'}
+        self.assertEqual(placement.completion(twin, "r", running, model), 1.0 + 300.0 + 5.0)
         self.assertGreater(placement.completion(busy, "r", running, model),
                            placement.completion(idle, "r", running, model) + 1400.0)
         self.assertIsNone(placement.completion(idle, "other", running, model))   # no history at all

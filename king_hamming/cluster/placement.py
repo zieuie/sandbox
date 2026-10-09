@@ -77,6 +77,7 @@ class Model:
         self.kernels: dict[tuple[str, str], float] = {}  # (node, root) -> median kernel seconds
         self.overheads: dict[str, tuple[float, float]] = {}  # node -> (before, after) seconds
         self.kernels_at: dict[str, float] = {}
+        self.gpu_names: dict[str, str] = {}             # node -> its GPU model (for estimates without history)
         self.running: tuple[float, dict[str, dict[str, int]]] = (0.0, {})
 
     def field(self, connection, root: str, now: float) -> dict:
@@ -119,7 +120,10 @@ class Model:
             busy = pre + float(values.get("gpu_wait_seconds", 0)) + kernel
             before.setdefault(node, []).append(pre)
             after.setdefault(node, []).append(max(0.0, (finished or 0) - (started or 0) - busy))
+        names = {row[0]: gpu_name({"gpus_json": row[1]}) for row in connection.execute(
+            "SELECT node_name,gpus_json FROM nodes")}
         with self.lock:
+            self.gpu_names.update({name: value for name, value in names.items() if value})
             for node, values in kernels.items():
                 if len(values) >= 5:
                     self.kernels[(node, root)] = statistics.median(values)
@@ -149,6 +153,14 @@ class Model:
 MODEL = Model()
 
 
+def gpu_name(node: dict) -> str | None:
+    try:
+        devices = json.loads(node.get("gpus_json") or "[]")
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return devices[0].get("name") if devices else None
+
+
 def completion(node: dict, root: str, running: dict[str, dict[str, int]], model: Model = MODEL) -> float | None:
     """Seconds until `node` would finish one more tile of `root` if it took it now; None if unknown."""
     kernel = model.kernels.get((node["node_name"], root))
@@ -156,10 +168,15 @@ def completion(node: dict, root: str, running: dict[str, dict[str, int]], model:
         # No history on this field yet: assume the field's median machine. Leaving such machines
         # out of the comparison let the one with history take every ready tile into its own GPU
         # queue while the others idled (151^3 on dp-107, 2026-10-09: tiles waited 25 min each).
-        known = [value for (_, key), value in model.kernels.items() if key == root]
+        # The same GPU model's median on this field if one has history, else the slowest machine's:
+        # the plain field median was merlin's (24 of 151^3's tiles), so an idle P600 looked as fast
+        # as a 3060 and took critical tiles it then held 40+ minutes (2026-10-09 11:10).
+        known = {name: value for (name, key), value in model.kernels.items() if key == root}
         if not known:
             return None
-        kernel = statistics.median(known)
+        model_name = gpu_name(node)
+        same = [value for name, value in known.items() if model_name and model.gpu_names.get(name) == model_name]
+        kernel = statistics.median(same) if same else max(known.values())
     overheads = list(model.overheads.values())
     default = ((statistics.median(item[0] for item in overheads), statistics.median(item[1] for item in overheads))
                if overheads else (0.0, 0.0))
