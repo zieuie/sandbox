@@ -9,7 +9,7 @@ M(q + 1, q).
 
 ## Status (2026-10-06)
 
-- **88 fields proved**, from 2³ up to 7¹³ (M(7¹³ + 1, 7¹³) ≥ 27,357,428,724,361,309). Every
+- **91 fields proved**, from 2³ up to 7¹³ (M(7¹³ + 1, 7¹³) ≥ 27,357,428,724,361,309). Every
   field matched with the first polynomial the solver could finish (5¹⁵ needed a solver fix). The table is [`results.md`](results.md).
 - **New fields:** the feeder's own frontier is off (`new_dp_fields` = 0). Since 2026-10-07 the
   hourly check starts the quickest fields not yet calculated, any p or r, two at a time
