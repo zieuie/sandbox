@@ -138,6 +138,19 @@ class LeaseTests(unittest.TestCase):
             model.fields["r"] = {"lowest": 0, "unfinished": 300, "ready": ready, "at": now}
             self.assertEqual(placement.withhold(None, slow, specification, [fast, slow], now, model), held, ready)
 
+    def test_an_idle_machine_without_history_counts(self) -> None:
+        # 151^3 (2026-10-09): only dp-107 had history, so it took every ready tile into its own GPU
+        # queue while eight P600s idled. An idle machine is now estimated at the field's median.
+        model = placement.Model()
+        model.kernels[("busy", "r")] = 1400.0
+        model.overheads["busy"] = (1.0, 5.0)
+        busy, idle = ({"node_name": name, "slots_json": "[{}, {}, {}, {}]"} for name in ("busy", "idle"))
+        running = {"busy": {"before": 2, "computing": 1, "total": 3}}
+        self.assertEqual(placement.completion(idle, "r", running, model), 1.0 + 1400.0 + 5.0)
+        self.assertGreater(placement.completion(busy, "r", running, model),
+                           placement.completion(idle, "r", running, model) + 1400.0)
+        self.assertIsNone(placement.completion(idle, "other", running, model))   # no history at all
+
     def test_completion_estimate(self) -> None:
         model = placement.Model()
         model.kernels[("n", "r")] = 10.0
@@ -147,7 +160,8 @@ class LeaseTests(unittest.TestCase):
         busy = {"n": {"before": 1, "computing": 1, "total": 2}}
         # Full: wait for a slot (10 + 3), then 1.5 kernels of backlog before ours.
         self.assertEqual(placement.completion(node, "r", busy, model), 13.0 + 15.0 + 10.0 + 3.0)
-        self.assertIsNone(placement.completion({"node_name": "other"}, "r", {}, model))
+        # A machine with no history on the field gets the field median (and median overheads).
+        self.assertEqual(placement.completion({"node_name": "other"}, "r", {}, model), 2.0 + 10.0 + 3.0)
 
 
 if __name__ == "__main__":

@@ -153,8 +153,17 @@ def completion(node: dict, root: str, running: dict[str, dict[str, int]], model:
     """Seconds until `node` would finish one more tile of `root` if it took it now; None if unknown."""
     kernel = model.kernels.get((node["node_name"], root))
     if kernel is None:
-        return None
-    before, after = model.overheads.get(node["node_name"], (0.0, 0.0))
+        # No history on this field yet: assume the field's median machine. Leaving such machines
+        # out of the comparison let the one with history take every ready tile into its own GPU
+        # queue while the others idled (151^3 on dp-107, 2026-10-09: tiles waited 25 min each).
+        known = [value for (_, key), value in model.kernels.items() if key == root]
+        if not known:
+            return None
+        kernel = statistics.median(known)
+    overheads = list(model.overheads.values())
+    default = ((statistics.median(item[0] for item in overheads), statistics.median(item[1] for item in overheads))
+               if overheads else (0.0, 0.0))
+    before, after = model.overheads.get(node["node_name"], default)
     state = running.get(node["node_name"], {"before": 0, "computing": 0, "total": 0})
     backlog = (state["before"] + 0.5 * state["computing"]) * kernel
     try:
