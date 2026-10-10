@@ -224,6 +224,11 @@ def withhold(connection, node: dict, specification: dict, candidates: list[dict]
     if not (critical or shared):
         return False
     model.service(connection, root, now)
+    # Kernel times are learned per field when its own tiles are placed: refresh the other fields
+    # in the machines' queues too, or right after a leader restart a 25-minute foreign kernel would
+    # be costed as one of this field's.
+    for other in {item[0] for entry in running.values() for item in entry.get("tiles", []) if item[0] != root}:
+        model.service(connection, other, now)
     mine = completion(node, root, running, model)
     if mine is None:
         return False   # no history for this machine on this field yet: don't hold anything back
