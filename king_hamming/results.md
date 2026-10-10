@@ -10,7 +10,7 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 
 | Prime \ Exponent | 3 | 5 | 7 | 9 | 11 | 13 | 15 | 17 | 19 | 21 | 23 | 25 | 27 | 29 | 31 | 33 | 35 | 37 | 39 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 28^ | 192^ | 1,472^ | 11,264^ | 89,088^ | 704,512^ | 5,619,712^ | 44,826,624^ | 358,350,848^ | 2,864,709,632^ | 22,913,482,752^ | 183,274,307,584^ | 1,466,127,351,808^ | 11,728,481,943,552^ | 93,826,781,806,592^ | 750,605,664,518,144 | 6,004,828,136,275,968 | 48,038,487,651,254,272 | (running) |
+| 2 | 28^ | 192^ | 1,472^ | 11,264^ | 89,088^ | 704,512^ | 5,619,712^ | 44,826,624^ | 358,350,848^ | 2,864,709,632^ | 22,913,482,752^ | 183,274,307,584^ | 1,466,127,351,808^ | 11,728,481,943,552^ | 93,826,781,806,592^ | 750,605,664,518,144 | 6,004,828,136,275,968 | 48,038,487,651,254,272 | 384,307,626,332,127,232 |
 | 3 | 144^ | 3,483^ | 90,396^ | 2,407,887^ | 64,717,704^ | 1,744,720,803^ | 47,083,546,836^ | 1,271,040,530,967^ | 34,316,157,233,664^ | 926,518,811,386,923^ | 25,015,851,002,148,876 | — | — | — | — | — | — | — | — |
 | 5 | 1,375^ | 159,375^ | 19,609,375^ | 2,443,359,375^ | 305,224,609,375^ | 38,148,193,359,375^ | 4,768,402,099,609,375^ | — | — | — | — | — | — | — | — | — | — | — | — |
 | 7 | 6,076^ | 1,990,429^ | 678,717,081^ | 232,569,366,743^ | 79,760,841,208,636^ | 27,357,428,724,361,309^ | — | — | — | — | — | — | — | — | — | — | — | — | — |
@@ -46,10 +46,12 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 139 | 4,326,551,530^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 149 | 5,917,676,550^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 151 | 6,283,408,376^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 157 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 157 | 7,583,733,181^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 163 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 167 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **91 fields are proved.** Every one matched with the first polynomial the solver could
+- **92 fields are proved.** Every one matched with the first polynomial the solver could
   finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
   found.
 - **7¹³** was matched on 2026-10-07 by the wide GPU matcher on merlin (723 blocks, 7 passes,
@@ -66,11 +68,11 @@ Notes:
 - **2³¹ and 3¹⁹** were added on 2026-10-06 (Zooey) as the cheapest fields left, with DP on the
   P600s and gawain (about an hour each, 2048-cell tiles) and matching by GPU blocks on dp-102
   and dp-101 (about 20 minutes each); both verified.
-- **41⁵, 43⁵, 47⁵, 53⁵, 127³, 131³, 137³, 139³, 149³, 151³ and 3²¹** (2026-10-08/09) and **2³³, 2³⁵, 2³⁷, 3²³** were started by the
+- **41⁵, 43⁵, 47⁵, 53⁵, 127³, 131³, 137³, 139³, 149³, 151³, 157³ and 3²¹** (2026-10-08/09) and **2³³, 2³⁵, 2³⁷, 2³⁹, 3²³** were started by the
   hourly "quickest field not yet calculated" rule (`campaigns/next_field.py`). 3²¹ (restarted with
   4096-cell tiles at Zooey's request) matched with the wide matcher; the others on a single GPU in
-  minutes. 2³³, 2³⁵, 2³⁷ and 3²³ have DP values only (no `^`):
-  - **2³³, 2³⁵ and 2³⁷:** no matcher takes p = 2 past F = 65,534 yet (the wide matcher refuses
+  minutes. 2³³, 2³⁵, 2³⁷, 2³⁹ and 3²³ have DP values only (no `^`):
+  - **2³³, 2³⁵, 2³⁷ and 2³⁹:** no matcher takes p = 2 past F = 65,534 yet (the wide matcher refuses
     p = 2, since F is a power of two). They are the first fields with r above 31; the DP's old
     cap of 31 had no width reason and was lifted on 2026-10-08.
   - **3²³:** its certificate (about 197 GiB) wouldn't fit merlin's free disk now that 7¹³'s fills

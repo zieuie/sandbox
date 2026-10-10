@@ -200,7 +200,7 @@ requests that together can reach fewer positions than there are requests. The sa
 checker recounts that neighbourhood. It proves only that *this* shape cannot be
 matched with *this* polynomial.
 
-**In practice, none has failed.** As of 2026-10-07 the campaign has matched 91 fields,
+**In practice, none has failed.** As of 2026-10-07 the campaign has matched 92 fields,
 up to 7¹³, and every one succeeded with the first primitive polynomial the solver could finish
 (5¹⁵'s first two ended short from a solver defect, not a Hall obstruction:
 [WIDE_MATCHING_SPARSE_TAIL.md](WIDE_MATCHING_SPARSE_TAIL.md)). All 73
