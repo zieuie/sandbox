@@ -160,6 +160,29 @@ class LeaseTests(unittest.TestCase):
                            placement.completion(idle, "r", running, model) + 1400.0)
         self.assertIsNone(placement.completion(idle, "other", running, model))   # no history at all
 
+    def test_another_fields_long_kernel_counts_in_the_queue(self) -> None:
+        # 2^39's light tiles waited 20+ min behind 163^3's 25-minute kernels while six GPUs idled.
+        model = placement.Model()
+        model.kernels.update({("shared", "light"): 10.0, ("idle", "light"): 10.0, ("shared", "heavy"): 1500.0})
+        model.overheads.update({"shared": (2.0, 3.0), "idle": (2.0, 3.0)})
+        shared, idle = ({"node_name": name, "slots_json": "[{}, {}, {}, {}]"} for name in ("shared", "idle"))
+        running = {"shared": {"before": 0, "computing": 1, "total": 1, "tiles": [("heavy", False, 1)]}}
+        self.assertEqual(placement.completion(shared, "light", running, model), 0.5 * 1500.0 + 10.0 + 3.0)
+        self.assertEqual(placement.completion(idle, "light", running, model), 2.0 + 10.0 + 3.0)
+
+    def test_a_tile_skips_a_machine_busy_with_another_field(self) -> None:
+        model = placement.Model()
+        now = time.time()
+        model.kernels.update({("shared", "light"): 10.0, ("idle", "light"): 10.0, ("shared", "heavy"): 1500.0})
+        model.overheads.update({"shared": (2.0, 3.0), "idle": (2.0, 3.0)})
+        model.kernels_at.update({"light": now, "heavy": now})
+        model.fields["light"] = {"lowest": 0, "unfinished": 5000, "ready": 1, "at": now}
+        model.running = (now, {"shared": {"before": 0, "computing": 1, "total": 1, "tiles": [("heavy", False, 1)]}})
+        shared, idle = ({"node_name": name, "slots_json": "[{}, {}, {}, {}]"} for name in ("shared", "idle"))
+        far = json.loads(candidate(40, 40, root="light")["specification"])   # not on a critical diagonal
+        self.assertTrue(placement.withhold(None, shared, far, [shared, idle], now, model))
+        self.assertFalse(placement.withhold(None, idle, far, [shared, idle], now, model))
+
     def test_completion_estimate(self) -> None:
         model = placement.Model()
         model.kernels[("n", "r")] = 10.0

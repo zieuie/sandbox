@@ -135,16 +135,18 @@ class Model:
             at, snapshot = self.running
             if now - at < RUNNING_SECONDS:
                 return snapshot
-        snapshot: dict[str, dict[str, int]] = {}
-        for node, phase, count in connection.execute(
-                "SELECT node_name,progress_phase,COUNT(*) FROM runs WHERE state='running' "
-                "AND json_extract(specification,'$.program')='dp_tile' GROUP BY node_name,progress_phase"):
-            entry = snapshot.setdefault(node, {"before": 0, "computing": 0, "total": 0})
+        snapshot: dict[str, dict] = {}
+        for node, phase, root, count in connection.execute(
+                "SELECT node_name,progress_phase,parent_run_id,COUNT(*) FROM runs WHERE state='running' "
+                "AND json_extract(specification,'$.program')='dp_tile' GROUP BY node_name,progress_phase,parent_run_id"):
+            entry = snapshot.setdefault(node, {"before": 0, "computing": 0, "total": 0, "tiles": []})
             entry["total"] += count
-            if phase in BEFORE_KERNEL:
+            before = phase in BEFORE_KERNEL
+            if before:
                 entry["before"] += count
             else:
                 entry["computing"] += count
+            entry["tiles"].append((root, before, count))
         with self.lock:
             self.running = (now, snapshot)
         return snapshot
@@ -182,7 +184,18 @@ def completion(node: dict, root: str, running: dict[str, dict[str, int]], model:
                if overheads else (0.0, 0.0))
     before, after = model.overheads.get(node["node_name"], default)
     state = running.get(node["node_name"], {"before": 0, "computing": 0, "total": 0})
-    backlog = (state["before"] + 0.5 * state["computing"]) * kernel
+    # Each tile ahead in this machine's GPU queue at its own field's kernel time: a light field's
+    # tile behind another field's 25-minute kernel waits 25 minutes, not one light kernel (2^39
+    # behind 163^3 on 2026-10-09: 20+ minute waits while six GPUs idled).
+    backlog = 0.0
+    for other, before, count in state.get("tiles", []):
+        own = model.kernels.get((node["node_name"], other))
+        if own is None:
+            known = [value for (_, key), value in model.kernels.items() if key == other]
+            own = statistics.median(known) if known else kernel
+        backlog += (1.0 if before else 0.5) * count * own
+    if "tiles" not in state:
+        backlog = (state["before"] + 0.5 * state["computing"]) * kernel
     try:
         slots = len(json.loads(node.get("slots_json") or "[]")) or 1
     except ValueError:
@@ -204,10 +217,13 @@ def withhold(connection, node: dict, specification: dict, candidates: list[dict]
     progress = model.field(connection, root, now)
     critical = progress["unfinished"] <= TAIL_TILES or (
         progress["lowest"] is not None and row + column < progress["lowest"] + CRITICAL_DIAGONALS)
-    if not critical:
+    running = model.running_tiles(connection, now)
+    # Any tile, critical or not, when this machine's GPU queue holds another field's tile: there it
+    # can wait a whole foreign kernel (2^39 behind 163^3, 2026-10-09).
+    shared = any(other != root for other, _, _ in running.get(node["node_name"], {}).get("tiles", []))
+    if not (critical or shared):
         return False
     model.service(connection, root, now)
-    running = model.running_tiles(connection, now)
     mine = completion(node, root, running, model)
     if mine is None:
         return False   # no history for this machine on this field yet: don't hold anything back
