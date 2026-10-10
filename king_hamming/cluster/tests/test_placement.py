@@ -183,6 +183,19 @@ class LeaseTests(unittest.TestCase):
         self.assertTrue(placement.withhold(None, shared, far, [shared, idle], now, model))
         self.assertFalse(placement.withhold(None, idle, far, [shared, idle], now, model))
 
+    def test_a_busy_gpu_yields_to_an_idle_machine_even_without_estimates(self) -> None:
+        model = placement.Model()
+        now = time.time()
+        model.kernels_at.update({"light": now, "heavy": now})
+        model.fields["light"] = {"lowest": 0, "unfinished": 5000, "ready": 1, "at": now}
+        model.running = (now, {"shared": {"before": 0, "computing": 1, "total": 1, "tiles": [("heavy", False, 1)]}})
+        shared, idle = ({"node_name": name, "slots_json": "[{}, {}]"} for name in ("shared", "idle"))
+        far = json.loads(candidate(40, 40, root="light")["specification"])
+        self.assertTrue(placement.withhold(None, shared, far, [shared, idle], now, model))   # no kernels known at all
+        busy_too = dict(model.running[1], idle={"before": 0, "computing": 1, "total": 1, "tiles": [("light", False, 1)]})
+        model.running = (now, busy_too)
+        self.assertFalse(placement.withhold(None, shared, far, [shared, idle], now, model))  # nobody idle: no estimates, no hold
+
     def test_completion_estimate(self) -> None:
         model = placement.Model()
         model.kernels[("n", "r")] = 10.0

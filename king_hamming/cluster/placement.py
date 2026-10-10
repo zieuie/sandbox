@@ -223,6 +223,12 @@ def withhold(connection, node: dict, specification: dict, candidates: list[dict]
     shared = any(other != root for other, _, _ in running.get(node["node_name"], {}).get("tiles", []))
     if not (critical or shared):
         return False
+    if shared and any(other["node_name"] != node["node_name"] and not running.get(other["node_name"], {}).get("total")
+                      for other in candidates):
+        # This GPU is busy with another field and a GPU machine stands completely idle: that one asks
+        # within seconds and starts at once. No estimate needed (a field's kernel times are learned
+        # only after 5 tiles per machine, so early on a 25-minute foreign kernel was costed as zero).
+        return True
     model.service(connection, root, now)
     # Kernel times are learned per field when its own tiles are placed: refresh the other fields
     # in the machines' queues too, or right after a leader restart a 25-minute foreign kernel would
