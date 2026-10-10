@@ -36,6 +36,7 @@ M(q + 1, q).
 | [`web/`](web/README.md) | The dashboard |
 | [`cuda/`](cuda/README.md) | CUDA driver loading; no CUDA toolkit is needed on workers |
 | [`row_verifier/`](row_verifier/README.md) | Renders actual permutations and checks distances (small fields) |
+| [`rehydrate/`](rehydrate/README.md) | `kh_rehydrate`: prints all of a certificate's metadata and writes out the permutation array (or part of it) for your own checks |
 | [`matching_solver_multi/`](matching_solver_multi/README.md) | Ownership-partitioned matching experiment |
 
 Project adapter registration lives in `adapter_config.py`. Small frozen fixtures are in
