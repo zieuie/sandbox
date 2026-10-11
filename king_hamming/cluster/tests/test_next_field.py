@@ -52,10 +52,11 @@ class RankingTests(unittest.TestCase):
 class RoomTests(unittest.TestCase):
     def database(self, runs: list[tuple[str, int, int]], nodes: list[tuple[int, int, int | None]]):
         connection = sqlite3.connect(":memory:")
-        connection.execute("CREATE TABLE runs(parent_run_id, specification, state)")
+        connection.execute("CREATE TABLE runs(run_id, parent_run_id, specification, state)")
         connection.execute("CREATE TABLE nodes(gpus_json, storage_free_bytes, large_free_bytes)")
+        connection.execute("CREATE TABLE distributed_tiles(parent_run_id, child_run_id)")
         for state, p, r in runs:
-            connection.execute("INSERT INTO runs VALUES(NULL,?,?)", (json.dumps(
+            connection.execute("INSERT INTO runs VALUES(?,NULL,?,?)", (f"{p}^{r}", json.dumps(
                 {"program": "dp_distributed", "arguments": {"p": p, "r": r}}), state))
         for gpu, free, large in nodes:
             connection.execute("INSERT INTO nodes VALUES(?,?,?)", (json.dumps([{"total_bytes": gpu}]), free, large))
@@ -67,6 +68,17 @@ class RoomTests(unittest.TestCase):
         busy, why = next_field.room(self.database([("waiting", 41, 5), ("running", 2, 33)], []))
         self.assertFalse(busy)
         self.assertIn("41^5", why)
+
+    def test_a_tail_field_does_not_hold_a_slot(self) -> None:
+        connection = self.database([("running", 41, 5), ("running", 2, 33)], [])
+        self.assertFalse(next_field.room(connection)[0])
+        # 2^33 is down to its last 3 tiles (one done): it is a tail, so there is room.
+        for index in range(4):
+            connection.execute("INSERT INTO runs VALUES(?,?,NULL,?)", (f"t{index}", "2^33", "complete" if index == 0 else "running"))
+            connection.execute("INSERT INTO distributed_tiles VALUES(?,?)", ("2^33", f"t{index}"))
+        free, why = next_field.room(connection)
+        self.assertTrue(free)
+        self.assertIn("tail: 2^33", why)
 
     def test_disk_is_the_largest_gpu_hosts(self) -> None:
         # gawain's 751 GB doesn't count: large matchings run on merlin (6 GB GPU).

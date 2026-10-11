@@ -67,6 +67,8 @@ MAX_PRIME, MAX_EXPONENT = 1621, 63   # the DP's own limits (p^3 and q in 64 bits
 BLOCK_MAX_Q, WIDE_MAX_Q, BLOCK_MAX_F = 2**36 - 1, 2**40 - 1, 65534
 ACTIVE = ("queued", "waiting", "running", "stopping")
 MAX_ACTIVE = 2
+TAIL_TILES = 6   # a field with this few unfinished tiles is a tail (167^3's last three ran only on CPUs for
+                 # hours with seven GPU machines idle) and no longer holds one of the MAX_ACTIVE slots
 
 
 def primes(limit: int) -> list[int]:
@@ -174,15 +176,27 @@ def worker_disk(connection: sqlite3.Connection) -> int:
 
 
 def room(connection: sqlite3.Connection) -> tuple[bool, str]:
-    """Room for a new field: fewer than MAX_ACTIVE DP roots active (paused ones don't count)."""
-    active = connection.execute(
-        "SELECT json_extract(specification,'$.arguments.p'),json_extract(specification,'$.arguments.r') "
+    """Room for a new field: fewer than MAX_ACTIVE DP roots active (paused ones don't count, and neither
+    does a root down to its last TAIL_TILES tiles)."""
+    roots = connection.execute(
+        "SELECT run_id,json_extract(specification,'$.arguments.p'),json_extract(specification,'$.arguments.r') "
         "FROM runs WHERE parent_run_id IS NULL AND json_extract(specification,'$.program')='dp_distributed' "
         f"AND state IN ({','.join('?' * len(ACTIVE))})", ACTIVE).fetchall()
-    running = ", ".join(f"{p}^{r}" for p, r in active)
+    active, tails = [], []
+    for run_id, p, r in roots:
+        try:
+            total, left = connection.execute(
+                "SELECT COUNT(*),COALESCE(SUM(c.state IS NULL OR c.state<>'complete'),0) FROM distributed_tiles t "
+                "LEFT JOIN runs c ON c.run_id=t.child_run_id WHERE t.parent_run_id=?", (run_id,)).fetchone()
+        except sqlite3.Error:
+            total, left = 0, 0
+        # A root with no tiles yet (just submitted) is not a tail.
+        (tails if total and left <= TAIL_TILES else active).append(f"{p}^{r}")
+    note = (" (+ tail: " + ", ".join(tails) + ")") if tails else ""
+    running = ", ".join(active)
     if len(active) >= MAX_ACTIVE:
-        return False, f"{len(active)} fields in DP: {running}"
-    return True, f"DP running: {running}" if active else "no DP running"
+        return False, f"{len(active)} fields in DP: {running}{note}"
+    return True, (f"DP running: {running}" if active else "no DP running") + note
 
 
 def largest_free_disk(connection: sqlite3.Connection) -> int:
