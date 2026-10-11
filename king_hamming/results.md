@@ -26,8 +26,8 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 43 | 22,143,624^ | 1,756,432,945,357^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 47 | 32,845,621^ | 3,401,742,737,444^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 53 | 55,899,100^ | 8,301,622,402,986^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 59 | 90,659,164^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 61 | 105,776,867^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 59 | 90,659,164^ | 18,582,530,492,106^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 61 | 105,776,867^ | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 67 | 161,478,308^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 71 | 212,599,134^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 73 | 240,662,969^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
@@ -47,11 +47,12 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 149 | 5,917,676,550^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 151 | 6,283,408,376^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 157 | 7,583,733,181^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 163 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 163 | 8,854,278,664^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 167 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 173 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **92 fields are proved.** Every one matched with the first polynomial the solver could
+- **94 fields are proved.** Every one matched with the first polynomial the solver could
   finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
   found.
 - **7¹³** was matched on 2026-10-07 by the wide GPU matcher on merlin (723 blocks, 7 passes,
@@ -68,7 +69,7 @@ Notes:
 - **2³¹ and 3¹⁹** were added on 2026-10-06 (Zooey) as the cheapest fields left, with DP on the
   P600s and gawain (about an hour each, 2048-cell tiles) and matching by GPU blocks on dp-102
   and dp-101 (about 20 minutes each); both verified.
-- **41⁵, 43⁵, 47⁵, 53⁵, 127³, 131³, 137³, 139³, 149³, 151³, 157³ and 3²¹** (2026-10-08/09) and **2³³, 2³⁵, 2³⁷, 2³⁹, 3²³** were started by the
+- **41⁵, 43⁵, 47⁵, 53⁵, 59⁵, 127³, 131³, 137³, 139³, 149³, 151³, 157³, 163³ and 3²¹** (2026-10-08/10) and **2³³, 2³⁵, 2³⁷, 2³⁹, 3²³** were started by the
   hourly "quickest field not yet calculated" rule (`campaigns/next_field.py`). 3²¹ (restarted with
   4096-cell tiles at Zooey's request) matched with the wide matcher; the others on a single GPU in
   minutes. 2³³, 2³⁵, 2³⁷, 2³⁹ and 3²³ have DP values only (no `^`):
