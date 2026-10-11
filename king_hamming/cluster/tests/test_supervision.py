@@ -485,6 +485,17 @@ class SupervisionTests(unittest.TestCase):
                 self.assertEqual(dict(connection.execute("SELECT node_name,large_free_bytes FROM nodes")),
                                  {"merlin": 234 * 1024**3, "p600": None})
 
+    def test_local_settings_read_only_the_allowed_names(self) -> None:
+        import agent
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agent.env"
+            self.assertEqual(agent.local_settings(path), {})                      # no file: nothing
+            path.write_text("# merlin\nKH_GPU_DP_MAX_BYTES = 5900000000\nKH_DISABLE_GPU_DP=1\n"
+                            "KH_GPU_DP_MAX_BYTES_X=1\nbad line\n")
+            self.assertEqual(agent.local_settings(path), {"KH_GPU_DP_MAX_BYTES": "5900000000"})
+            path.write_text("KH_GPU_DP_MAX_BYTES=lots\n")
+            self.assertEqual(agent.local_settings(path), {})                      # numbers only
+
     # Repeated heartbeats must not reset the mathematical-progress timestamp.
     def test_heartbeat_work_and_checkpoint_are_distinct(self) -> None:
         """Persist status timestamps separately and latch stop across a quick resume."""

@@ -648,6 +648,29 @@ def large_root() -> Path | None:
     return path if path.is_absolute() and path.is_dir() and os.path.ismount(path) else None
 
 
+# Per-machine settings for the solvers this agent starts, one KEY=VALUE per line (# comments). Agents
+# are launched over SSH with no way to pass options, and a card can need its own limits: merlin's 3060
+# has 5.54 GiB free but the planner assumes 5.42, which left 167^3's corner tile running 31 h on two CPU
+# cores (2026-10-10). Only the names below are read.
+LOCAL_SETTINGS = Path.home() / ".local/share/king_hamming/agent.env"
+LOCAL_SETTING_NAMES = {"KH_GPU_DP_MAX_BYTES"}
+
+
+def local_settings(path: Path | None = None) -> dict[str, str]:
+    """The allowed settings in the machine's agent.env, if it has one."""
+    try:
+        text = (LOCAL_SETTINGS if path is None else path).read_text()
+    except OSError:
+        return {}
+    found = {}
+    for line in text.splitlines():
+        name, separator, value = line.partition("=")
+        name, value = name.strip(), value.strip()
+        if separator and name in LOCAL_SETTING_NAMES and value.isdigit():
+            found[name] = value
+    return found
+
+
 # A GPU matching that ends short is deterministic: the same attempt would end the same way, so it
 # fails at once (the feeder then tries another polynomial) instead of being requeued for a rerun.
 DETERMINISTIC_FAILURES = ("block matching incomplete", "wide matching incomplete")
@@ -1388,6 +1411,9 @@ def main() -> int:
     }
     # Solvers inherit this, so a DP tile can tell whether it fits this host's card.
     os.environ["KH_GPU_DEVICES"] = json.dumps(node_record["gpus"])
+    for name, value in local_settings().items():
+        os.environ[name] = value
+        print(f"machine setting from {LOCAL_SETTINGS}: {name}={value}", flush=True)
 
     storage_host, storage_port = arguments.storage_listen.rsplit(":", 1)
     storage_server = ThreadingHTTPServer(
