@@ -1,6 +1,6 @@
 # Results
 
-Lower bounds M(q + 1, q) ≥ N proved by the campaign, as of 2026-10-06. Each number N is
+Lower bounds M(q + 1, q) ≥ N proved by the campaign, as of 2026-10-12. Each number N is
 the exact number of permutations in the array (q + F²·θ, with F = p^⌊r/2⌋). A `^` means
 the field's matching certificate was found and independently verified, so the bound is
 proved; see [docs/MATCHING_CERTIFICATE.md](docs/MATCHING_CERTIFICATE.md) for why that is
@@ -21,13 +21,13 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 23 | 1,296,050^ | 15,667,458,067^ | 190,564,823,479,032^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 29 | 3,741,609^ | 90,969,067,658^ | 2,218,287,697,118,362^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 31 | 5,053,899^ | 150,087,862,357^ | 4,470,713,705,180,443^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 37 | 11,288,774^ | 569,651,235,950^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 37 | 11,288,774^ | 569,651,235,950^ | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 41 | 17,862,306^ | 1,228,544,806,926^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 43 | 22,143,624^ | 1,756,432,945,357^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 47 | 32,845,621^ | 3,401,742,737,444^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 53 | 55,899,100^ | 8,301,622,402,986^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 59 | 90,659,164^ | 18,582,530,492,106^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| 61 | 105,776,867^ | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 61 | 105,776,867^ | 23,964,090,840,139^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 67 | 161,478,308^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 71 | 212,599,134^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 73 | 240,662,969^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
@@ -52,7 +52,7 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 173 | (running) | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **94 fields are proved.** Every one matched with the first polynomial the solver could
+- **95 fields are proved.** Every one matched with the first polynomial the solver could
   finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
   found.
 - **7¹³** was matched on 2026-10-07 by the wide GPU matcher on merlin (723 blocks, 7 passes,
