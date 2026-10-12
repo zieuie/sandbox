@@ -80,19 +80,28 @@ def primes(limit: int) -> list[int]:
     return [value for value, flag in enumerate(sieve) if flag]
 
 
-def dp_hours(p: int, r: int, side: int, visits: float) -> float:
-    """Estimated DP hours with tiles of this side (see the module docstring)."""
+def dp_hours(p: int, r: int, side: int, visits: float, gpus: int = GPUS) -> float:
+    """Estimated DP hours with tiles of this side on this many GPUs (see the module docstring)."""
     budget = scheduling.dp_estimate({"arguments": {"p": p, "r": r}})["budget"]
     per_side = -(-budget // side)
     tiles = per_side * per_side
     area = max(1.0, (side / 2048) ** 2)
     halo = TILE_HALO_HOURS * (p * p) / side
     compute = visits / VISITS_PER_GPU_HOUR
-    throughput = (compute + tiles * (TILE_BASE_HOURS * area + halo)) / GPUS
+    throughput = (compute + tiles * (TILE_BASE_HOURS * area + halo)) / gpus
     latency = (TILE_LATENCY_SECONDS + TILE_AREA_SECONDS * (side / 2048) ** 2) / 3600
     slow = visits / VISITS_PER_SLOW_GPU_HOUR / tiles
     critical = (2 * per_side - 1) * (latency + halo + slow) * CRITICAL_OVERLAP
     return max(throughput, critical)
+
+
+def gpu_need(p: int, r: int, side: int) -> int:
+    """GPU memory the field's largest tile needs (the kernel's own footprint, as DPAdapter.gpu_need)."""
+    from dp_solver.adapter import tile
+    per_side = -(-scheduling.dp_estimate({"arguments": {"p": p, "r": r}})["budget"] // side)
+    spots = {0, per_side // 2, max(0, per_side - 2), per_side - 1}
+    return max(tile(p, r, side, row, column).halo_bytes + tile(p, r, side, row, column).value_bytes // 2
+               + p ** 3 * 24 + 32 * 1024 ** 2 for row in spots for column in spots)
 
 
 def certificate_bytes(q: int, f: int) -> int:
@@ -113,9 +122,13 @@ def matchable(p: int, r: int, q: int, f: int, disk_bytes: int) -> str | None:
 
 
 def candidates(known: set[tuple[int, int]], settings: dict, disk_bytes: int,
-               worker_disk_bytes: int | None = None) -> list[dict]:
+               worker_disk_bytes: int | None = None, gpu_bytes: list[int] | None = None) -> list[dict]:
     """Every field not yet submitted that the DP can compute, quickest first. Fields no matcher can
     take yet are included with their reason in "dp_only" and no matching time."""
+    # gpu_bytes: usable memory of each DP GPU (the largest-GPU host is kept apart, as GPUS says). A side
+    # whose largest tile exceeds the smallest GPU runs those tiles only on the bigger machines, or on
+    # CPUs for hours (167^3, 173^3 tails): when another side's tiles all fit, that side wins even if its
+    # estimate is a little higher. 37^7: side 16384 needs 3.4 GiB a tile, no P600 (1.7 GiB) holds it; 8192 needs 1.0.
     found = []
     max_tile_bytes = int(settings.get("max_tile_bytes", 2 * 1024**3))
     max_tiles = int(settings.get("max_tiles", scheduling.DEFAULT_MAX_TILES))
@@ -140,9 +153,15 @@ def candidates(known: set[tuple[int, int]], settings: dict, disk_bytes: int,
                 stored = 3 * scheduling.stored_bytes(p, r, side, int(settings.get("tile_format", 2)))
                 if worker_disk_bytes is not None and stored > worker_disk_bytes:
                     continue   # three copies of its tiles must fit the workers' disks
-                hours = dp_hours(p, r, side, estimate["raw_visits"])
-                if best is None or hours < best["dp_hours"]:
-                    best = {"p": p, "r": r, "q": q, "side": side, "tiles": plan["tiles"],
+                gpus_for_side = GPUS
+                holds = True
+                if gpu_bytes:
+                    holds = gpu_need(p, r, side) <= min(gpu_bytes)   # every DP GPU can take the largest tile
+                hours = dp_hours(p, r, side, estimate["raw_visits"], gpus_for_side)
+                if gpu_bytes and best is not None and best.get("holds") and not holds:
+                    continue   # never trade a side every GPU holds for one only the big hosts do
+                if best is None or (holds and not best.get("holds")) or (holds == best.get("holds") and hours < best["dp_hours"]):
+                    best = {"holds": holds, "p": p, "r": r, "q": q, "side": side, "tiles": plan["tiles"],
                             "reserve": plan["reserve"], "dp_hours": hours,
                             "state_bytes": estimate["state_bytes"], "visits": estimate["raw_visits"]}
             if best is None:
@@ -164,6 +183,17 @@ def specification(item: dict, settings: dict) -> dict:
         "max_visits": max(10**15, int(item["visits"])), "max_tile_bytes": item["reserve"],
         "artifact_format": "KHD1", "max_tiles": int(settings.get("max_tiles", scheduling.DEFAULT_MAX_TILES)),
         "tile_format": int(settings.get("tile_format", 2))}}
+
+
+def gpu_sizes(connection: sqlite3.Connection) -> list[int]:
+    """Usable GPU memory of each live DP GPU, leaving out the largest-GPU host (it is kept for matching)."""
+    sys.path.insert(0, str(ROOT / "cluster"))
+    import gpus
+    rows = connection.execute("SELECT gpus_json FROM nodes WHERE gpus_json NOT IN ('','[]') "
+                              "AND last_heartbeat > strftime('%s','now') - 600").fetchall()
+    machines = [[gpus.usable_bytes(device) for device in json.loads(row[0])] for row in rows]
+    biggest = max(max(sizes) for sizes in machines) if machines else 0
+    return [size for sizes in machines if max(sizes) != biggest for size in sizes]
 
 
 def worker_disk(connection: sqlite3.Connection) -> int:
@@ -241,6 +271,8 @@ def main() -> int:
     parser.add_argument("--state", type=Path, default=ROOT / "cluster/deployments/continuous-campaign")
     parser.add_argument("--submit", action="store_true", help="start the quickest field if there is room")
     parser.add_argument("--show", type=int, default=8, help="candidates to list")
+    parser.add_argument("--field", help="P^R: submit exactly this field now, with the same tile plan and limits "
+                        "(Zooey asks for it by name), whatever the room; a cancelled earlier attempt is rerun")
     arguments = parser.parse_args()
     state = arguments.state
     waiting = record_pending(state)
@@ -257,7 +289,20 @@ def main() -> int:
     known |= {(int(p), int(r)) for p, r in connection.execute(   # any root the leader has, in any state
         "SELECT json_extract(specification,'$.arguments.p'),json_extract(specification,'$.arguments.r') "
         "FROM runs WHERE parent_run_id IS NULL AND json_extract(specification,'$.program')='dp_distributed'")}
-    found = candidates(known, settings, largest_free_disk(connection), worker_disk(connection))
+    if arguments.field:
+        wanted = tuple(int(x) for x in arguments.field.split("^"))
+        found = [item for item in candidates(known - {wanted}, settings, largest_free_disk(connection),
+                                             worker_disk(connection), gpu_sizes(connection)) if (item["p"], item["r"]) == wanted]
+        if not found:
+            print(f"{arguments.field}: not a field the DP can take (or it is running already)")
+            return 1
+        item = found[0]
+        print(f"{item['p']}^{item['r']}: about {item['dp_hours']:.0f} h of DP on {item['tiles']} tiles of {item['side']}"
+              + (f", DP only: {item['dp_only']}" if item["dp_only"] else ""))
+        if arguments.submit:
+            submit(state, manifest["leader"], item, settings, pending, rerun=True)
+        return 0
+    found = candidates(known, settings, largest_free_disk(connection), worker_disk(connection), gpu_sizes(connection))
     for item in found[:arguments.show]:
         matching = (f"DP only: {item['dp_only']}" if item["dp_only"] else f"matching {item['match_hours']:.1f} h")
         print(f"{item['p']}^{item['r']}: about {item['hours']:.1f} h (DP {item['dp_hours']:.1f} h on "
@@ -279,10 +324,10 @@ def main() -> int:
     return 0
 
 
-def submit(state: Path, leader: str, item: dict, settings: dict, pending: list) -> None:
+def submit(state: Path, leader: str, item: dict, settings: dict, pending: list, rerun: bool = False) -> None:
     spec = specification(item, settings)
-    request = urllib.request.Request(leader.rstrip("/") + "/v1/enqueue",
-                                     data=json.dumps({"specification": spec}).encode(),
+    body = {"specification": spec, **({"rerun": True} if rerun else {})}
+    request = urllib.request.Request(leader.rstrip("/") + "/v1/enqueue", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
     result = json.load(urllib.request.urlopen(request, timeout=60))
     pending.append({"specification": spec, **result})
