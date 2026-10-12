@@ -1816,6 +1816,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def tile_fits(node, specification) -> bool:
+    """Whether node's GPU holds this DP tile (a misfit would only land on CPUs)."""
+
+    adapter = adapters.get(specification)
+    return not hasattr(adapter, "fits_gpu") or adapter.fits_gpu(node, specification)
+
+
 # Retry background maintenance after transient database contention instead of silently dying.
 def scheduler_loop(
     database: Path, lease_seconds: float, stop: threading.Event,
@@ -1836,6 +1843,10 @@ def scheduler_loop(
                 now = time.time()
                 expire_leases(connection, now)
                 adapters.advance(connection, now)
+                stopped = placement.requeue_stuck_waiters(connection, now, lease_seconds, tile_fits)
+                if stopped:
+                    print(f"requeued {len(stopped)} DP tile(s) waiting for a busy GPU while another GPU machine "
+                          f"was idle: {', '.join(run[:8] for run in stopped)}", flush=True)
         except Exception as error:
             health.failed(error)
             print("scheduler transaction failed; retrying", flush=True)

@@ -117,6 +117,45 @@ class LeaseTests(unittest.TestCase):
                               node_name="fast", progress_phase="waiting for GPU")
         self.assertIsNotNone(self.lease("slow"))
 
+    def waiter(self, connection, run_id: str, node: str, waited: float) -> None:
+        self.fake_run(connection, run_id, parent=self.root, state="running", started=time.time() - waited - 5,
+                      node_name=node, progress_phase="waiting for GPU", last_progress_at=time.time() - waited,
+                      stop_requested=0, control_state="running", gpu_index=None)
+
+    def stop_waiters(self, connection, fits=None) -> list[str]:
+        placement._LAST_WAIT_SCAN[0] = 0.0
+        return placement.requeue_stuck_waiters(connection, time.time(), 1800, fits)
+
+    def test_a_tile_waiting_for_a_busy_gpu_is_stopped_when_a_machine_is_idle(self) -> None:
+        with leader.connect(self.database) as connection:
+            self.waiter(connection, "old", "slow", 400)
+            self.waiter(connection, "young", "slow", 60)
+            self.assertEqual(self.stop_waiters(connection), ["old"])
+            flags = dict(connection.execute("SELECT run_id,stop_requested FROM runs WHERE run_id IN ('old','young')"))
+            self.assertEqual(flags, {"old": 1, "young": 0})
+
+    def test_nothing_is_stopped_when_no_machine_is_idle(self) -> None:
+        with leader.connect(self.database) as connection:
+            self.waiter(connection, "old", "slow", 400)
+            self.fake_run(connection, "busy", parent=self.root, state="running", started=time.time(),
+                          node_name="fast", progress_phase="computing")
+            self.assertEqual(self.stop_waiters(connection), [])
+
+    def test_one_tile_per_idle_machine_and_only_where_it_fits(self) -> None:
+        with leader.connect(self.database) as connection:
+            self.waiter(connection, "a", "slow", 500)
+            self.waiter(connection, "b", "slow", 400)
+            self.assertEqual(self.stop_waiters(connection), ["a"], "one idle machine takes one tile")
+            connection.execute("UPDATE runs SET stop_requested=0")
+            self.assertEqual(self.stop_waiters(connection, fits=lambda node, specification: False), [])
+
+    def test_the_setting_turns_it_off(self) -> None:
+        with leader.connect(self.database) as connection:
+            self.waiter(connection, "old", "slow", 400)
+            connection.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                               (placement.WAIT_REQUEUE_SETTING, "0"))
+            self.assertEqual(self.stop_waiters(connection), [])
+
     def test_no_history_holds_nothing_back(self) -> None:
         self.set_placement("ect")
         with leader.connect(self.database) as connection:

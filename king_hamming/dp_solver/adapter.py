@@ -137,6 +137,24 @@ class DPAdapter(SolverAdapter):
         """
         return specification["program"] == "dp_tile" and not distributed.cpu_fallback_allowed(connection)
 
+    def gpu_need(self, specification):
+        """GPU memory the tile needs (distributed_solver.gpu_fits' footprint), or None if not a DP tile."""
+        if specification["program"] != "dp_tile":
+            return None
+        arguments = specification["arguments"]
+        try:
+            target = tile(arguments["p"], arguments["r"], arguments["tile_side"],
+                          arguments["row"], arguments["column"])
+        except (KeyError, ValueError, TypeError):
+            return None
+        return target.halo_bytes + target.value_bytes // 2 + arguments["p"] ** 3 * 24 + 32 * 1024**2
+
+    def fits_gpu(self, node, specification) -> bool:
+        """Whether node's largest GPU holds the tile (True for anything that isn't a DP tile)."""
+        import gpus
+        need = self.gpu_need(specification)
+        return need is None or max([gpus.usable_bytes(item) for item in gpus.from_record(node)] or [0]) >= need
+
     def gpu_misfit(self, connection, node, specification, alive_after):
         """True if this tile can't fit node's GPU while some live, undrained node's GPU can hold it.
 
@@ -144,16 +162,10 @@ class DPAdapter(SolverAdapter):
         footprint as distributed_solver.gpu_fits): 127^3's later tiles hold a 16,129-row halo,
         about 2.6 GB, past a P600's 1.5 GB, and one ran 75+ minutes on two cores (about 5 h in
         all) where merlin's GPU takes 2-3 minutes. With nowhere it fits, nothing changes."""
-        if specification["program"] != "dp_tile":
-            return False
         import gpus
-        arguments = specification["arguments"]
-        try:
-            target = tile(arguments["p"], arguments["r"], arguments["tile_side"],
-                          arguments["row"], arguments["column"])
-        except (KeyError, ValueError, TypeError):
+        need = self.gpu_need(specification)
+        if need is None:
             return False
-        need = target.halo_bytes + target.value_bytes // 2 + arguments["p"] ** 3 * 24 + 32 * 1024**2
 
         def largest(row):
             return max([gpus.usable_bytes(item) for item in gpus.from_record(row)] or [0])

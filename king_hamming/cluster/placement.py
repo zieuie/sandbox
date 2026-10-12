@@ -259,3 +259,64 @@ def gpu_machines(connection, now: float, lease_seconds: float) -> list[dict[str,
     held = {row[0] for row in connection.execute(
         "SELECT DISTINCT node_name FROM runs WHERE state='running' AND gpu_index IS NOT NULL")}
     return [row for row in rows if row["node_name"] not in held]
+
+
+WAIT_REQUEUE_SETTING = "dp_wait_requeue_seconds"
+WAIT_REQUEUE_SECONDS = 300.0   # a tile waits this long for a busy GPU before an idle machine gets it
+WAIT_REQUEUE_EVERY = 15.0
+_LAST_WAIT_SCAN = [0.0]
+
+
+def idle_gpu_machines(connection, now: float, lease_seconds: float) -> list[dict[str, Any]]:
+    """Live GPU machines with nothing running at all (they are asking for work every few seconds)."""
+    busy = {row[0] for row in connection.execute("SELECT DISTINCT node_name FROM runs WHERE state='running'")}
+    return [node for node in gpu_machines(connection, now, lease_seconds) if node["node_name"] not in busy]
+
+
+def requeue_stuck_waiters(connection, now: float, lease_seconds: float, fits=None) -> list[str]:
+    """Stop DP tiles that have waited for a busy GPU while another GPU machine sits idle.
+
+    A tile leased while every GPU was busy can wait behind a 25-minute kernel, and the idle machine
+    cannot take it (2026-10-09: 2^39 behind 163^3, three P600s idle for an hour). The stop is the
+    ordinary intentional one: the agent ends the tile, it returns to the queue with no work lost
+    (it had not started its kernel) and the idle machine's next request gets it, since the busy
+    machine's own request is withheld (`withhold`, "shared"). At most one tile per idle machine
+    per scan, oldest first. Setting dp_wait_requeue_seconds (default 300; 0 turns it off).
+
+    fits(node, specification) -> bool says whether the idle machine's GPU holds the tile.
+    Returns the run ids it stopped.
+    """
+    if now - _LAST_WAIT_SCAN[0] < WAIT_REQUEUE_EVERY:
+        return []
+    _LAST_WAIT_SCAN[0] = now
+    seconds = WAIT_REQUEUE_SECONDS
+    row = connection.execute("SELECT value FROM settings WHERE key=?", (WAIT_REQUEUE_SETTING,)).fetchone()
+    if row is not None:
+        try:
+            seconds = float(row[0])
+        except (TypeError, ValueError):
+            pass
+    if seconds <= 0:
+        return []
+    waiting = [dict(row) for row in connection.execute(
+        "SELECT run_id,node_name,specification FROM runs WHERE state='running' AND progress_phase='waiting for GPU' "
+        "AND stop_requested=0 AND control_state='running' AND last_progress_at<=? "
+        "AND json_extract(specification,'$.program')='dp_tile' ORDER BY last_progress_at ASC", (now - seconds,))]
+    if not waiting:
+        return []
+    idle = idle_gpu_machines(connection, now, lease_seconds)
+    stopped = []
+    for run in waiting:
+        specification = json.loads(run["specification"])
+        for node in idle:
+            if fits is None or fits(node, specification):
+                idle.remove(node)
+                connection.execute(
+                    "UPDATE runs SET stop_requested=1,progress_message=? WHERE run_id=?",
+                    (f"requeued: waited over {seconds:.0f} s for a busy GPU while {node['node_name']} was idle",
+                     run["run_id"]))
+                stopped.append(run["run_id"])
+                break
+        if not idle:
+            break
+    return stopped
