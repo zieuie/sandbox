@@ -156,6 +156,15 @@ class LeaseTests(unittest.TestCase):
                                (placement.WAIT_REQUEUE_SETTING, "0"))
             self.assertEqual(self.stop_waiters(connection), [])
 
+    def test_a_busy_machine_leaves_the_tile_for_an_idle_one(self) -> None:
+        self.set_placement("ect")
+        with leader.connect(self.database) as connection:
+            self.fake_run(connection, "busy", parent=self.root, state="running", started=time.time(),
+                          node_name="slow", progress_phase="computing")
+        placement.MODEL.__init__()
+        self.assertIsNone(self.lease("slow"), "fast is idle and asks within seconds")
+        self.assertIsNotNone(self.lease("fast"))
+
     def test_no_history_holds_nothing_back(self) -> None:
         self.set_placement("ect")
         with leader.connect(self.database) as connection:

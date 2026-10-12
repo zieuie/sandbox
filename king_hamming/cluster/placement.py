@@ -205,7 +205,7 @@ def completion(node: dict, root: str, running: dict[str, dict[str, int]], model:
 
 
 def withhold(connection, node: dict, specification: dict, candidates: list[dict], now: float,
-             model: Model = MODEL) -> bool:
+             model: Model = MODEL, fits=None) -> bool:
     """True if this critical tile should wait for a machine that would finish it sooner.
 
     candidates: the other live GPU machines (node rows) that could take it.
@@ -218,6 +218,13 @@ def withhold(connection, node: dict, specification: dict, candidates: list[dict]
     critical = progress["unfinished"] <= TAIL_TILES or (
         progress["lowest"] is not None and row + column < progress["lowest"] + CRITICAL_DIAGONALS)
     running = model.running_tiles(connection, now)
+    # A GPU machine with nothing running asks within seconds: a machine that already holds a tile
+    # leaves this one for it (on 2026-10-12 the requeue of tiles waiting 5 minutes just moved them
+    # from one busy P600 to the next while others idled).
+    if running.get(node["node_name"], {}).get("total") and any(
+            other["node_name"] != node["node_name"] and not running.get(other["node_name"], {}).get("total")
+            and (fits is None or fits(other, specification)) for other in candidates):
+        return True
     # Any tile, critical or not, when this machine's GPU queue holds another field's tile: there it
     # can wait a whole foreign kernel (2^39 behind 163^3, 2026-10-09).
     shared = any(other != root for other, _, _ in running.get(node["node_name"], {}).get("tiles", []))

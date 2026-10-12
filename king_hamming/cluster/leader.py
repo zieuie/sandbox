@@ -1375,7 +1375,8 @@ def make_handler(
                         if use_placement and placement.tile_of(specification) is not None:
                             if placement_machines is None:
                                 placement_machines = placement.gpu_machines(connection, now, lease_seconds)
-                            if placement.withhold(connection, dict(node), specification, placement_machines, now):
+                            if placement.withhold(connection, dict(node), specification, placement_machines, now,
+                                              fits=tile_fits):
                                 continue
                         active_on_host = connection.execute(
                             "SELECT COUNT(*) AS count,COALESCE(SUM(reserved_memory_bytes),0) AS memory "
