@@ -488,7 +488,9 @@ def compute_in(arguments, specification: dict, work: Path, scratch: str) -> None
             process.wait()
 
     # The GPU kernel's output is byte-identical to kh_dp_tile, so it is an opportunistic
-    # accelerator: wait briefly for this host's GPU, otherwise compute on the leased CPUs.
+    # accelerator: wait briefly for this host's GPU, otherwise compute on the leased CPUs. Where the
+    # campaign forbids the CPU fallback (limit infinite) a long hold (block matching) is waited out too:
+    # a 37^7 tile met 61^5's matching on dp-103 (2026-10-12), skipped the GPU and spent 3.8 h on the CPU.
     computed=False
     assisted=0
     limit=0.0
@@ -497,7 +499,7 @@ def compute_in(arguments, specification: dict, work: Path, scratch: str) -> None
             not gpus.recently_unavailable(device)):
         lock=gpus.DeviceLock(device)
         limit=gpu_wait_seconds(p,rectangle,threads,POLICY["cpu_fallback"])
-        acquired=lock.acquire(0.0,lambda: STOP,skip_long=True)
+        acquired=lock.acquire(0.0,lambda: STOP,skip_long=POLICY["cpu_fallback"])
         wide=None if acquired or not POLICY["cpu_fallback"] else assist_plan(p,rectangle,cpus)
         if wide is not None:
             slot=gpus.AssistSlot(int(os.environ.get("KH_CPU_ASSIST_SLOTS","1")))
@@ -513,7 +515,7 @@ def compute_in(arguments, specification: dict, work: Path, scratch: str) -> None
                     raise RuntimeError(f"C tile kernel exited {code}")
                 computed=True
         if not computed and not acquired:
-            acquired=lock.acquire(limit,gpu_wait_heartbeat(rectangle.value_bytes//8),skip_long=True)
+            acquired=lock.acquire(limit,gpu_wait_heartbeat(rectangle.value_bytes//8),skip_long=POLICY["cpu_fallback"])
         lap("gpu_wait")
         if acquired:
             try:
