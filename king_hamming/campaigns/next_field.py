@@ -104,6 +104,25 @@ def gpu_need(p: int, r: int, side: int) -> int:
                + p ** 3 * 24 + 32 * 1024 ** 2 for row in spots for column in spots)
 
 
+CPU_TILE_FACTOR = 2.6   # measured: 167^3's 2048-side tiles take 40+ h on two cores, 2.6x the raw 6.5e-9 s a visit
+
+
+def cpu_tail_hours(p: int, r: int, side: int, biggest_gpu: int) -> float:
+    """Hours the tiles no GPU holds add: each anti-diagonal of them is one wave of CPU tiles, one after
+    another (167^3 and 173^3: a tail of 4 and 11 days after the GPUs were done)."""
+    from dp_solver.adapter import tile
+    per_side = -(-scheduling.dp_estimate({"arguments": {"p": p, "r": r}})["budget"] // side)
+    if per_side > 64 or gpu_need(p, r, side) <= biggest_gpu:
+        return 0.0
+    waves = set()
+    for row in range(per_side):
+        for column in range(per_side):
+            target = tile(p, r, side, row, column)
+            if target.halo_bytes + target.value_bytes // 2 + p ** 3 * 24 + 32 * 1024 ** 2 > biggest_gpu:
+                waves.add(row + column)
+    return len(waves) * CPU_TILE_FACTOR * side * side * p ** 3 * 6.5e-9 / 2 / 3600
+
+
 def certificate_bytes(q: int, f: int) -> int:
     return q * (f - 1).bit_length() // 8 + 4096
 
@@ -122,7 +141,8 @@ def matchable(p: int, r: int, q: int, f: int, disk_bytes: int) -> str | None:
 
 
 def candidates(known: set[tuple[int, int]], settings: dict, disk_bytes: int,
-               worker_disk_bytes: int | None = None, gpu_bytes: list[int] | None = None) -> list[dict]:
+               worker_disk_bytes: int | None = None, gpu_bytes: list[int] | None = None,
+               biggest_gpu: int | None = None) -> list[dict]:
     """Every field not yet submitted that the DP can compute, quickest first. Fields no matcher can
     take yet are included with their reason in "dp_only" and no matching time."""
     # gpu_bytes: usable memory of each DP GPU (the largest-GPU host is kept apart, as GPUS says). A side
@@ -158,6 +178,8 @@ def candidates(known: set[tuple[int, int]], settings: dict, disk_bytes: int,
                 if gpu_bytes:
                     holds = gpu_need(p, r, side) <= min(gpu_bytes)   # every DP GPU can take the largest tile
                 hours = dp_hours(p, r, side, estimate["raw_visits"], gpus_for_side)
+                if biggest_gpu:
+                    hours += cpu_tail_hours(p, r, side, biggest_gpu)
                 if gpu_bytes and best is not None and best.get("holds") and not holds:
                     continue   # never trade a side every GPU holds for one only the big hosts do
                 if best is None or (holds and not best.get("holds")) or (holds == best.get("holds") and hours < best["dp_hours"]):
@@ -185,15 +207,16 @@ def specification(item: dict, settings: dict) -> dict:
         "tile_format": int(settings.get("tile_format", 2))}}
 
 
-def gpu_sizes(connection: sqlite3.Connection) -> list[int]:
-    """Usable GPU memory of each live DP GPU, leaving out the largest-GPU host (it is kept for matching)."""
+def gpu_sizes(connection: sqlite3.Connection) -> tuple[list[int], int]:
+    """Usable GPU memory of each live DP GPU, leaving out the largest-GPU host (it is kept for matching), and
+    the largest of all (a tile past that runs only on CPUs)."""
     sys.path.insert(0, str(ROOT / "cluster"))
     import gpus
     rows = connection.execute("SELECT gpus_json FROM nodes WHERE gpus_json NOT IN ('','[]') "
                               "AND last_heartbeat > strftime('%s','now') - 600").fetchall()
     machines = [[gpus.usable_bytes(device) for device in json.loads(row[0])] for row in rows]
     biggest = max(max(sizes) for sizes in machines) if machines else 0
-    return [size for sizes in machines if max(sizes) != biggest for size in sizes]
+    return [size for sizes in machines if max(sizes) != biggest for size in sizes], biggest
 
 
 def worker_disk(connection: sqlite3.Connection) -> int:
@@ -292,7 +315,7 @@ def main() -> int:
     if arguments.field:
         wanted = tuple(int(x) for x in arguments.field.split("^"))
         found = [item for item in candidates(known - {wanted}, settings, largest_free_disk(connection),
-                                             worker_disk(connection), gpu_sizes(connection)) if (item["p"], item["r"]) == wanted]
+                                             worker_disk(connection), *gpu_sizes(connection)) if (item["p"], item["r"]) == wanted]
         if not found:
             print(f"{arguments.field}: not a field the DP can take (or it is running already)")
             return 1
@@ -302,7 +325,7 @@ def main() -> int:
         if arguments.submit:
             submit(state, manifest["leader"], item, settings, pending, rerun=True)
         return 0
-    found = candidates(known, settings, largest_free_disk(connection), worker_disk(connection), gpu_sizes(connection))
+    found = candidates(known, settings, largest_free_disk(connection), worker_disk(connection), *gpu_sizes(connection))
     for item in found[:arguments.show]:
         matching = (f"DP only: {item['dp_only']}" if item["dp_only"] else f"matching {item['match_hours']:.1f} h")
         print(f"{item['p']}^{item['r']}: about {item['hours']:.1f} h (DP {item['dp_hours']:.1f} h on "
