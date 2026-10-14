@@ -25,7 +25,7 @@ extern const unsigned chebyshev_images_count;
 #define MAXS 192
 #define MAXG 64
 
-typedef struct { int n, d, R, NG, C, steps; float noise; int tenure_lo, tenure_span, stall; } Params;
+typedef struct { int n, d, R, NG, C, steps; float noise; int tenure_lo, tenure_span, stall; float p_replace; } Params;
 
 static int n, d, NG, R;
 static int gt[MAXG], gp[MAXG][ST];
@@ -72,10 +72,105 @@ static void write_rows(const char *fn, const int8_t *full) {
   fclose(f);
 }
 
+// Orbit trim: build the conflict graph on representatives (an edge j-k if some
+// row of orbit j conflicts with some row of orbit k; reps that conflict with
+// their own orbit are dropped outright), find a minimum vertex cover by branch
+// and bound, and keep every row of the remaining orbits.
+static int ou[1 << 16], ov[1 << 16], one, obest, *obestset, oR;
+static void mvc(int *removed, int nrem) {
+  if (nrem >= obest) return;
+  int e = -1;
+  for (int i = 0; i < one; i++) if (!removed[ou[i]] && !removed[ov[i]]) { e = i; break; }
+  if (e < 0) { obest = nrem; memcpy(obestset, removed, sizeof(int) * oR); return; }
+  // lower bound: greedy matching size among uncovered edges
+  static char used[1 << 16]; int lb = 0;
+  memset(used, 0, oR);
+  for (int i = 0; i < one; i++) { int a = ou[i], b = ov[i]; if (removed[a] || removed[b] || used[a] || used[b]) continue; used[a] = used[b] = 1; lb++; }
+  if (nrem + lb >= obest) return;
+  removed[ou[e]] = 1; mvc(removed, nrem + 1); removed[ou[e]] = 0;
+  removed[ov[e]] = 1; mvc(removed, nrem + 1); removed[ov[e]] = 0;
+}
+static int orbit_trim(const int8_t *reps, const int8_t *full, char *keep) {
+  oR = R; one = 0;
+  int *removed = calloc(R, sizeof(int)); obestset = calloc(R, sizeof(int));
+  int forced = 0;
+  for (int j = 0; j < R; j++) for (int h = 1; h < NG; h++) if (!nsep(reps + j * ST, full + ((size_t) j * NG + h) * ST)) { if (!removed[j]) forced++; removed[j] = 1; break; }
+  for (int j = 0; j < R; j++) for (int k = 0; k < j; k++) {
+    if (removed[j] || removed[k]) continue;
+    for (int h = 0; h < NG; h++) if (!nsep(reps + j * ST, full + ((size_t) k * NG + h) * ST)) { if (one < (1 << 16)) { ou[one] = j; ov[one] = k; one++; } break; }
+  }
+  // greedy upper bound first, then exact search (bounded effort via obest)
+  obest = R + 1;
+  { int *g = calloc(R, sizeof(int)); memcpy(g, removed, sizeof(int) * R); int cnt = 0;
+    for (;;) { int *deg = calloc(R, sizeof(int)); int any = 0;
+      for (int i = 0; i < one; i++) if (!g[ou[i]] && !g[ov[i]]) { deg[ou[i]]++; deg[ov[i]]++; any = 1; }
+      if (!any) { free(deg); break; }
+      int w = 0; for (int j = 1; j < R; j++) if (deg[j] > deg[w]) w = j; g[w] = 1; cnt++; free(deg); }
+    obest = cnt + 1; memcpy(obestset, g, sizeof(int) * R); free(g);
+    obest = cnt; }
+  if (one <= 400) mvc(removed, 0);
+  int keptR = 0;
+  for (int j = 0; j < R; j++) { int k = !(removed[j] || obestset[j]); keptR += k; for (int h = 0; h < NG; h++) keep[(size_t) j * NG + h] = (char) k; }
+  (void) forced;
+  free(removed); free(obestset);
+  return keptR * NG;
+}
+
+// Greedy trim: drop max-degree rows of the conflict graph until none conflict.
+// Returns the number of rows kept; keep[] marks them.
+static int trim(const int8_t *full, int rows, char *keep) {
+  int *deg = calloc(rows, sizeof(int));
+  size_t cap = 1024, ne = 0; int *eu = malloc(sizeof(int) * cap), *ev = malloc(sizeof(int) * cap);
+  for (int a = 0; a < rows; a++) for (int b = 0; b < a; b++) {
+    if (nsep(full + (size_t) a * ST, full + (size_t) b * ST)) continue;
+    if (ne == cap) { cap *= 2; eu = realloc(eu, sizeof(int) * cap); ev = realloc(ev, sizeof(int) * cap); }
+    eu[ne] = a; ev[ne] = b; ne++; deg[a]++; deg[b]++;
+  }
+  for (int a = 0; a < rows; a++) keep[a] = 1;
+  int kept = rows;
+  for (;;) {
+    int w = -1; for (int a = 0; a < rows; a++) if (keep[a] && deg[a] > 0 && (w < 0 || deg[a] > deg[w])) w = a;
+    if (w < 0) break;
+    keep[w] = 0; kept--;
+    for (size_t e = 0; e < ne; e++) {
+      if (eu[e] == w && keep[ev[e]]) deg[ev[e]]--;
+      else if (ev[e] == w && keep[eu[e]]) deg[eu[e]]--;
+    }
+    deg[w] = 0;
+  }
+  free(deg); free(eu); free(ev);
+  return kept;
+}
+
+// Write the kept rows, after checking every kept pair. Returns min distance (99 if < 2 rows).
+static int write_trimmed(const int8_t *full, int rows, const char *keep, const char *fn) {
+  int mind = 99;
+  for (int a = 0; a < rows; a++) if (keep[a]) for (int b = 0; b < a; b++) if (keep[b]) {
+    int m = 0; const int8_t *x = full + (size_t) a * ST, *y = full + (size_t) b * ST;
+    for (int i = 0; i < n; i++) { int z = x[i] - y[i]; if (z < 0) z = -z; if (z > m) m = z; }
+    if (m < mind) mind = m;
+  }
+  if (mind >= d) {
+    FILE *f = fopen(fn, "w");
+    for (int a = 0; a < rows; a++) if (keep[a]) { for (int i = 0; i < n; i++) fprintf(f, "%d ", full[(size_t) a * ST + i]); fprintf(f, "\n"); }
+    fclose(f);
+  }
+  return mind;
+}
+
+// Copy the winner's best reps restricted to its active orbits into out; returns count.
+static int compact_best(const int8_t *all, const uint8_t *act, int Rall, int8_t *out) {
+  int k = 0;
+  for (int j = 0; j < Rall; j++) if (act[j]) memcpy(out + (size_t) k++ * ST, all + (size_t) j * ST, ST);
+  return k;
+}
+
 int main(int argc, char **argv) {
   if (argc < 4) { fprintf(stderr, "usage: %s n d seconds [--chains C] [--steps K] [--noise p] [--tenure lo span] [--stall S] [--seed X] [--threads t] [--device i]\n", argv[0]); return 1; }
   n = atoi(argv[1]); d = atoi(argv[2]); double secs = atof(argv[3]);
   int C = 56, steps = 200, tlo = 10, tspan = 10, stall = 20000, threads = 256, device = 0;
+  int nactive = 0; float preplace = 0.05f;
+  double ckpt_secs = 600; const char *group_opt = "auto", *resume = NULL;
   float noise = 0.01f; uint64_t seed = (uint64_t) time(NULL);
   for (int a = 4; a < argc; a++) {
     if (!strcmp(argv[a], "--chains")) C = atoi(argv[++a]);
@@ -86,22 +181,37 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[a], "--seed")) seed = strtoull(argv[++a], 0, 10);
     else if (!strcmp(argv[a], "--threads")) threads = atoi(argv[++a]);
     else if (!strcmp(argv[a], "--device")) device = atoi(argv[++a]);
+    else if (!strcmp(argv[a], "--ckpt")) ckpt_secs = atof(argv[++a]);
+    else if (!strcmp(argv[a], "--group")) group_opt = argv[++a];
+    else if (!strcmp(argv[a], "--active")) nactive = atoi(argv[++a]);
+    else if (!strcmp(argv[a], "--preplace")) preplace = (float) atof(argv[++a]);
+    else if (!strcmp(argv[a], "--resume")) resume = argv[++a];
     else { fprintf(stderr, "unknown option %s\n", argv[a]); return 1; }
   }
   rs = seed * 6364136223846793005ULL + 1442695040888963407ULL; if (!rs) rs = 1;
   if (n > ST || n > 20) { fprintf(stderr, "n too large\n"); return 1; }
-  // group (same as cpu/symclimb3.c)
-  NG = 0;
-  if (n == 2 * d) { int m = n - 1; for (int s = 0; s < 2; s++) for (int b = 0; b < m; b++) { gt[NG] = s; for (int x = 0; x < m; x++) gp[NG][x] = (((s ? -x : x) + b) % m + m) % m; gp[NG][m] = m; NG++; } }
-  else if (n == 2 * d - 1) { for (int b = 0; b < n; b++) { gt[NG] = 0; for (int x = 0; x < n; x++) gp[NG][x] = (x + b) % n; NG++; } }
-  else { fprintf(stderr, "need n = 2d or 2d-1\n"); return 1; }
+  // group: n = 2d -> x -> +-x+b mod (n-1) (with value reversal for "-");
+  // otherwise the first of Z_n, Z_(n-1) (last position fixed), trivial that acts freely.
+  if (n > 2 * d) { fprintf(stderr, "need n <= 2d\n"); return 1; }
   char *seen = calloc(1u << n, 1); int *masks = malloc(sizeof(int) * (1u << n));
-  R = 0;
-  for (int m = 0; m < (1 << n); m++) {
-    if (__builtin_popcount(m) != d || seen[m]) continue;
-    int os = 0; for (int h = 0; h < NG; h++) { int m2 = act_mask(h, m); if (!seen[m2]) { seen[m2] = 1; os++; } }
-    if (os != NG) { fprintf(stderr, "group not free\n"); return 1; }
-    masks[R++] = m;
+  int first = (n == 2 * d ? 0 : 1);
+  if (!strcmp(group_opt, "trivial")) first = 3;
+  for (int attempt = first; attempt <= 3; attempt++) {
+    NG = 0;
+    if (attempt == 0) { int m = n - 1; for (int s = 0; s < 2; s++) for (int b = 0; b < m; b++) { gt[NG] = s; for (int x = 0; x < m; x++) gp[NG][x] = (((s ? -x : x) + b) % m + m) % m; gp[NG][m] = m; NG++; } }
+    else if (attempt == 1) { for (int b = 0; b < n; b++) { gt[NG] = 0; for (int x = 0; x < n; x++) gp[NG][x] = (x + b) % n; NG++; } }
+    else if (attempt == 2) { int m = n - 1; for (int b = 0; b < m; b++) { gt[NG] = 0; for (int x = 0; x < m; x++) gp[NG][x] = (x + b) % m; gp[NG][m] = m; NG++; } }
+    else { gt[0] = 0; for (int x = 0; x < n; x++) gp[0][x] = x; NG = 1; }
+    if (NG > MAXG) continue;
+    memset(seen, 0, 1u << n);
+    R = 0; int ok = 1;
+    for (int m = 0; m < (1 << n) && ok; m++) {
+      if (__builtin_popcount(m) != d || seen[m]) continue;
+      int os = 0; for (int h = 0; h < NG; h++) { int m2 = act_mask(h, m); if (!seen[m2]) { seen[m2] = 1; os++; } }
+      if (os != NG) ok = 0;
+      masks[R++] = m;
+    }
+    if (ok) { printf("group: %s\n", attempt == 0 ? "dihedral+reversal" : attempt == 1 ? "Z_n" : attempt == 2 ? "Z_(n-1)" : "trivial"); break; }
   }
   int rows = R * NG;
   printf("P(%d,%d): |G|=%d reps=%d rows=%d chains=%d\n", n, d, NG, R, rows, C); fflush(stdout);
@@ -110,15 +220,39 @@ int main(int argc, char **argv) {
   size_t repB = (size_t) C * R * ST, imgB = (size_t) C * rows * ST;
   int8_t *rep = calloc(repB, 1), *img = calloc(imgB, 1);
   int *conf = calloc((size_t) C * R, sizeof(int)), *T = calloc(C, sizeof(int)), *best = calloc(C, sizeof(int));
+  if (nactive <= 0 || nactive > R) nactive = R;
+  if (nactive < R) printf("subset mode: %d of %d orbits active (%d rows)\n", nactive, R, nactive * NG);
+  uint8_t *active = calloc((size_t) C * R, 1);
   uint64_t *rng = malloc(sizeof(uint64_t) * C);
   for (int c = 0; c < C; c++) {
     int8_t *rp = rep + (size_t) c * R * ST, *ip = img + (size_t) c * rows * ST;
     for (int j = 0; j < R; j++) random_fill(masks[j], rp + j * ST);
+    if (resume) {
+      static int *rep_of = NULL;
+      if (!rep_of) { rep_of = malloc(sizeof(int) * (1u << n)); for (int m = 0; m < (1 << n); m++) rep_of[m] = -1; for (int j = 0; j < R; j++) rep_of[masks[j]] = j; }
+      FILE *f = fopen(resume, "r"); if (!f) { perror(resume); return 1; }
+      int8_t row[ST]; int got = 0;
+      for (;;) {
+        int ok = 1;
+        for (int i = 0; i < n; i++) { int v; if (fscanf(f, "%d", &v) != 1) { ok = 0; break; } row[i] = (int8_t) v; }
+        if (!ok) break;
+        int m = 0; for (int i = 0; i < n; i++) if (row[i] < d) m |= 1 << i;
+        if (rep_of[m] >= 0) { memcpy(rp + rep_of[m] * ST, row, n); got++; }
+      }
+      fclose(f);
+      if (c == 0) printf("resumed %d representative rows from %s\n", got, resume);
+    }
     for (int j = 0; j < R; j++) for (int h = 0; h < NG; h++) act(h, rp + j * ST, ip + ((size_t) j * NG + h) * ST);
+    uint8_t *ac = active + (size_t) c * R;
+    { int *perm = malloc(sizeof(int) * R); for (int j = 0; j < R; j++) perm[j] = j;
+      for (int j = R - 1; j > 0; j--) { int k = xr() % (j + 1); int t = perm[j]; perm[j] = perm[k]; perm[k] = t; }
+      for (int q = 0; q < nactive; q++) { ac[perm[q]] = 1; }
+      free(perm); }
     int tot = 0;
     for (int j = 0; j < R; j++) {
+      if (!ac[j]) continue;
       int cnt = 0;
-      for (int y = 0; y < rows; y++) { if (y == j * NG) continue; if (!nsep(rp + j * ST, ip + (size_t) y * ST)) cnt++; }
+      for (int y = 0; y < rows; y++) { if (y == j * NG || !ac[y / NG]) continue; if (!nsep(rp + j * ST, ip + (size_t) y * ST)) cnt++; }
       conf[(size_t) c * R + j] = cnt; tot += cnt;
     }
     T[c] = tot; best[c] = tot; rng[c] = xr() | 1;
@@ -129,7 +263,7 @@ int main(int argc, char **argv) {
   printf("device: %s (sm_%u, %.1f GB)\n", cu.name, cu.arch, cu.total_bytes / 1e9); fflush(stdout);
   void *fn = kh_cuda_function(&cu, "tabu_steps");
   if (!fn) { fprintf(stderr, "kernel not found\n"); return 1; }
-  kh_dptr_t d_gt, d_gp, d_rep, d_img, d_conf, d_T, d_best, d_brep, d_sc, d_tabu, d_rng, d_iter, d_li, d_moves;
+  kh_dptr_t d_gt, d_gp, d_rep, d_img, d_conf, d_T, d_best, d_brep, d_sc, d_tabu, d_rng, d_iter, d_li, d_moves, d_act, d_bact;
   int hgp[MAXG * ST] = {0}; for (int h = 0; h < NG; h++) for (int i = 0; i < n; i++) hgp[h * ST + i] = gp[h][i];
   CK(cu.cuMemAlloc(&d_gt, sizeof(int) * MAXG)); CK(cu.cuMemcpyHtoD(d_gt, gt, sizeof(int) * MAXG));
   CK(cu.cuMemAlloc(&d_gp, sizeof(hgp))); CK(cu.cuMemcpyHtoD(d_gp, hgp, sizeof(hgp)));
@@ -145,14 +279,18 @@ int main(int argc, char **argv) {
   CK(cu.cuMemAlloc(&d_iter, sizeof(int) * C)); CK(cu.cuMemsetD32(d_iter, 0, C));
   CK(cu.cuMemAlloc(&d_li, sizeof(int) * C)); CK(cu.cuMemsetD32(d_li, 0, C));
   CK(cu.cuMemAlloc(&d_moves, sizeof(int) * C)); CK(cu.cuMemsetD32(d_moves, 0, C));
+  CK(cu.cuMemAlloc(&d_act, (size_t) C * R)); CK(cu.cuMemcpyHtoD(d_act, active, (size_t) C * R));
+  CK(cu.cuMemAlloc(&d_bact, (size_t) C * R)); CK(cu.cuMemcpyHtoD(d_bact, active, (size_t) C * R));
 
-  Params P = { n, d, R, NG, C, steps, noise, tlo, tspan, stall };
-  void *args[] = { &P, &d_gt, &d_gp, &d_rep, &d_img, &d_conf, &d_T, &d_best, &d_brep, &d_sc, &d_tabu, &d_rng, &d_iter, &d_li, &d_moves };
+  Params P = { n, d, R, NG, C, steps, noise, tlo, tspan, stall, nactive < R ? preplace : 0.0f };
+  void *args[] = { &P, &d_gt, &d_gp, &d_rep, &d_img, &d_conf, &d_T, &d_best, &d_brep, &d_sc, &d_tabu, &d_rng, &d_iter, &d_li, &d_moves, &d_act, &d_bact };
   double t0 = now(), last_print = t0, last_ckpt = t0;
   int8_t *full = malloc((size_t) rows * ST);
-  int8_t *brep = malloc((size_t) R * ST);
+  int8_t *brep = malloc((size_t) R * ST), *ball = malloc((size_t) R * ST);
+  uint8_t *bact = malloc(R); int Rall = R;
   long long launches = 0;
-  int overall = 1 << 30, winner = -1;
+  int overall = 1 << 30, winner = -1, best_trim = 0;
+  double ckpt_every = ckpt_secs;
   while (now() - t0 < secs) {
     CK(kh_cuda_launch(&cu, fn, C, threads, args));
     CK(cu.cuCtxSynchronize());
@@ -169,24 +307,46 @@ int main(int argc, char **argv) {
       printf("[%.0fs] steps/chain=%lld best=%d (chain %d) mean current=%.1f\n", t - t0, launches * steps, overall, winner, (double) sumT / C);
       fflush(stdout);
     }
-    if (t - last_ckpt > 600) {
+    if (t - last_ckpt > ckpt_every) {
       last_ckpt = t;
-      CK(cu.cuMemcpyDtoH(brep, d_brep + (size_t) winner * R * ST, (size_t) R * ST));
+      CK(cu.cuMemcpyDtoH(ball, d_brep + (size_t) winner * Rall * ST, (size_t) Rall * ST));
+      CK(cu.cuMemcpyDtoH(bact, d_bact + (size_t) winner * Rall, (size_t) Rall));
+      R = compact_best(ball, bact, Rall, brep); rows = R * NG;
       for (int j = 0; j < R; j++) for (int h = 0; h < NG; h++) act(h, brep + j * ST, full + ((size_t) j * NG + h) * ST);
       char fnm[64]; sprintf(fnm, "pa_%d_%d_gpu_ckpt.txt", n, d); write_rows(fnm, full);
+      char *keep = malloc(rows); int kept = trim(full, rows, keep);
+      if (NG > 1) { char *k2 = malloc(rows); int kept2 = orbit_trim(brep, full, k2); if (kept2 > kept) { kept = kept2; memcpy(keep, k2, rows); } free(k2); }
+      if (kept > best_trim) {
+        sprintf(fnm, "pa_%d_%d_trim_%d.txt", n, d, kept);
+        int md = write_trimmed(full, rows, keep, fnm);
+        printf("[%.0fs] trimmed best array to %d rows (min distance %d) -> %s\n", t - t0, kept, md, md >= d ? fnm : "NOT WRITTEN");
+        if (md >= d) best_trim = kept;
+        fflush(stdout);
+      }
+      free(keep);
+      R = Rall; rows = R * NG;
     }
   }
   double el = now() - t0;
   printf("finished: best=%d after %.0fs, %lld steps per chain (%.0f steps/s total)\n", overall, el, launches * steps, launches * steps * (double) C / el);
-  CK(cu.cuMemcpyDtoH(brep, d_brep + (size_t) winner * R * ST, (size_t) R * ST));
+  CK(cu.cuMemcpyDtoH(ball, d_brep + (size_t) winner * Rall * ST, (size_t) Rall * ST));
+  CK(cu.cuMemcpyDtoH(bact, d_bact + (size_t) winner * Rall, (size_t) Rall));
+  R = compact_best(ball, bact, Rall, brep); rows = R * NG;
   int md = verify(brep, full);
   char fnm[64];
   if (overall == 0) {
     printf("verification: min distance %d over %d rows -> %s\n", md, rows, md >= d ? "VALID" : "INVALID");
-    sprintf(fnm, md >= d ? "pa_%d_%d_gpu.txt" : "pa_%d_%d_gpu_bad.txt", n, d);
+    if (md >= d) sprintf(fnm, "pa_%d_%d_gpu_%d.txt", n, d, rows); else sprintf(fnm, "pa_%d_%d_gpu_bad.txt", n, d);
   } else sprintf(fnm, "pa_%d_%d_gpu_best.txt", n, d);
   write_rows(fnm, full);
   printf("wrote %s\n", fnm);
+  if (overall > 0) {
+    char *keep = malloc(rows); int kept = trim(full, rows, keep);
+    if (NG > 1) { char *k2 = malloc(rows); int kept2 = orbit_trim(brep, full, k2); if (kept2 > kept) { kept = kept2; memcpy(keep, k2, rows); } free(k2); }
+    sprintf(fnm, "pa_%d_%d_trim_%d.txt", n, d, kept);
+    int mdt = write_trimmed(full, rows, keep, fnm);
+    printf("final trim: %d of %d rows, min distance %d -> %s\n", kept, rows, mdt, mdt >= d ? fnm : "NOT WRITTEN");
+  }
   kh_cuda_close(&cu);
   return 0;
 }

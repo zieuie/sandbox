@@ -24,6 +24,7 @@ struct Params {
   float noise;         // probability of a random swap instead of the best
   int tenure_lo, tenure_span;
   int stall;           // steps without improvement before a kick
+  float p_replace;     // probability of trying an orbit replacement (subset mode)
 };
 
 __device__ __forceinline__ int far_(int x, int y, int d) { int z = x - y; return z >= d || -z >= d; }
@@ -33,7 +34,8 @@ extern "C" __global__ void tabu_steps(
     Params P,
     const int *gt, const int *gp,        // group: gt[NG], gp[NG*ST]
     i8 *rep, i8 *img, int *conf, int *T, int *best, i8 *best_rep,
-    u8 *sc, int *tabu, u64 *rng, int *iter, int *last_imp, int *moves_done)
+    u8 *sc, int *tabu, u64 *rng, int *iter, int *last_imp, int *moves_done,
+    u8 *active, u8 *best_active)
 {
   const int c = blockIdx.x, tid = threadIdx.x, nt = blockDim.x;
   const int n = P.n, d = P.d, R = P.R, NG = P.NG, rows = R * NG;
@@ -42,8 +44,9 @@ extern "C" __global__ void tabu_steps(
   int *cf = conf + (size_t) c * R;
   u8 *scp = sc + (size_t) c * rows;
   int *tb = tabu + (size_t) c * R * MAXS;
+  u8 *act = active + (size_t) c * R;
 
-  __shared__ int j, S, nl, choice, oldself, newconf_j, Tsh, done;
+  __shared__ int j, S, nl, choice, oldself, newconf_j, Tsh, done, do_rep, newk, crossj, crossn, selfn, rep_ok;
   __shared__ int pa[MAXS], pb[MAXS], delta[MAXS];
   __shared__ i8 rj[ST];
   __shared__ u64 rs;
@@ -61,7 +64,7 @@ extern "C" __global__ void tabu_steps(
       else {
         int s0 = (int) (rnd(&rs) % (u64) R);
         int jj = s0;
-        for (int q = 0; q < R; q++) { int k = (s0 + q) % R; if (cf[k] > 0) { jj = k; break; } }
+        for (int q = 0; q < R; q++) { int k = (s0 + q) % R; if (act[k] && cf[k] > 0) { jj = k; break; } }
         j = jj;
         int lo[ST], hi[ST], nh = 0; nl = 0;
         for (int i = 0; i < n; i++) { if (rp[jj * ST + i] < d) lo[nl++] = i; else hi[nh++] = i; }
@@ -69,17 +72,75 @@ extern "C" __global__ void tabu_steps(
         for (int a = 0; a < nl; a++) for (int b = a + 1; b < nl; b++) { pa[s] = lo[a]; pb[s] = lo[b]; s++; }
         for (int a = 0; a < nh; a++) for (int b = a + 1; b < nh; b++) { pa[s] = hi[a]; pb[s] = hi[b]; s++; }
         S = s; oldself = 0; newconf_j = 0;
+        do_rep = 0; crossj = 0; crossn = 0; selfn = 0;
+        if (P.p_replace > 0.0f && (rnd(&rs) % 1000000) < (u64) (P.p_replace * 1000000.0f)) {
+          int s1 = (int) (rnd(&rs) % (u64) R);
+          for (int q = 0; q < R; q++) { int k = (s1 + q) % R; if (!act[k]) { newk = k; do_rep = 1; break; } }
+        }
         for (int i = 0; i < n; i++) rj[i] = rp[jj * ST + i];
       }
     }
     __syncthreads();
     if (done) break;
+    if (do_rep) {
+      // orbit replacement: deactivate j, activate newk (its stored row and images)
+      const i8 *rn = rp + newk * ST;
+      int cj = 0, cn = 0, sn = 0;
+      for (int y = tid; y < rows; y += nt) {
+        int k = y / NG;
+        if (k == j || k == newk || !act[k]) continue;
+        const i8 *o = ip + (size_t) y * ST;
+        int sj = 0, s2 = 0;
+        for (int i = 0; i < n; i++) { sj |= far_(rj[i], o[i], d); s2 |= far_(rn[i], o[i], d); }
+        cj += !sj; cn += !s2;
+      }
+      for (int h = 1 + tid; h < NG; h += nt) {
+        const i8 *o = ip + ((size_t) newk * NG + h) * ST;
+        int s2 = 0; for (int i = 0; i < n; i++) s2 |= far_(rn[i], o[i], d);
+        sn += !s2;
+      }
+      atomicAdd(&crossj, cj); atomicAdd(&crossn, cn); atomicAdd(&selfn, sn);
+      __syncthreads();
+      if (tid == 0) {
+        int selfj = cf[j] - crossj;
+        int dl = (2 * crossn + selfn) - (2 * crossj + selfj);
+        rep_ok = dl <= 0 || (rnd(&rs) % 1000000) < (u64) (P.noise * 1000000.0f);
+        if (rep_ok) Tsh += dl;
+      }
+      __syncthreads();
+      if (rep_ok) {
+        for (int y = tid; y < rows; y += nt) {
+          int k = y / NG;
+          if (k == j || k == newk || !act[k]) continue;
+          const i8 *o = ip + (size_t) y * ST;
+          int sj = 0, s2 = 0;
+          for (int i = 0; i < n; i++) { sj |= far_(rj[i], o[i], d); s2 |= far_(rn[i], o[i], d); }
+          int dc = (!s2) - (!sj);
+          if (dc) atomicAdd(&cf[k], dc);
+        }
+        __syncthreads();
+        if (tid == 0) {
+          act[j] = 0; act[newk] = 1; cf[j] = 0; cf[newk] = crossn + selfn;
+          iter[c]++;
+          if (Tsh < best[c]) { best[c] = Tsh; last_imp[c] = iter[c]; done = -1; }
+        }
+        __syncthreads();
+        if (done == -1) {
+          for (int x = tid; x < R * ST; x += nt) best_rep[(size_t) c * R * ST + x] = rp[x];
+          for (int x = tid; x < R; x += nt) best_active[(size_t) c * R + x] = act[x];
+          __syncthreads();
+          if (tid == 0) done = 0;
+        }
+      }
+      __syncthreads();
+      continue;
+    }
     for (int s = tid; s < S; s += nt) delta[s] = 0;
 
     // 2. separation counts of rep j against every other-orbit row
     for (int y = tid; y < rows; y += nt) {
       int k = y / NG;
-      if (k == j) continue;
+      if (k == j || !act[k]) continue;
       const i8 *o = ip + (size_t) y * ST;
       int cnt = 0;
       for (int i = 0; i < n; i++) cnt += far_(rj[i], o[i], d);
@@ -96,7 +157,7 @@ extern "C" __global__ void tabu_steps(
         int acc = 0;
         for (int y = part; y < rows; y += groups) {
           int k = y / NG;
-          if (k == j) continue;
+          if (k == j || !act[k]) continue;
           const i8 *o = ip + (size_t) y * ST;
           int old = scp[y];
           int nw = old - far_(va, o[a], d) - far_(vb, o[b], d) + far_(vb, o[a], d) + far_(va, o[b], d);
@@ -157,7 +218,7 @@ extern "C" __global__ void tabu_steps(
       int mine = 0;
       for (int y = tid; y < rows; y += nt) {
         int k = y / NG;
-        if (k == j) continue;
+        if (k == j || !act[k]) continue;
         const i8 *o = ip + (size_t) y * ST;
         int old = scp[y];
         int nw = old - far_(va, o[a], d) - far_(vb, o[b], d) + far_(vb, o[a], d) + far_(va, o[b], d);
@@ -198,6 +259,7 @@ extern "C" __global__ void tabu_steps(
     __syncthreads();
     if (done == -1) {
       for (int x = tid; x < R * ST; x += nt) best_rep[(size_t) c * R * ST + x] = rp[x];
+      for (int x = tid; x < R; x += nt) best_active[(size_t) c * R + x] = act[x];
       __syncthreads();
       if (tid == 0) done = 0;
       __syncthreads();
