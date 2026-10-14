@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -13,6 +14,12 @@ from . import checkpoints, distributed, scheduling
 from .tiles import memory_bytes, tile
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+# Tiles past every GPU's memory (167^3 and 173^3's last ones: 6-7.3 GB against the largest card's 5.9)
+# run only on CPUs, 40-55 h on two cores; give them a wider team when the lease has the cores free.
+CPU_ONLY_BYTES = int(os.environ.get("KH_CPU_ONLY_BYTES", 5_900_000_000))
+CPU_ONLY_CPUS = int(os.environ.get("KH_CPU_ONLY_CPUS", 6))
 
 
 class DPAdapter(SolverAdapter):
@@ -195,7 +202,10 @@ class DPAdapter(SolverAdapter):
         # Input fetches and durable publication hold the lease but use little CPU.
         # Keep several independent tiles in flight per host by default; callers
         # can still opt into a wider team for a measured compute-bound field.
-        return min(available, stacks, int(arguments.get("max_cpus", 2)))
+        cap = int(arguments.get("max_cpus", 2))
+        if "max_cpus" not in arguments and (self.gpu_need(specification) or 0) > CPU_ONLY_BYTES:
+            cap = CPU_ONLY_CPUS   # no GPU holds it: a tile of days on two cores gets a wider team
+        return min(available, stacks, cap)
 
     def initialize(self, connection):
         """Initialize tile state, ownership, and repair legacy queued root transitions."""

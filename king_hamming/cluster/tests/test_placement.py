@@ -33,6 +33,20 @@ def candidate(row: int, column: int, root: str = "root", priority: int = 0, phas
                 "parent_run_id": root, "row": row, "column": column}})}
 
 
+class CpuWidthTests(unittest.TestCase):
+    def test_tiles_no_gpu_holds_get_a_wider_team(self) -> None:
+        from dp_solver.adapter import DPAdapter
+        adapter = DPAdapter()
+
+        def spec(row, column, **extra):
+            return {"program": "dp_tile", "arguments": {"p": 173, "r": 3, "row": row, "column": column,
+                                                         "tile_side": 2048, "max_tile_bytes": 8 * 1024**3, **extra}}
+        self.assertEqual(adapter.cpu_width(spec(13, 13), 8), 6)      # 6.75 GB: past every card
+        self.assertEqual(adapter.cpu_width(spec(13, 13), 4), 4)
+        self.assertEqual(adapter.cpu_width(spec(0, 0), 8), 2)        # fits a GPU: unchanged
+        self.assertEqual(adapter.cpu_width(spec(13, 13, max_cpus=3), 8), 3)   # an explicit cap wins
+
+
 class OrderTests(unittest.TestCase):
     def test_lowest_diagonal_first_within_the_leaders_own_ties(self) -> None:
         tiles = [candidate(3, 3, created=1, estimate=0.5), candidate(0, 5, created=2), candidate(2, 1, created=3),
