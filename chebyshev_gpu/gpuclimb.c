@@ -302,13 +302,7 @@ int main(int argc, char **argv) {
       memcpy(ac, st_act + (size_t) sc_ * R, R);
       for (int j = 0; j < R; j++) for (int h = 0; h < NG; h++) act(h, rp + j * ST, ip + ((size_t) j * NG + h) * ST);
     }
-    int tot = 0;
-    for (int j = 0; j < R; j++) {
-      if (!ac[j]) continue;
-      int cnt = 0;
-      for (int y = 0; y < rows; y++) { if (y == j * NG || !ac[y / NG]) continue; if (!nsep(rp + j * ST, ip + (size_t) y * ST)) cnt++; }
-      conf[(size_t) c * R + j] = cnt; tot += cnt;
-    }
+    int tot = 0; // computed on the GPU (init_conf)
     T[c] = tot; best[c] = tot; rng[c] = xr() | 1;
   }
 
@@ -337,6 +331,12 @@ int main(int argc, char **argv) {
   CK(cu.cuMemAlloc(&d_bact, (size_t) C * R)); CK(cu.cuMemcpyHtoD(d_bact, active, (size_t) C * R));
 
   Params P = { n, d, R, NG, C, steps, noise, tlo, tspan, stall, nactive < R ? preplace : 0.0f };
+  { void *fi = kh_cuda_function(&cu, "init_conf"); if (!fi) { fprintf(stderr, "init_conf not found\n"); return 1; }
+    void *ia[] = { &P, &d_rep, &d_img, &d_act, &d_conf, &d_T, &d_best };
+    CK(kh_cuda_launch(&cu, fi, C, threads, ia)); CK(cu.cuCtxSynchronize());
+    CK(cu.cuMemcpyDtoH(best, d_best, sizeof(int) * C));
+    int b0 = best[0]; for (int c = 1; c < C; c++) if (best[c] < b0) b0 = best[c];
+    printf("initial conflicts: best chain %d\n", b0); fflush(stdout); }
   void *args[] = { &P, &d_gt, &d_gp, &d_rep, &d_img, &d_conf, &d_T, &d_best, &d_brep, &d_sc, &d_tabu, &d_rng, &d_iter, &d_li, &d_moves, &d_act, &d_bact };
   double t0 = now(), last_print = t0, last_ckpt = t0;
   int8_t *full = malloc((size_t) rows * ST);
@@ -380,8 +380,8 @@ int main(int argc, char **argv) {
       R = compact_best(ball, bact, Rall, brep); rows = R * NG;
       for (int j = 0; j < R; j++) for (int h = 0; h < NG; h++) act(h, brep + j * ST, full + ((size_t) j * NG + h) * ST);
       char fnm[64]; sprintf(fnm, "pa_%d_%d_gpu_ckpt.txt", n, d); write_rows(fnm, full);
-      char *keep = malloc(rows); int kept = trim(full, rows, keep);
-      if (NG > 1) { char *k2 = malloc(rows); int kept2 = orbit_trim(brep, full, k2); if (kept2 > kept) { kept = kept2; memcpy(keep, k2, rows); } free(k2); }
+      char *keep = malloc(rows); int kept = rows <= 8000 ? trim(full, rows, keep) : 0;
+      if (NG > 1 && rows <= 8000) { char *k2 = malloc(rows); int kept2 = orbit_trim(brep, full, k2); if (kept2 > kept) { kept = kept2; memcpy(keep, k2, rows); } free(k2); }
       if (kept > best_trim) {
         sprintf(fnm, "pa_%d_%d_trim_%d.txt", n, d, kept);
         int md = write_trimmed(full, rows, keep, fnm);
@@ -409,7 +409,7 @@ int main(int argc, char **argv) {
   } else sprintf(fnm, "pa_%d_%d_gpu_best.txt", n, d);
   write_rows(fnm, full);
   printf("wrote %s\n", fnm);
-  if (overall > 0 && !stop_requested) {
+  if (overall > 0 && !stop_requested && rows <= 8000) {
     char *keep = malloc(rows); int kept = trim(full, rows, keep);
     if (NG > 1) { char *k2 = malloc(rows); int kept2 = orbit_trim(brep, full, k2); if (kept2 > kept) { kept = kept2; memcpy(keep, k2, rows); } free(k2); }
     sprintf(fnm, "pa_%d_%d_trim_%d.txt", n, d, kept);

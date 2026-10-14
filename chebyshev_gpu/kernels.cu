@@ -267,3 +267,29 @@ extern "C" __global__ void tabu_steps(
   }
   if (tid == 0) { rng[c] = rs; T[c] = Tsh; }
 }
+
+// Initial conflict counts: conf[c][j] = rows (k,h) != (j,e) of active orbits
+// not separated from active rep j; T[c] = sum.  One block per chain.
+extern "C" __global__ void init_conf(Params P, const i8 *rep, const i8 *img, const u8 *active, int *conf, int *T, int *best)
+{
+  const int c = blockIdx.x, tid = threadIdx.x, nt = blockDim.x;
+  const int n = P.n, d = P.d, R = P.R, NG = P.NG, rows = R * NG;
+  const i8 *rp = rep + (size_t) c * R * ST;
+  const i8 *ip = img + (size_t) c * rows * ST;
+  const u8 *act = active + (size_t) c * R;
+  int *cf = conf + (size_t) c * R;
+  __shared__ int tot;
+  if (tid == 0) tot = 0;
+  for (int j = tid; j < R; j += nt) cf[j] = 0;
+  __syncthreads();
+  for (long long t = tid; t < (long long) R * rows; t += nt) {
+    int j = (int) (t / rows), y = (int) (t % rows);
+    if (!act[j] || !act[y / NG] || y == j * NG) continue;
+    const i8 *a = rp + j * ST, *o = ip + (size_t) y * ST;
+    int s = 0;
+    for (int i = 0; i < n && !s; i++) s = far_(a[i], o[i], d);
+    if (!s) { atomicAdd(&cf[j], 1); atomicAdd(&tot, 1); }
+  }
+  __syncthreads();
+  if (tid == 0) { T[c] = tot; best[c] = tot; }
+}
