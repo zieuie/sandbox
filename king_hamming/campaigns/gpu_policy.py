@@ -16,6 +16,10 @@ DEFAULTS = {"gpu_matching": True, "gpu_matching_threads": 4, "gpu_block_matching
 # all of it for fewer row passes, and merlin also runs the leader, dashboard and feeder.
 WIDE_HOST_FRACTION = 0.75
 DEFAULT_MINIMUM_FREE_BYTES = 20 * 1024**3   # the feeder's minimum_free_bytes default
+# A large-result drive (merlin's /mnt/khdata) holds only certificates, so the system drive's 20 GiB
+# free-space floor is not needed there: 3^23's 197 GiB certificate plus 20 GiB wouldn't fit its
+# 214 GiB (2026-10-14), plus 5 GiB does.
+LARGE_DRIVE_FLOOR_BYTES = 5 * 1024**3
 
 
 def certificate_bytes(dp: dict) -> int:
@@ -86,6 +90,12 @@ def wide_usable(node: dict) -> int:
     return int((ram - HOST_RESERVE_BYTES) * WIDE_HOST_FRACTION) if ram > HOST_RESERVE_BYTES else 0
 
 
+def wide_disk_fits(node: dict, needed: int, floor: int) -> bool:
+    """Whether a certificate of needed bytes fits node's system drive with floor to spare, or its large drive."""
+    return (int(node.get("storage_free_bytes") or 0) >= needed + floor or
+            int(node.get("large_free_bytes") or 0) >= needed + min(floor, LARGE_DRIVE_FLOOR_BYTES))
+
+
 def wide_disk(node: dict) -> int:
     """Disk a wide matching certificate can use on node: its large-result drive if it has one."""
     return max(int(node.get("storage_free_bytes") or 0), int(node.get("large_free_bytes") or 0))
@@ -115,8 +125,8 @@ def wide_plan(dp: dict, settings: dict, nodes: list[dict], threads: int) -> dict
         # The certificate is written in place on this host's disk (206 GB for 7^13): it must fit
         # with the feeder's free-space floor to spare, or the run would fill the disk mid-way. A
         # host with a large-result drive (merlin's /mnt/khdata) writes it there instead.
-        if wide_disk(node) < certificate_bytes(dp) + int(
-                settings.get("minimum_free_bytes", DEFAULT_MINIMUM_FREE_BYTES)):
+        if not wide_disk_fits(node, certificate_bytes(dp),
+                              int(settings.get("minimum_free_bytes", DEFAULT_MINIMUM_FREE_BYTES))):
             continue
         hosts.append((usable, wide_usable(node), node["node_name"]))
     if not hosts:

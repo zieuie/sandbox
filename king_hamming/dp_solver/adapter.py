@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Tiles past every GPU's memory (167^3 and 173^3's last ones: 6-7.3 GB against the largest card's 5.9)
 # run only on CPUs, 40-55 h on two cores; give them a wider team when the lease has the cores free.
+# The 32-bit GPU kernel (gpu_dp_solver/src/main.c "narrow") is used only on cards with at least this much
+# memory: it was tested on the RTX 3060, and the P600s (1.7 GB) don't need it for the tiles that matter.
+NARROW_MIN_DEVICE_BYTES = 3_000_000_000
 CPU_ONLY_BYTES = int(os.environ.get("KH_CPU_ONLY_BYTES", 5_900_000_000))
 CPU_ONLY_CPUS = int(os.environ.get("KH_CPU_ONLY_CPUS", 6))
 
@@ -144,8 +147,8 @@ class DPAdapter(SolverAdapter):
         """
         return specification["program"] == "dp_tile" and not distributed.cpu_fallback_allowed(connection)
 
-    def gpu_need(self, specification):
-        """GPU memory the tile needs (distributed_solver.gpu_fits' footprint), or None if not a DP tile."""
+    def gpu_needs(self, specification):
+        """(64-bit, 32-bit) GPU memory the tile needs (distributed_solver.gpu_fits' footprints), or None."""
         if specification["program"] != "dp_tile":
             return None
         arguments = specification["arguments"]
@@ -155,15 +158,25 @@ class DPAdapter(SolverAdapter):
         except (KeyError, ValueError, TypeError):
             return None
         fixed = arguments["p"] ** 3 * 24 + 32 * 1024**2
-        # 64-bit values, or 32-bit ones (the GPU tile program's narrow kernel) when the halo is small enough.
-        return min(target.halo_bytes + target.value_bytes // 2 + fixed,
-                   target.halo_bytes // 2 + target.value_bytes // 2 + fixed)
+        return (target.halo_bytes + target.value_bytes // 2 + fixed,
+                target.halo_bytes // 2 + target.value_bytes // 2 + fixed)
+
+    def gpu_need(self, specification):
+        """Smallest GPU memory that can hold the tile (the narrow form counts), or None if not a DP tile."""
+        needs = self.gpu_needs(specification)
+        return None if needs is None else min(needs)
+
+    @staticmethod
+    def card_holds(capacity, needs) -> bool:
+        """Whether a card with this usable memory holds a tile: in 64 bits, or in 32 on a big enough card."""
+        return capacity >= needs[0] or (capacity >= NARROW_MIN_DEVICE_BYTES and capacity >= needs[1])
 
     def fits_gpu(self, node, specification) -> bool:
         """Whether node's largest GPU holds the tile (True for anything that isn't a DP tile)."""
         import gpus
-        need = self.gpu_need(specification)
-        return need is None or max([gpus.usable_bytes(item) for item in gpus.from_record(node)] or [0]) >= need
+        needs = self.gpu_needs(specification)
+        return needs is None or self.card_holds(
+            max([gpus.usable_bytes(item) for item in gpus.from_record(node)] or [0]), needs)
 
     def gpu_misfit(self, connection, node, specification, alive_after):
         """True if this tile can't fit node's GPU while some live, undrained node's GPU can hold it.
@@ -173,20 +186,20 @@ class DPAdapter(SolverAdapter):
         about 2.6 GB, past a P600's 1.5 GB, and one ran 75+ minutes on two cores (about 5 h in
         all) where merlin's GPU takes 2-3 minutes. With nowhere it fits, nothing changes."""
         import gpus
-        need = self.gpu_need(specification)
-        if need is None:
+        needs = self.gpu_needs(specification)
+        if needs is None:
             return False
 
         def largest(row):
             return max([gpus.usable_bytes(item) for item in gpus.from_record(row)] or [0])
 
-        if largest(node) >= need:
+        if self.card_holds(largest(node), needs):
             return False
         for row in connection.execute(
                 "SELECT gpus_json FROM nodes n WHERE compute_enabled=1 AND last_heartbeat>? "
                 "AND NOT EXISTS (SELECT 1 FROM node_dispatch_pauses pause WHERE pause.node_name=n.node_name)",
                 (alive_after,)):
-            if largest(row) >= need:
+            if self.card_holds(largest(row), needs):
                 return True
         return False
 

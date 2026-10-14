@@ -333,7 +333,7 @@ def gpu_fits(p: int, rectangle, device: int = 0) -> bool:
         return True
     # Too big for the card in 64-bit values: the GPU tile program runs it in 32-bit values when its
     # halo is that small (it checks, and exits 5 so the CPUs take it otherwise).
-    return (os.environ.get("KH_GPU_DP_NARROW")!="0" and
+    return (os.environ.get("KH_GPU_DP_NARROW")!="0" and limit>=3_000_000_000 and
             rectangle.halo_bytes//2+rectangle.value_bytes//2+p**3*24+32*1024**2<=limit)
 
 
