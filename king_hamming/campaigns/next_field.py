@@ -100,8 +100,10 @@ def gpu_need(p: int, r: int, side: int) -> int:
     from dp_solver.adapter import tile
     per_side = -(-scheduling.dp_estimate({"arguments": {"p": p, "r": r}})["budget"] // side)
     spots = {0, per_side // 2, max(0, per_side - 2), per_side - 1}
-    return max(tile(p, r, side, row, column).halo_bytes + tile(p, r, side, row, column).value_bytes // 2
-               + p ** 3 * 24 + 32 * 1024 ** 2 for row in spots for column in spots)
+    # 64-bit values, or the GPU tile program's 32-bit ones when the halo is small enough (173^3's is).
+    return max(min(tile(p, r, side, row, column).halo_bytes, tile(p, r, side, row, column).halo_bytes // 2)
+               + tile(p, r, side, row, column).value_bytes // 2 + p ** 3 * 24 + 32 * 1024 ** 2
+               for row in spots for column in spots)
 
 
 CPU_TILE_FACTOR = 2.6   # measured: 167^3's 2048-side tiles take 40+ h on two cores, 2.6x the raw 6.5e-9 s a visit
@@ -118,7 +120,7 @@ def cpu_tail_hours(p: int, r: int, side: int, biggest_gpu: int) -> float:
     for row in range(per_side):
         for column in range(per_side):
             target = tile(p, r, side, row, column)
-            if target.halo_bytes + target.value_bytes // 2 + p ** 3 * 24 + 32 * 1024 ** 2 > biggest_gpu:
+            if target.halo_bytes // 2 + target.value_bytes // 2 + p ** 3 * 24 + 32 * 1024 ** 2 > biggest_gpu:
                 waves.add(row + column)
     return len(waves) * CPU_TILE_FACTOR * side * side * p ** 3 * 6.5e-9 / 2 / 3600
 
