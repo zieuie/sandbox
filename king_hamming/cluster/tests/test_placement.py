@@ -41,10 +41,16 @@ class CpuWidthTests(unittest.TestCase):
         def spec(row, column, **extra):
             return {"program": "dp_tile", "arguments": {"p": 173, "r": 3, "row": row, "column": column,
                                                          "tile_side": 2048, "max_tile_bytes": 8 * 1024**3, **extra}}
-        self.assertEqual(adapter.cpu_width(spec(13, 13), 8), 6)      # 6.75 GB: past every card
-        self.assertEqual(adapter.cpu_width(spec(13, 13), 4), 4)
-        self.assertEqual(adapter.cpu_width(spec(0, 0), 8), 2)        # fits a GPU: unchanged
-        self.assertEqual(adapter.cpu_width(spec(13, 13, max_cpus=3), 8), 3)   # an explicit cap wins
+        import dp_solver.adapter as module
+        original = module.CPU_ONLY_BYTES
+        module.CPU_ONLY_BYTES = 3_000_000_000   # (13,13) needs 3.4 GB narrow, 6.75 GB wide: pretend no card has 3 GB
+        try:
+            self.assertEqual(adapter.cpu_width(spec(13, 13), 8), 6)
+            self.assertEqual(adapter.cpu_width(spec(13, 13), 4), 4)
+            self.assertEqual(adapter.cpu_width(spec(0, 0), 8), 2)        # fits: unchanged
+            self.assertEqual(adapter.cpu_width(spec(13, 13, max_cpus=3), 8), 3)   # an explicit cap wins
+        finally:
+            module.CPU_ONLY_BYTES = original
 
 
 class OrderTests(unittest.TestCase):

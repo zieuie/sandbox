@@ -50,7 +50,8 @@ __device__ __forceinline__ bool better(u64 value, u32 id, u64 best, u32 best_id)
     return value > best || (value == best && best_id != 0 && id < best_id);
 }
 
-extern "C" __global__ void dp_row(u64 *values, u32 *choices, const hot_t *transitions, const bound_t *bounds,
+template <typename V>
+__device__ __forceinline__ void dp_row_impl(V *values, u32 *choices, const hot_t *transitions, const bound_t *bounds,
                                   u32 count, u32 checked, u32 ordered, u32 u, u32 first_u, u32 first_v,
                                   u32 last_v, u32 origin_u, u32 origin_v, u64 width, u64 tile_width) {
     __shared__ u64 best_shared[MAX_SLICES][32];
@@ -65,13 +66,13 @@ extern "C" __global__ void dp_row(u64 *values, u32 *choices, const hot_t *transi
     if (active) {
         u32 begin = (u32)((u64)count * slice / slices);
         u32 end = (u32)((u64)count * (slice + 1) / slices);
-        const u64 *cell = values + (u64)(u - origin_u) * width + (v - origin_v);
+        const V *cell = values + (u64)(u - origin_u) * width + (v - origin_v);
         if (checked) {   // near the DP's zero edges: skip predecessors below row or column 1
             for (u32 i = begin; i < end; ++i) {
                 bound_t b = bounds[i];
                 if (b.du > u || b.dv > v) continue;
                 hot_t t = load_transition(transitions + i);
-                u64 candidate = READ(cell - (long long)t.offset) + t.gain;
+                u64 candidate = (u64)READ(cell - (long long)t.offset) + t.gain;
                 if (better(candidate, t.id, best, best_id)) {
                     best = candidate;
                     best_id = t.id;
@@ -80,7 +81,7 @@ extern "C" __global__ void dp_row(u64 *values, u32 *choices, const hot_t *transi
         } else if (ordered) {   // original order: strict '>' is already the earliest-wins rule
             for (u32 i = begin; i < end; ++i) {
                 hot_t t = load_transition(transitions + i);
-                u64 candidate = READ(cell - (long long)t.offset) + t.gain;
+                u64 candidate = (u64)READ(cell - (long long)t.offset) + t.gain;
                 if (candidate > best) {
                     best = candidate;
                     best_id = t.id;
@@ -89,7 +90,7 @@ extern "C" __global__ void dp_row(u64 *values, u32 *choices, const hot_t *transi
         } else {         // every predecessor exists: one subtraction per load, no bounds
             for (u32 i = begin; i < end; ++i) {
                 hot_t t = load_transition(transitions + i);
-                u64 candidate = READ(cell - (long long)t.offset) + t.gain;
+                u64 candidate = (u64)READ(cell - (long long)t.offset) + t.gain;
                 if (better(candidate, t.id, best, best_id)) {
                     best = candidate;
                     best_id = t.id;
@@ -109,7 +110,25 @@ extern "C" __global__ void dp_row(u64 *values, u32 *choices, const hot_t *transi
                 chosen = id_shared[s][lane];
             }
         }
-        values[(u64)(u - origin_u) * width + (v - origin_v)] = value;
+        values[(u64)(u - origin_u) * width + (v - origin_v)] = (V)value;
         choices[(u64)(u - first_u) * tile_width + (v - first_v)] = chosen;
     }
+}
+
+extern "C" __global__ void dp_row(u64 *values, u32 *choices, const hot_t *transitions, const bound_t *bounds,
+                                  u32 count, u32 checked, u32 ordered, u32 u, u32 first_u, u32 first_v,
+                                  u32 last_v, u32 origin_u, u32 origin_v, u64 width, u64 tile_width) {
+    dp_row_impl<u64>(values, choices, transitions, bounds, count, checked, ordered, u, first_u, first_v, last_v,
+                     origin_u, origin_v, width, tile_width);
+}
+
+// The same scan over 32-bit values, for tiles whose halo is too big for the card in 64 bits (173^3's
+// last tiles: 6-7.3 GB wide, 3-3.7 GB narrow). The host uses it only when every value in the tile,
+// bounded by the halo's largest plus the largest gain a step at a time, stays below 2^32, so the
+// 64-bit sums, comparisons and results are the same numbers.
+extern "C" __global__ void dp_row32(u32 *values, u32 *choices, const hot_t *transitions, const bound_t *bounds,
+                                    u32 count, u32 checked, u32 ordered, u32 u, u32 first_u, u32 first_v,
+                                    u32 last_v, u32 origin_u, u32 origin_v, u64 width, u64 tile_width) {
+    dp_row_impl<u32>(values, choices, transitions, bounds, count, checked, ordered, u, first_u, first_v, last_v,
+                     origin_u, origin_v, width, tile_width);
 }

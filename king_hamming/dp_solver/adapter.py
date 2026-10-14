@@ -154,7 +154,10 @@ class DPAdapter(SolverAdapter):
                           arguments["row"], arguments["column"])
         except (KeyError, ValueError, TypeError):
             return None
-        return target.halo_bytes + target.value_bytes // 2 + arguments["p"] ** 3 * 24 + 32 * 1024**2
+        fixed = arguments["p"] ** 3 * 24 + 32 * 1024**2
+        # 64-bit values, or 32-bit ones (the GPU tile program's narrow kernel) when the halo is small enough.
+        return min(target.halo_bytes + target.value_bytes // 2 + fixed,
+                   target.halo_bytes // 2 + target.value_bytes // 2 + fixed)
 
     def fits_gpu(self, node, specification) -> bool:
         """Whether node's largest GPU holds the tile (True for anything that isn't a DP tile)."""

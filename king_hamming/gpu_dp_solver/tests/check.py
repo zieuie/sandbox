@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import filecmp
+import os
 from pathlib import Path
 import random
 import subprocess
@@ -27,6 +28,8 @@ def halo(rng: random.Random, path: Path, rows: int, columns: int, style: str) ->
         values = [rng.randrange(4) for _ in range(rows * columns)]
     elif style == "zero":
         values = [0] * (rows * columns)
+    elif style == "small":
+        values = [rng.randrange(2**20) for _ in range(rows * columns)]
     elif style == "wrap":
         values = [rng.randrange(2**64 - 2**20, 2**64) for _ in range(rows * columns)]
     else:
@@ -76,10 +79,25 @@ def main() -> int:
     rng = random.Random(arguments.seed)
     shapes = [(2, 3), (3, 3), (5, 3), (7, 3), (2, 5), (3, 5), (13, 3), (23, 3), (11, 5)]
     styles = ["random", "ties", "zero", "wrap"]
+    if os.environ.get("KH_GPU_DP_FORCE_NARROW") == "1":
+        # The narrow (32-bit) kernel, forced even where the wide one fits: values must be small.
+        styles = ["small", "ties", "zero", "small"]
     with tempfile.TemporaryDirectory(prefix="gpu-dp-check-") as temporary:
         for index in range(arguments.cases):
             p, r = shapes[index % len(shapes)]
             case(rng, Path(temporary), index, p, r, styles[index % len(styles)])
+    if os.environ.get("KH_GPU_DP_FORCE_NARROW") == "1":
+        # Values past 32 bits must be refused with exit 5, not computed wrongly.
+        with tempfile.TemporaryDirectory(prefix="gpu-dp-narrow-refusal-") as temporary:
+            directory = Path(temporary)
+            p, r, first, last = 13, 3, 100, 110
+            origin = first - p * p if first > p * p else 0
+            halo(rng, directory / "halo.bin", last - origin + 1, last - origin + 1, "wrap")
+            completed = subprocess.run([str(GPU), str(p), str(r), str(first), str(last), str(first), str(last),
+                                        str(directory / "halo.bin"), str(directory / "out"), "2", str(2**31)],
+                                       capture_output=True, text=True)
+            if completed.returncode != 5:
+                raise AssertionError(f"narrow kernel on 64-bit values exited {completed.returncode}, not 5")
     print(f"ok {arguments.cases} random tiles byte-identical to kh_dp_tile (values, choices, tile.json)")
     return 0
 

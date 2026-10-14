@@ -329,7 +329,12 @@ def gpu_fits(p: int, rectangle, device: int = 0) -> bool:
     except (ValueError,TypeError,KeyError,AttributeError):
         pass
     limit=int(os.environ.get("KH_GPU_DP_MAX_BYTES",limit))
-    return rectangle.halo_bytes+rectangle.value_bytes//2+p**3*24+32*1024**2<=limit
+    if rectangle.halo_bytes+rectangle.value_bytes//2+p**3*24+32*1024**2<=limit:
+        return True
+    # Too big for the card in 64-bit values: the GPU tile program runs it in 32-bit values when its
+    # halo is that small (it checks, and exits 5 so the CPUs take it otherwise).
+    return (os.environ.get("KH_GPU_DP_NARROW")!="0" and
+            rectangle.halo_bytes//2+rectangle.value_bytes//2+p**3*24+32*1024**2<=limit)
 
 
 # CPU seconds per cell, per transition (p^3 of them) and per thread, measured on live tiles:

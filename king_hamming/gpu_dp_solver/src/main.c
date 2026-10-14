@@ -54,7 +54,8 @@ static int compare_offsets(const void *left, const void *right) {
 
 typedef struct {
     kh_parameters_t parameters;
-    uint64_t *values;
+    uint64_t *values;     // the 64-bit region, or NULL when the narrow path holds it in values32
+    uint32_t *values32;
     uint32_t *choices;
     uint32_t first_u, last_u, first_v, last_v, origin_u, origin_v;
     size_t width, tile_width;
@@ -94,13 +95,25 @@ static bool save(const tile_t *tile, const char *directory, uint64_t payload) {
     if (values == NULL) {
         return false;
     }
+    uint64_t *row = tile->values32 != NULL ? malloc(tile->tile_width * sizeof *row) : NULL;
+    if (tile->values32 != NULL && row == NULL) {
+        fclose(values);
+        return false;
+    }
     for (uint32_t u = tile->first_u; u <= tile->last_u; ++u) {
         size_t offset = (size_t)(u - tile->origin_u) * tile->width + tile->first_v - tile->origin_v;
-        if (fwrite(tile->values + offset, sizeof(uint64_t), tile->tile_width, values) != tile->tile_width) {
+        const uint64_t *source = tile->values + offset;
+        if (tile->values32 != NULL) {
+            for (size_t index = 0; index < tile->tile_width; ++index) row[index] = tile->values32[offset + index];
+            source = row;
+        }
+        if (fwrite(source, sizeof(uint64_t), tile->tile_width, values) != tile->tile_width) {
+            free(row);
             fclose(values);
             return false;
         }
     }
+    free(row);
     if (!finish(values)) {
         return false;
     }
@@ -241,22 +254,68 @@ int main(int argc, char **argv) {
         return 3;
     }
     void *row_kernel = kh_cuda_function(&cuda, "dp_row");
+    void *row_kernel32 = kh_cuda_function(&cuda, "dp_row32");
     size_t free_bytes = 0, total_bytes = 0;
     cuda.cuMemGetInfo(&free_bytes, &total_bytes);
+    // A tile that fits the card in 64-bit values runs exactly as it always has. One that does not,
+    // but fits in 32-bit values (halo values are small: 173^3's largest is 344,064), runs on the
+    // narrow kernel; its numbers, choices and output bytes are the same. The host proves that
+    // every value stays below 2^32 and otherwise exits 5 (callers then use the CPU, as for 3).
+    uint32_t narrow = 0;
     if (row_kernel == NULL || value_bytes + choice_bytes + transition_bytes + UINT64_C(33554432) > free_bytes) {
-        fprintf(stderr, "kh_gpu_dp_tile: GPU kernel missing or insufficient device memory (%zu free)\n", free_bytes);
-        kh_cuda_close(&cuda);
-        return 3;
+        const char *narrow_text = getenv("KH_GPU_DP_NARROW");
+        if (row_kernel != NULL && row_kernel32 != NULL && (narrow_text == NULL || strcmp(narrow_text, "0") != 0) &&
+            value_bytes / 2 + choice_bytes + transition_bytes + UINT64_C(33554432) <= free_bytes) {
+            narrow = 1;
+        } else {
+            fprintf(stderr, "kh_gpu_dp_tile: GPU kernel missing or insufficient device memory (%zu free)\n", free_bytes);
+            kh_cuda_close(&cuda);
+            return 3;
+        }
     }
+    const char *force_text = getenv("KH_GPU_DP_FORCE_NARROW");   // tests: the narrow kernel even when it fits
+    if (row_kernel != NULL && row_kernel32 != NULL && force_text != NULL && strcmp(force_text, "1") == 0) narrow = 1;
 
     FILE *input = fopen(argv[7], "rb");
-    tile.values = malloc((size_t)value_bytes);
+    uint64_t halo_max = 0;
+    bool read_ok;
     tile.choices = malloc((size_t)choice_bytes);
-    if (input == NULL || tile.values == NULL || tile.choices == NULL) {
-        fprintf(stderr, "kh_gpu_dp_tile: cannot allocate or read tile state\n");
-        return 1;
+    if (narrow) {
+        tile.values32 = malloc((size_t)(value_bytes / 2));
+        if (input == NULL || tile.values32 == NULL || tile.choices == NULL) {
+            fprintf(stderr, "kh_gpu_dp_tile: cannot allocate or read tile state\n");
+            return 1;
+        }
+        enum { CHUNK = 1 << 23 };   // 8M values (64 MiB) at a time
+        uint64_t *chunk = malloc(CHUNK * sizeof *chunk);
+        if (chunk == NULL) {
+            fprintf(stderr, "kh_gpu_dp_tile: cannot allocate or read tile state\n");
+            return 1;
+        }
+        size_t total_values = (size_t)(value_bytes / 8), done = 0;
+        read_ok = true;
+        while (read_ok && done < total_values) {
+            size_t want = total_values - done < CHUNK ? total_values - done : CHUNK;
+            read_ok = fread(chunk, sizeof *chunk, want, input) == want;
+            for (size_t index = 0; read_ok && index < want; ++index) {
+                if (chunk[index] > UINT32_MAX) {
+                    fprintf(stderr, "kh_gpu_dp_tile: halo value does not fit 32 bits\n");
+                    return 5;
+                }
+                if (chunk[index] > halo_max) halo_max = chunk[index];
+                tile.values32[done + index] = (uint32_t)chunk[index];
+            }
+            done += want;
+        }
+        free(chunk);
+    } else {
+        tile.values = malloc((size_t)value_bytes);
+        if (input == NULL || tile.values == NULL || tile.choices == NULL) {
+            fprintf(stderr, "kh_gpu_dp_tile: cannot allocate or read tile state\n");
+            return 1;
+        }
+        read_ok = fread(tile.values, 1, (size_t)value_bytes, input) == value_bytes;
     }
-    bool read_ok = fread(tile.values, 1, (size_t)value_bytes, input) == value_bytes;
     fclose(input);
     kh_transition_table_t transitions = {0};
     if (!read_ok || !kh_build_transitions(&tile.parameters, true, &transitions, &error)) {
@@ -304,16 +363,34 @@ int main(int argc, char **argv) {
         if (hot[index].dv > max_dv) max_dv = hot[index].dv;
     }
     uint32_t checked = tile.first_u <= max_du || tile.first_v <= max_dv;
+    if (narrow) {
+        // A chain of predecessors inside the tile has at most min(rows, columns) steps (every
+        // transition moves both coordinates), each adding at most the largest gain.
+        uint64_t max_gain = 0, rows = (uint64_t)tile.last_u - tile.first_u + 1;
+        for (uint32_t index = 0; index < transitions.count; ++index) {
+            if (hot[index].gain > max_gain) max_gain = hot[index].gain;
+        }
+        uint64_t steps = rows < tile.tile_width ? rows : tile.tile_width;
+        if (halo_max + max_gain * steps > UINT32_MAX) {
+            fprintf(stderr, "kh_gpu_dp_tile: values could pass 32 bits (halo max %" PRIu64 ", gain %" PRIu64 " x %" PRIu64 ")\n",
+                    halo_max, max_gain, steps);
+            kh_cuda_close(&cuda);
+            return 5;
+        }
+        fprintf(stderr, "kh_gpu_dp_tile: narrow 32-bit values (%" PRIu64 " MB instead of %" PRIu64 " MB)\n",
+                value_bytes / 2 / 1000000, value_bytes / 1000000);
+    }
+    uint64_t device_value_bytes = narrow ? value_bytes / 2 : value_bytes;
 
     kh_dptr_t d_values = 0, d_choices = 0, d_hot = 0, d_bounds = 0;
     int status_code = 0;
     const char *stage = "allocate";
-    if ((status_code = cuda.cuMemAlloc(&d_values, value_bytes)) == 0 &&
+    if ((status_code = cuda.cuMemAlloc(&d_values, device_value_bytes)) == 0 &&
         (status_code = cuda.cuMemAlloc(&d_choices, choice_bytes)) == 0 &&
         (status_code = cuda.cuMemAlloc(&d_hot, (size_t)transitions.count * sizeof *device_hot + 16)) == 0 &&
         (status_code = cuda.cuMemAlloc(&d_bounds, (size_t)transitions.count * sizeof *device_bounds + 16)) == 0) {
         stage = "upload";
-        if ((status_code = cuda.cuMemcpyHtoD(d_values, tile.values, value_bytes)) == 0 &&
+        if ((status_code = cuda.cuMemcpyHtoD(d_values, narrow ? (const void *)tile.values32 : (const void *)tile.values, device_value_bytes)) == 0 &&
             (status_code = cuda.cuMemsetD8(d_choices, 0, choice_bytes)) == 0 &&
             (status_code = cuda.cuMemcpyHtoD(d_hot, device_hot, (size_t)transitions.count * sizeof *device_hot)) == 0 &&
             (status_code = cuda.cuMemcpyHtoD(d_bounds, device_bounds,
@@ -333,7 +410,7 @@ int main(int argc, char **argv) {
             for (uint32_t u = tile.first_u; status_code == 0 && u <= tile.last_u; ++u) {
                 void *args[] = {&d_values, &d_choices, &d_hot, &d_bounds, &count, &checked, &ordered, &u, &tile.first_u,
                                 &tile.first_v, &tile.last_v, &tile.origin_u, &tile.origin_v, &width, &tile_width};
-                status_code = kh_cuda_launch(&cuda, row_kernel, blocks, slices * 32, args);
+                status_code = kh_cuda_launch(&cuda, narrow ? row_kernel32 : row_kernel, blocks, slices * 32, args);
                 if (status_code == 0 && now() - last_report > 1.0) {
                     status_code = cuda.cuCtxSynchronize();
                     progress((uint64_t)(u - tile.first_u + 1) * tile.tile_width, total, "computing");
@@ -345,7 +422,7 @@ int main(int argc, char **argv) {
             }
             if (status_code == 0) {
                 stage = "download";
-                status_code = cuda.cuMemcpyDtoH(tile.values, d_values, value_bytes);
+                status_code = cuda.cuMemcpyDtoH(narrow ? (void *)tile.values32 : (void *)tile.values, d_values, device_value_bytes);
             }
             if (status_code == 0) {
                 status_code = cuda.cuMemcpyDtoH(tile.choices, d_choices, choice_bytes);
@@ -397,6 +474,7 @@ int main(int argc, char **argv) {
     free(transitions.entries);
     free(hot);
     free(tile.values);
+    free(tile.values32);
     free(tile.choices);
     if (!complete) {
         fprintf(stderr, "kh_gpu_dp_tile: durable publication failed; private staging may remain\n");
