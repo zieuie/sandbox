@@ -13,6 +13,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from campaigns import remote_certificates
 from dp_solver.artifacts import decode_dp
 from matching_solver.adapter import decode_input
 from matching_solver.artifacts import Reader, request_count
@@ -29,6 +30,10 @@ def permutation_count(dp: dict) -> int:
 
 def certificate_status(path: Path, artifact_hash: str, dp: dict, dp_hash: bytes) -> int:
     """Check the archived certificate's hashes and bounded header, not its full proof."""
+    archived = remote_certificates.marker(path)
+    if archived is not None:   # the file lives on another machine: check it there
+        header, size = remote_certificates.verified_header(archived, artifact_hash)
+        return header_status(Reader(header, size), path, dp, dp_hash)
     size = path.stat().st_size
     if size < 68:
         raise ValueError(f"short matching certificate: {path}")
@@ -48,20 +53,24 @@ def certificate_status(path: Path, artifact_hash: str, dp: dict, dp_hash: bytes)
         if payload_hash.digest() != trailer or content_hash.hexdigest() != artifact_hash:
             raise ValueError(f"matching certificate hash mismatch: {path}")
         stream.seek(0)
-        reader = Reader(stream, size)
-        if reader.take(4) != b"KHM1" or reader.take(32) != dp_hash:
-            raise ValueError(f"matching certificate has wrong DP dependency: {path}")
-        p, r = reader.uint(), reader.uint()
-        if (p, r) != (dp["p"], dp["r"]):
-            raise ValueError(f"matching certificate has wrong field: {path}")
-        for _ in range(r + 1):
-            reader.uint()  # primitive polynomial; already verified when archived
-        status, required, matched = reader.uint(), reader.uint(), reader.uint()
-        if status not in (0, 1) or required != request_count(dp) or not 0 <= matched <= required:
-            raise ValueError(f"matching certificate has invalid outcome: {path}")
-        if (status == 0) != (matched == required):
-            raise ValueError(f"matching certificate has inconsistent cardinality: {path}")
-        return status
+        return header_status(Reader(stream, size), path, dp, dp_hash)
+
+
+def header_status(reader: Reader, path: Path, dp: dict, dp_hash: bytes) -> int:
+    """The bounded header checks shared by local and remote certificates."""
+    if reader.take(4) != b"KHM1" or reader.take(32) != dp_hash:
+        raise ValueError(f"matching certificate has wrong DP dependency: {path}")
+    p, r = reader.uint(), reader.uint()
+    if (p, r) != (dp["p"], dp["r"]):
+        raise ValueError(f"matching certificate has wrong field: {path}")
+    for _ in range(r + 1):
+        reader.uint()  # primitive polynomial; already verified when archived
+    status, required, matched = reader.uint(), reader.uint(), reader.uint()
+    if status not in (0, 1) or required != request_count(dp) or not 0 <= matched <= required:
+        raise ValueError(f"matching certificate has invalid outcome: {path}")
+    if (status == 0) != (matched == required):
+        raise ValueError(f"matching certificate has inconsistent cardinality: {path}")
+    return status
 
 
 def records(deployments: Path) -> dict[tuple[int, int], dict]:
@@ -120,7 +129,10 @@ def records(deployments: Path) -> dict[tuple[int, int], dict]:
                         path = database.parent / "matching-results" / filename
                         if not path.is_file():
                             path = database.parent / "results" / filename
-                        if not path.is_file():
+                        if not path.is_file() and remote_certificates.marker(
+                                database.parent / "matching-results" / filename) is not None:
+                            path = database.parent / "matching-results" / filename
+                        elif not path.is_file():
                             raise FileNotFoundError(f"completed matching artifact not collected: {path}")
                         record["outcomes"].add(certificate_status(path, artifact_hash, dp, digest))
                     elif state in ACTIVE and dispatch_running:

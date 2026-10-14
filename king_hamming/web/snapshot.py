@@ -23,6 +23,7 @@ for path in (ROOT, ROOT / "cluster"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from campaigns import remote_certificates  # noqa: E402
 from campaigns.result_table import certificate_status, permutation_count  # noqa: E402
 from dp_solver.artifacts import decode_dp  # noqa: E402
 from dp_solver.tiles import dependencies, tile  # noqa: E402
@@ -858,8 +859,12 @@ class Snapshots:
 
     def certificate(self, path: Path, artifact_hash: str, dp: dict, digest: bytes) -> int | None:
         """The certificate's status (0 matched, 1 obstructed), or None while it is being checked."""
-        stat = path.stat()
-        key = (str(path), stat.st_size, stat.st_mtime_ns, artifact_hash)
+        archived = remote_certificates.marker(path)
+        if archived is not None:   # archived on another machine: cached by its record, checked over ssh once
+            key = (str(path), archived["bytes"], 0, archived["sha256"])
+        else:
+            stat = path.stat()
+            key = (str(path), stat.st_size, stat.st_mtime_ns, artifact_hash)
         with self.certificate_lock:
             if key in self.certificates:
                 outcome = self.certificates[key]
@@ -996,7 +1001,7 @@ class Snapshots:
                         if run["state"] == "complete":
                             name = f"{key[0]}_{key[1]}_{run['run_id']}.khmatch"
                             path = directory / "matching-results" / name
-                            if not path.is_file():
+                            if not path.is_file() and remote_certificates.marker(path) is None:
                                 path = directory / "results" / name
                             try:
                                 outcome = self.certificate(path, run["artifact_hash"], dp, digest)
