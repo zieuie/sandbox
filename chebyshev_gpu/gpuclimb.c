@@ -16,7 +16,12 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <signal.h>
+#include <unistd.h>
 #include "kh_cuda.h"
+
+static volatile sig_atomic_t stop_requested = 0;
+static void on_signal(int sig) { (void) sig; stop_requested = 1; }
 
 extern const kh_cuda_image_t chebyshev_images[];
 extern const unsigned chebyshev_images_count;
@@ -165,11 +170,30 @@ static int compact_best(const int8_t *all, const uint8_t *act, int Rall, int8_t 
   return k;
 }
 
+static void write_state(const char *path, int nactive, int C, const int8_t *reps, const uint8_t *acts, double elapsed, long long steps) {
+  char tmp[512]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+  FILE *f = fopen(tmp, "wb"); if (!f) return;
+  int hdr[6] = { n, d, R, NG, nactive, C };
+  fwrite("CHPA1", 1, 6, f); fwrite(hdr, sizeof(int), 6, f); fwrite(&elapsed, sizeof elapsed, 1, f); fwrite(&steps, sizeof steps, 1, f);
+  fwrite(reps, 1, (size_t) C * R * ST, f); fwrite(acts, 1, (size_t) C * R, f);
+  fclose(f); rename(tmp, path);
+}
+
+static void write_status(const char *path, const char *state, int target_rows, int best, int mean, double elapsed, long long steps, int trim) {
+  char tmp[512], host[64] = "?"; snprintf(tmp, sizeof tmp, "%s.tmp", path); gethostname(host, sizeof host - 1);
+  FILE *f = fopen(tmp, "w"); if (!f) return;
+  fprintf(f, "{\"host\":\"%s\",\"n\":%d,\"d\":%d,\"target_rows\":%d,\"state\":\"%s\",\"best_conflicts\":%d,\"mean_conflicts\":%d,"
+             "\"elapsed_s\":%.0f,\"steps_per_chain\":%lld,\"best_trim_rows\":%d,\"updated\":%ld}\n",
+          host, n, d, target_rows, state, best, mean, elapsed, steps, trim, (long) time(NULL));
+  fclose(f); rename(tmp, path);
+}
+
 int main(int argc, char **argv) {
   if (argc < 4) { fprintf(stderr, "usage: %s n d seconds [--chains C] [--steps K] [--noise p] [--tenure lo span] [--stall S] [--seed X] [--threads t] [--device i]\n", argv[0]); return 1; }
   n = atoi(argv[1]); d = atoi(argv[2]); double secs = atof(argv[3]);
   int C = 56, steps = 200, tlo = 10, tspan = 10, stall = 20000, threads = 256, device = 0;
   int nactive = 0; float preplace = 0.05f;
+  const char *state_path = NULL, *status_path = "status.json"; double save_every = 300;
   double ckpt_secs = 600; const char *group_opt = "auto", *resume = NULL;
   float noise = 0.01f; uint64_t seed = (uint64_t) time(NULL);
   for (int a = 4; a < argc; a++) {
@@ -186,6 +210,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[a], "--active")) nactive = atoi(argv[++a]);
     else if (!strcmp(argv[a], "--preplace")) preplace = (float) atof(argv[++a]);
     else if (!strcmp(argv[a], "--resume")) resume = argv[++a];
+    else if (!strcmp(argv[a], "--state")) state_path = argv[++a];
+    else if (!strcmp(argv[a], "--save-every")) save_every = atof(argv[++a]);
+    else if (!strcmp(argv[a], "--status")) status_path = argv[++a];
     else { fprintf(stderr, "unknown option %s\n", argv[a]); return 1; }
   }
   rs = seed * 6364136223846793005ULL + 1442695040888963407ULL; if (!rs) rs = 1;
@@ -224,6 +251,27 @@ int main(int argc, char **argv) {
   if (nactive < R) printf("subset mode: %d of %d orbits active (%d rows)\n", nactive, R, nactive * NG);
   uint8_t *active = calloc((size_t) C * R, 1);
   uint64_t *rng = malloc(sizeof(uint64_t) * C);
+  // saved state (all chains' best arrays) from an earlier run with the same parameters
+  char state_default[96];
+  if (!state_path) { sprintf(state_default, "state_%d_%d_%d.bin", n, d, nactive * NG); state_path = state_default; }
+  int st_ok = 0, st_C = 0; double prev_elapsed = 0; long long prev_steps = 0;
+  int8_t *st_rep = NULL; uint8_t *st_act = NULL;
+  { FILE *f = fopen(state_path, "rb");
+    if (f) {
+      char magic[6] = {0}; int hdr[6]; double pe; long long ps;
+      if (fread(magic, 1, 6, f) == 6 && !memcmp(magic, "CHPA1", 5) && fread(hdr, sizeof(int), 6, f) == 6 &&
+          fread(&pe, sizeof pe, 1, f) == 1 && fread(&ps, sizeof ps, 1, f) == 1 &&
+          hdr[0] == n && hdr[1] == d && hdr[2] == R && hdr[3] == NG && hdr[4] == nactive && hdr[5] > 0) {
+        st_C = hdr[5];
+        st_rep = malloc((size_t) st_C * R * ST); st_act = malloc((size_t) st_C * R);
+        if (fread(st_rep, 1, (size_t) st_C * R * ST, f) == (size_t) st_C * R * ST && fread(st_act, 1, (size_t) st_C * R, f) == (size_t) st_C * R) {
+          st_ok = 1; prev_elapsed = pe; prev_steps = ps;
+          printf("resuming %d chains from %s (%.0f s and %lld steps per chain so far)\n", st_C, state_path, pe, ps);
+        }
+      } else printf("ignoring %s (different parameters)\n", state_path);
+      fclose(f);
+    }
+  }
   for (int c = 0; c < C; c++) {
     int8_t *rp = rep + (size_t) c * R * ST, *ip = img + (size_t) c * rows * ST;
     for (int j = 0; j < R; j++) random_fill(masks[j], rp + j * ST);
@@ -248,6 +296,12 @@ int main(int argc, char **argv) {
       for (int j = R - 1; j > 0; j--) { int k = xr() % (j + 1); int t = perm[j]; perm[j] = perm[k]; perm[k] = t; }
       for (int q = 0; q < nactive; q++) { ac[perm[q]] = 1; }
       free(perm); }
+    if (st_ok) {
+      int sc_ = c % st_C;
+      memcpy(rp, st_rep + (size_t) sc_ * R * ST, (size_t) R * ST);
+      memcpy(ac, st_act + (size_t) sc_ * R, R);
+      for (int j = 0; j < R; j++) for (int h = 0; h < NG; h++) act(h, rp + j * ST, ip + ((size_t) j * NG + h) * ST);
+    }
     int tot = 0;
     for (int j = 0; j < R; j++) {
       if (!ac[j]) continue;
@@ -291,7 +345,12 @@ int main(int argc, char **argv) {
   long long launches = 0;
   int overall = 1 << 30, winner = -1, best_trim = 0;
   double ckpt_every = ckpt_secs;
-  while (now() - t0 < secs) {
+  signal(SIGINT, on_signal); signal(SIGTERM, on_signal);
+  double last_save = t0, last_status = 0;
+  int8_t *all_brep = malloc(repB); uint8_t *all_bact = malloc((size_t) C * R);
+  #define SAVE_STATE() do { CK(cu.cuMemcpyDtoH(all_brep, d_brep, repB)); CK(cu.cuMemcpyDtoH(all_bact, d_bact, (size_t) C * R)); \
+      write_state(state_path, nactive, C, all_brep, all_bact, prev_elapsed + (now() - t0), prev_steps + launches * steps); } while (0)
+  while (now() - t0 < secs && !stop_requested) {
     CK(kh_cuda_launch(&cu, fn, C, threads, args));
     CK(cu.cuCtxSynchronize());
     launches++;
@@ -300,6 +359,13 @@ int main(int argc, char **argv) {
     if (best[bc] < overall) { overall = best[bc]; winner = bc; }
     if (overall == 0) break;
     double t = now();
+    if (t - last_save > save_every) { last_save = t; SAVE_STATE(); }
+    if (t - last_status > 30) {
+      last_status = t;
+      CK(cu.cuMemcpyDtoH(T, d_T, sizeof(int) * C));
+      long long sT = 0; for (int c = 0; c < C; c++) sT += T[c];
+      write_status(status_path, "running", nactive * NG, overall, (int) (sT / C), prev_elapsed + (t - t0), prev_steps + launches * steps, best_trim);
+    }
     if (t - last_print > 30) {
       last_print = t;
       CK(cu.cuMemcpyDtoH(T, d_T, sizeof(int) * C));
@@ -328,6 +394,9 @@ int main(int argc, char **argv) {
     }
   }
   double el = now() - t0;
+  SAVE_STATE();
+  write_status(status_path, overall == 0 ? "solved" : stop_requested ? "stopped" : "timeout", nactive * NG, overall, -1, prev_elapsed + el, prev_steps + launches * steps, best_trim);
+  if (stop_requested) printf("stopped by signal; state saved to %s\n", state_path);
   printf("finished: best=%d after %.0fs, %lld steps per chain (%.0f steps/s total)\n", overall, el, launches * steps, launches * steps * (double) C / el);
   CK(cu.cuMemcpyDtoH(ball, d_brep + (size_t) winner * Rall * ST, (size_t) Rall * ST));
   CK(cu.cuMemcpyDtoH(bact, d_bact + (size_t) winner * Rall, (size_t) Rall));
@@ -340,7 +409,7 @@ int main(int argc, char **argv) {
   } else sprintf(fnm, "pa_%d_%d_gpu_best.txt", n, d);
   write_rows(fnm, full);
   printf("wrote %s\n", fnm);
-  if (overall > 0) {
+  if (overall > 0 && !stop_requested) {
     char *keep = malloc(rows); int kept = trim(full, rows, keep);
     if (NG > 1) { char *k2 = malloc(rows); int kept2 = orbit_trim(brep, full, k2); if (kept2 > kept) { kept = kept2; memcpy(keep, k2, rows); } free(k2); }
     sprintf(fnm, "pa_%d_%d_trim_%d.txt", n, d, kept);

@@ -57,6 +57,24 @@ The verified P(14,7) = 3,432 array is in `results/pa_14_7_3432.txt`.
     writing `pa_n_d_gpu.txt`.
   - Usage: `gpuclimb n d seconds [--chains C] [--steps K] [--noise p] [--tenure lo span] [--stall S] [--seed X]`
 
+## Running on the cluster: live status, stop and resume
+
+- **Status.** gpuclimb writes `status.json` in its working directory every
+  30 s. The fields are cell, target rows, best and mean conflicts, hours and
+  steps so far, and a state of running, solved, stopped or timeout.
+  `./status.sh` (run from uther) prints one line per search on every machine.
+- **Stop and resume.** Every chain's best array is saved to
+  `state_<n>_<d>_<rows>.bin` every `--save-every` seconds (default 300) and on
+  SIGINT/SIGTERM. A later run with the same n, d and target resumes all chains
+  from that file, carrying its cumulative time and step counts.
+- **Ladders.** `ladder.sh n d m0 step try_secs total_secs [gpuclimb args]`
+  keeps the current target in `ladder.m` and moves to m+step whenever a try
+  ends with a verified array. Live output of the current try is in `try.log`.
+  To stop it, `kill -TERM <ladder pid>`; the state is saved. To continue,
+  start the same command again in the same directory.
+  - Example: `ladder.sh 15 8 229 8 1800 0 --chains 24` (total 0 means run
+    until stopped).
+
 ## Building
 
 `make` builds everything. The GPU kernel is compiled by NVRTC from
