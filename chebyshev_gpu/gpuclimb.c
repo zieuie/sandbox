@@ -192,7 +192,7 @@ int main(int argc, char **argv) {
   if (argc < 4) { fprintf(stderr, "usage: %s n d seconds [--chains C] [--steps K] [--noise p] [--tenure lo span] [--stall S] [--seed X] [--threads t] [--device i]\n", argv[0]); return 1; }
   n = atoi(argv[1]); d = atoi(argv[2]); double secs = atof(argv[3]);
   int C = 56, steps = 200, tlo = 10, tspan = 10, stall = 20000, threads = 256, device = 0;
-  int nactive = 0; float preplace = 0.05f;
+  int nactive = 0, no_trim = 0; float preplace = 0.05f;
   const char *state_path = NULL, *status_path = "status.json"; double save_every = 300;
   double ckpt_secs = 600; const char *group_opt = "auto", *resume = NULL;
   float noise = 0.01f; uint64_t seed = (uint64_t) time(NULL);
@@ -213,6 +213,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[a], "--state")) state_path = argv[++a];
     else if (!strcmp(argv[a], "--save-every")) save_every = atof(argv[++a]);
     else if (!strcmp(argv[a], "--status")) status_path = argv[++a];
+    else if (!strcmp(argv[a], "--no-trim")) no_trim = 1;
     else { fprintf(stderr, "unknown option %s\n", argv[a]); return 1; }
   }
   rs = seed * 6364136223846793005ULL + 1442695040888963407ULL; if (!rs) rs = 1;
@@ -409,7 +410,7 @@ int main(int argc, char **argv) {
   } else sprintf(fnm, "pa_%d_%d_gpu_best.txt", n, d);
   write_rows(fnm, full);
   printf("wrote %s\n", fnm);
-  if (overall > 0 && !stop_requested && rows <= 8000) {
+  if (overall > 0 && !stop_requested && !no_trim && rows <= 8000) {
     char *keep = malloc(rows); int kept = trim(full, rows, keep);
     if (NG > 1) { char *k2 = malloc(rows); int kept2 = orbit_trim(brep, full, k2); if (kept2 > kept) { kept = kept2; memcpy(keep, k2, rows); } free(k2); }
     sprintf(fnm, "pa_%d_%d_trim_%d.txt", n, d, kept);

@@ -14,7 +14,7 @@ while [ $stop -eq 0 ]; do
   if [ "$total" -gt 0 ]; then left=$(( start + total - $(date +%s) )); [ $left -le 0 ] && break; t=$(( try < left ? try : left )); else t=$try; fi
   echo "$m" > ladder.m
   echo "=== $(date '+%F %T') trying $m orbits for ${t}s"
-  ./gpuclimb $n $d $t --active $m --ckpt 100000 "$@" > try.log 2>&1 &
+  ./gpuclimb $n $d $t --active $m --ckpt 100000 --no-trim "$@" > try.log 2>&1 &
   pid=$!
   while kill -0 $pid 2>/dev/null; do wait $pid; done
   pid=
