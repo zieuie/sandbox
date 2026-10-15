@@ -38,9 +38,26 @@ static uint64_t rs;
 static uint64_t xr(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return rs; }
 
 static void act(int h, const int8_t *r, int8_t *out) { for (int i = 0; i < n; i++) out[gp[h][i]] = gt[h] ? (int8_t) (n - 1 - r[i]) : r[i]; }
+static int Q = 2; // number of value blocks (values v lie in block v / d)
+static int bsz(int b) { int hi = (b + 1) * d; if (hi > n) hi = n; return hi - b * d; }
+static int act_code(int h, int code) {  // Q >= 3 templates: 2 bits per position, block index
+  int o = 0; for (int i = 0; i < n; i++) o |= ((code >> (2 * i)) & 3) << (2 * gp[h][i]); return o;
+}
+static int row_code(const int8_t *r) {
+  if (Q == 2) { int m = 0; for (int i = 0; i < n; i++) if (r[i] < d) m |= 1 << i; return m; }
+  int c = 0; for (int i = 0; i < n; i++) c |= (r[i] / d) << (2 * i); return c;
+}
 static int act_mask(int h, int m) { int o = 0; for (int i = 0; i < n; i++) if (m >> i & 1) o |= 1 << gp[h][i]; if (gt[h]) o = ((1 << n) - 1) & ~o; return o; }
 static int nsep(const int8_t *a, const int8_t *b) { int c = 0; for (int i = 0; i < n; i++) { int x = a[i] - b[i]; c += (x >= d || -x >= d); } return c; }
+static void random_fill_q(int code, int8_t *r) {
+  int vals[8][ST], nv[8] = {0};
+  for (int v = 0; v < n; v++) vals[v / d][nv[v / d]++] = v;
+  for (int b = 0; b < Q; b++) for (int i = nv[b] - 1; i > 0; i--) { int j = xr() % (i + 1); int t = vals[b][i]; vals[b][i] = vals[b][j]; vals[b][j] = t; }
+  int used[8] = {0};
+  for (int i = 0; i < n; i++) { int b = (code >> (2 * i)) & 3; r[i] = (int8_t) vals[b][used[b]++]; }
+}
 static void random_fill(int mask, int8_t *r) {
+  if (Q > 2) { random_fill_q(mask, r); return; }
   int lo[ST], hi[ST], nl = 0, nh = 0;
   for (int v = 0; v < n; v++) { if (v < d) lo[nl++] = v; else hi[nh++] = v; }
   for (int i = nl - 1; i > 0; i--) { int j = xr() % (i + 1); int t = lo[i]; lo[i] = lo[j]; lo[j] = t; }
@@ -220,9 +237,13 @@ int main(int argc, char **argv) {
   if (n > ST || n > 20) { fprintf(stderr, "n too large\n"); return 1; }
   // group: n = 2d -> x -> +-x+b mod (n-1) (with value reversal for "-");
   // otherwise the first of Z_n, Z_(n-1) (last position fixed), trivial that acts freely.
-  if (n > 2 * d) { fprintf(stderr, "need n <= 2d\n"); return 1; }
-  char *seen = calloc(1u << n, 1); int *masks = malloc(sizeof(int) * (1u << n));
+  Q = (n + d - 1) / d;
+  if (Q > 4) { fprintf(stderr, "at most 4 value blocks supported\n"); return 1; }
+  if (Q > 2 && 2 * n > 24) { fprintf(stderr, "multi-block templates need n <= 12\n"); return 1; }
+  size_t codes = Q == 2 ? (1u << n) : (1u << (2 * n));
+  char *seen = calloc(codes, 1); int *masks = malloc(sizeof(int) * codes);
   int first = (n == 2 * d ? 0 : 1);
+  if (Q > 2 && first == 0) first = 1;  // value reversal does not preserve unequal blocks
   if (!strcmp(group_opt, "trivial")) first = 3;
   for (int attempt = first; attempt <= 3; attempt++) {
     NG = 0;
@@ -231,11 +252,19 @@ int main(int argc, char **argv) {
     else if (attempt == 2) { int m = n - 1; for (int b = 0; b < m; b++) { gt[NG] = 0; for (int x = 0; x < m; x++) gp[NG][x] = (x + b) % m; gp[NG][m] = m; NG++; } }
     else { gt[0] = 0; for (int x = 0; x < n; x++) gp[0][x] = x; NG = 1; }
     if (NG > MAXG) continue;
-    memset(seen, 0, 1u << n);
+    memset(seen, 0, codes);
     R = 0; int ok = 1;
-    for (int m = 0; m < (1 << n) && ok; m++) {
-      if (__builtin_popcount(m) != d || seen[m]) continue;
-      int os = 0; for (int h = 0; h < NG; h++) { int m2 = act_mask(h, m); if (!seen[m2]) { seen[m2] = 1; os++; } }
+    for (size_t mm = 0; mm < codes && ok; mm++) {
+      int m = (int) mm;
+      if (Q == 2) { if (__builtin_popcount(m) != d || seen[m]) continue; }
+      else {
+        int cnt[4] = {0}, bad = 0;
+        for (int i = 0; i < n; i++) { int b = (m >> (2 * i)) & 3; if (b >= Q) { bad = 1; break; } cnt[b]++; }
+        if (bad || seen[m]) continue;
+        for (int b = 0; b < Q; b++) if (cnt[b] != bsz(b)) bad = 1;
+        if (bad) continue;
+      }
+      int os = 0; for (int h = 0; h < NG; h++) { int m2 = Q == 2 ? act_mask(h, m) : act_code(h, m); if (!seen[m2]) { seen[m2] = 1; os++; } }
       if (os != NG) ok = 0;
       masks[R++] = m;
     }
@@ -273,20 +302,22 @@ int main(int argc, char **argv) {
       fclose(f);
     }
   }
+  uint8_t *loaded = NULL;
   for (int c = 0; c < C; c++) {
     int8_t *rp = rep + (size_t) c * R * ST, *ip = img + (size_t) c * rows * ST;
     for (int j = 0; j < R; j++) random_fill(masks[j], rp + j * ST);
     if (resume) {
       static int *rep_of = NULL;
-      if (!rep_of) { rep_of = malloc(sizeof(int) * (1u << n)); for (int m = 0; m < (1 << n); m++) rep_of[m] = -1; for (int j = 0; j < R; j++) rep_of[masks[j]] = j; }
+      if (!rep_of) { rep_of = malloc(sizeof(int) * codes); for (size_t m = 0; m < codes; m++) rep_of[m] = -1; for (int j = 0; j < R; j++) rep_of[masks[j]] = j; }
+      if (!loaded) loaded = calloc((size_t) C * R, 1);
       FILE *f = fopen(resume, "r"); if (!f) { perror(resume); return 1; }
       int8_t row[ST]; int got = 0;
       for (;;) {
         int ok = 1;
         for (int i = 0; i < n; i++) { int v; if (fscanf(f, "%d", &v) != 1) { ok = 0; break; } row[i] = (int8_t) v; }
         if (!ok) break;
-        int m = 0; for (int i = 0; i < n; i++) if (row[i] < d) m |= 1 << i;
-        if (rep_of[m] >= 0) { memcpy(rp + rep_of[m] * ST, row, n); got++; }
+        int m = row_code(row);
+        if (rep_of[m] >= 0) { memcpy(rp + rep_of[m] * ST, row, n); loaded[(size_t) c * R + rep_of[m]] = 1; got++; }
       }
       fclose(f);
       if (c == 0) printf("resumed %d representative rows from %s\n", got, resume);
@@ -295,7 +326,9 @@ int main(int argc, char **argv) {
     uint8_t *ac = active + (size_t) c * R;
     { int *perm = malloc(sizeof(int) * R); for (int j = 0; j < R; j++) perm[j] = j;
       for (int j = R - 1; j > 0; j--) { int k = xr() % (j + 1); int t = perm[j]; perm[j] = perm[k]; perm[k] = t; }
-      for (int q = 0; q < nactive; q++) { ac[perm[q]] = 1; }
+      int na = 0;
+      if (loaded) for (int j = 0; j < R && na < nactive; j++) if (loaded[(size_t) c * R + j]) { ac[j] = 1; na++; }
+      for (int q = 0; q < R && na < nactive; q++) if (!ac[perm[q]]) { ac[perm[q]] = 1; na++; }
       free(perm); }
     if (st_ok) {
       int sc_ = c % st_C;

@@ -66,11 +66,11 @@ extern "C" __global__ void tabu_steps(
         int jj = s0;
         for (int q = 0; q < R; q++) { int k = (s0 + q) % R; if (act[k] && cf[k] > 0) { jj = k; break; } }
         j = jj;
-        int lo[ST], hi[ST], nh = 0; nl = 0;
-        for (int i = 0; i < n; i++) { if (rp[jj * ST + i] < d) lo[nl++] = i; else hi[nh++] = i; }
-        int s = 0;
-        for (int a = 0; a < nl; a++) for (int b = a + 1; b < nl; b++) { pa[s] = lo[a]; pb[s] = lo[b]; s++; }
-        for (int a = 0; a < nh; a++) for (int b = a + 1; b < nh; b++) { pa[s] = hi[a]; pb[s] = hi[b]; s++; }
+        int bp[4][ST], bn[4] = {0, 0, 0, 0};
+        for (int i = 0; i < n; i++) { int b = rp[jj * ST + i] / d; bp[b][bn[b]++] = i; }
+        int s = 0; nl = bn[0];
+        for (int b = 0; b < 4; b++)
+          for (int a = 0; a < bn[b]; a++) for (int c2 = a + 1; c2 < bn[b]; c2++) { pa[s] = bp[b][a]; pb[s] = bp[b][c2]; s++; }
         S = s; oldself = 0; newconf_j = 0;
         do_rep = 0; crossj = 0; crossn = 0; selfn = 0;
         if (P.p_replace > 0.0f && (rnd(&rs) % 1000000) < (u64) (P.p_replace * 1000000.0f)) {
