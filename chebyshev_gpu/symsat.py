@@ -158,6 +158,9 @@ with open(cnf, 'w') as f:
     f.write(f"p cnf {pool.top} {len(cls)}\n")
     for c in cls: f.write(' '.join(map(str, c)) + ' 0\n')
 if A.dimacs_only: print("wrote", cnf); sys.exit(0)
+import gc
+if A.solver == 'kissat':  # free the in-memory clauses before the solver runs
+    ncls = len(cls); del cls; gc.collect()
 t0 = time.time()
 here = os.path.dirname(os.path.abspath(__file__))
 if A.solver == 'kissat':
