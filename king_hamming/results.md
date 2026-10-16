@@ -1,6 +1,6 @@
 # Results
 
-Lower bounds M(q + 1, q) ≥ N proved by the campaign, as of 2026-10-14. Each number N is
+Lower bounds M(q + 1, q) ≥ N proved by the campaign, as of 2026-10-16. Each number N is
 the exact number of permutations in the array (q + F²·θ, with F = p^⌊r/2⌋). A `^` means
 the field's matching certificate was found and independently verified, so the bound is
 proved; see [docs/MATCHING_CERTIFICATE.md](docs/MATCHING_CERTIFICATE.md) for why that is
@@ -11,7 +11,7 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | Prime \ Exponent | 3 | 5 | 7 | 9 | 11 | 13 | 15 | 17 | 19 | 21 | 23 | 25 | 27 | 29 | 31 | 33 | 35 | 37 | 39 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 2 | 28^ | 192^ | 1,472^ | 11,264^ | 89,088^ | 704,512^ | 5,619,712^ | 44,826,624^ | 358,350,848^ | 2,864,709,632^ | 22,913,482,752^ | 183,274,307,584^ | 1,466,127,351,808^ | 11,728,481,943,552^ | 93,826,781,806,592^ | 750,605,664,518,144 | 6,004,828,136,275,968 | 48,038,487,651,254,272 | 384,307,626,332,127,232 |
-| 3 | 144^ | 3,483^ | 90,396^ | 2,407,887^ | 64,717,704^ | 1,744,720,803^ | 47,083,546,836^ | 1,271,040,530,967^ | 34,316,157,233,664^ | 926,518,811,386,923^ | 25,015,851,002,148,876 | — | — | — | — | — | — | — | — |
+| 3 | 144^ | 3,483^ | 90,396^ | 2,407,887^ | 64,717,704^ | 1,744,720,803^ | 47,083,546,836^ | 1,271,040,530,967^ | 34,316,157,233,664^ | 926,518,811,386,923^ | 25,015,851,002,148,876^ | — | — | — | — | — | — | — | — |
 | 5 | 1,375^ | 159,375^ | 19,609,375^ | 2,443,359,375^ | 305,224,609,375^ | 38,148,193,359,375^ | 4,768,402,099,609,375^ | — | — | — | — | — | — | — | — | — | — | — | — |
 | 7 | 6,076^ | 1,990,429^ | 678,717,081^ | 232,569,366,743^ | 79,760,841,208,636^ | 27,357,428,724,361,309^ | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | 11 | 47,190^ | 61,375,072^ | 81,534,323,464^ | 108,502,034,795,770^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
@@ -52,7 +52,7 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 173 | 11,648,845,664^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **97 fields are proved.** Every one matched with the first polynomial the solver could
+- **98 fields are proved.** Every one matched with the first polynomial the solver could
   finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
   found.
 - **7¹³** was matched on 2026-10-07 by the wide GPU matcher on merlin (723 blocks, 7 passes,
@@ -72,12 +72,15 @@ Notes:
 - **41⁵, 43⁵, 47⁵, 53⁵, 59⁵, 127³, 131³, 137³, 139³, 149³, 151³, 157³, 163³ and 3²¹** (2026-10-08/10) and **2³³, 2³⁵, 2³⁷, 2³⁹, 3²³** were started by the
   hourly "quickest field not yet calculated" rule (`campaigns/next_field.py`). 3²¹ (restarted with
   4096-cell tiles at Zooey's request) matched with the wide matcher; the others on a single GPU in
-  minutes. 2³³, 2³⁵, 2³⁷, 2³⁹ and 3²³ have DP values only (no `^`):
+  minutes. 2³³, 2³⁵, 2³⁷ and 2³⁹ have DP values only (no `^`); 3²³ was matched later (below):
   - **2³³, 2³⁵, 2³⁷ and 2³⁹:** no matcher takes p = 2 past F = 65,534 yet (the wide matcher refuses
     p = 2, since F is a power of two). They are the first fields with r above 31; the DP's old
     cap of 31 had no width reason and was lifted on 2026-10-08.
-  - **3²³:** its certificate (about 197 GiB) wouldn't fit merlin's free disk now that 7¹³'s fills
-    the second drive.
+  - **3²³** (2026-10-14/16): its certificate (197 GiB) wouldn't fit merlin's free disk while 7¹³'s
+    filled the second drive. 7¹³'s certificate was moved to gawain (the table checks it there over
+    ssh, `campaigns/remote_certificates.py`), and the wide matcher ran 38.7 hours on merlin's GPU
+    (2,235 phases), then two verifications (the matcher's own, about 6 h, and the feeder's
+    `kh_verify_wide`, about 5 h). Matched and verified; M(3²³ + 1, 3²³) ≥ 25,015,851,002,148,876.
 - **107³, 109³ and 113³** were cancelled before their DP finished in September; Zooey retried
   them from the dashboard on 2026-10-06, and all three were matched and verified by 2026-10-07 08:00.
 
