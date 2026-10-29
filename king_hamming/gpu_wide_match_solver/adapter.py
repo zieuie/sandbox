@@ -98,12 +98,12 @@ class GPUWideMatchingAdapter(GPUMatchingAdapter):
     max_requests = MAX_Q
 
     def validate(self, specification, internal=False):
-        """Pinned-field validation with the wide kernel's bounds (32-bit choices, q < 2^40, p != 2)."""
+        """Pinned-field validation with the wide kernel's bounds (32-bit choices, q < 2^40)."""
         super(GPUMatchingAdapter, self).validate(specification, internal)
         dp, _, _ = decode_input(specification)
         arguments = specification["arguments"]
-        if dp["f"] > MAX_F or dp["p"] == 2:
-            raise ValueError("wide GPU matching requires F <= 2^32 - 2 and p > 2")
+        if dp["f"] > MAX_F:
+            raise ValueError("wide GPU matching requires F <= 2^32 - 2")
         if request_count(dp) > self.max_requests:
             raise ValueError(f"wide GPU matching requires at most {self.max_requests} requests")
         device = arguments.get("gpu_memory_bytes", MIN_DEVICE_BYTES)

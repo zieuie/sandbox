@@ -190,6 +190,7 @@ static void progress(uint64_t done, uint64_t total, const char *phase, const cha
 typedef struct {
     int fd;
     uint32_t bits;
+    bool plain;                // all ones is an ordinary choice (the finished payload when F is a power of two)
     uint64_t sentinel, n, bytes;
     uint64_t offset;           // the payload's first byte in the file (--payload-offset)
     uint64_t dirty;            // page bytes written since the last fdatasync
@@ -255,7 +256,7 @@ static bool store_read(store_t *store, uint64_t first, uint64_t count, uint32_t 
             available += 8;
         }
         uint64_t value = accumulator & mask;
-        out[index] = value == mask ? NOCHOICE : (uint32_t)value;
+        out[index] = value == mask && !store->plain ? NOCHOICE : (uint32_t)value;
         accumulator >>= store->bits;
         available -= store->bits;
     }
@@ -279,7 +280,7 @@ static bool store_write(store_t *store, uint64_t first, uint64_t count, const ui
     size_t at = 0;
     for (uint64_t index = 0; index < count; ++index) {
         uint64_t value = values[index] == NOCHOICE ? store->sentinel : values[index];
-        if (value >= store->sentinel && values[index] != NOCHOICE) return false;
+        if (!store->plain && value >= store->sentinel && values[index] != NOCHOICE) return false;
         accumulator |= value << available;
         available += bits;
         while (available >= 8) {
@@ -1373,6 +1374,48 @@ static bool check_payload(bctx_t *x) {
     return ok && fsync(x->store.fd) == 0;
 }
 
+// p = 2: F is a power of two, so during the run each choice has one more bit than the certificate's
+// ceil(log2 F) and all ones stays "unmatched". A complete matching has no unmatched request: pack it
+// down to the certificate's width in place (a request's new position never passes its old one, and
+// each chunk is read before it is written), clear the padding, cut the file and check it again.
+static bool repack_payload(bctx_t *x, uint32_t bits) {
+    store_t from = x->store, to = x->store;
+    from.buffer = NULL; from.capacity = 0;
+    to.buffer = NULL; to.capacity = 0;
+    to.bits = bits;
+    to.plain = true;
+    to.sentinel = (UINT64_C(1) << bits) - 1;
+    to.bytes = (x->n * bits + 7) / 8;
+    uint64_t step = UINT64_C(1) << 22, n = x->n;
+    uint32_t *values = malloc(step * sizeof *values);
+    bool ok = values != NULL;
+    for (uint64_t first = 0; ok && first < n; first += step) {
+        uint64_t count = first + step < n ? step : n - first;
+        ok = store_read(&from, first, count, values);
+        for (uint64_t index = 0; ok && index < count; ++index) ok = values[index] != NOCHOICE;
+        ok = ok && store_write(&to, first, count, values);
+        if (first / step % 16 == 0) progress(n, n, "packing payload", "check", first + count, n);
+    }
+    free(values);
+    free(from.buffer);
+    free(to.buffer);
+    if (!ok) return false;
+    uint32_t tail = (uint32_t)((n * bits) & 7);
+    if (tail) {
+        uint8_t last = 0;
+        uint64_t at = x->store.offset + to.bytes - 1;
+        if (!full_pread(x->store.fd, &last, 1, at)) return false;
+        last = (uint8_t)(last & ((1u << tail) - 1));
+        if (!full_pwrite(x->store.fd, &last, 1, at)) return false;
+    }
+    if (ftruncate(x->store.fd, (off_t)(x->store.offset + to.bytes)) != 0 || fdatasync(x->store.fd) != 0) return false;
+    x->store.bits = bits;
+    x->store.plain = true;
+    x->store.sentinel = to.sentinel;
+    x->store.bytes = to.bytes;
+    return check_payload(x);
+}
+
 static void field_progress(uint64_t done, uint64_t total, void *context) {
     progress(0, *(const uint64_t *)context, "field", "field", done, total);
 }
@@ -1447,9 +1490,12 @@ int main(int argc, char **argv) {
                 MAX_ROUNDS_LIMIT);
         return 1;
     }
-    if (parameters.f == (UINT64_C(1) << bits) || parameters.f > UINT32_MAX - 1) {
-        fprintf(stderr, "kh_gpu_wide_kernel: F = %u leaves no spare payload value for 'unmatched' "
-                "(p = 2); use kh_gpu_block_kernel\n", parameters.f);
+    // A power of two F (p = 2) leaves no spare value for "unmatched" in ceil(log2 F) bits: the payload
+    // gets one extra bit while the run lasts and is packed down when the matching is complete.
+    const bool power_of_two = parameters.f == (UINT64_C(1) << bits);
+    const uint32_t store_bits = bits + (power_of_two ? 1u : 0u);
+    if (parameters.f > UINT32_MAX - 1 || store_bits > 32) {
+        fprintf(stderr, "kh_gpu_wide_kernel: F = %u is above this kernel's 2^32 - 2\n", parameters.f);
         return 1;
     }
     uint64_t *bfirst = NULL, n = 0;
@@ -1552,7 +1598,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "kh_gpu_wide_kernel: %s\n", error);
         return 1;
     }
-    if (payload_offset > (UINT64_C(1) << 20) || !store_open(&bx.store, argv[4], n, bits, payload_offset)) {
+    if (payload_offset > (UINT64_C(1) << 20) || !store_open(&bx.store, argv[4], n, store_bits, payload_offset)) {
         fprintf(stderr, "kh_gpu_wide_kernel: cannot create the payload (it must not exist)\n");
         return 1;
     }
@@ -1572,7 +1618,7 @@ int main(int argc, char **argv) {
     kh_cuda_close(&gpu.cuda);
     double t_solve = now();
     if (code == 0) {
-        if (!check_payload(&bx)) {
+        if (!check_payload(&bx) || (power_of_two && !repack_payload(&bx, bits))) {
             fprintf(stderr, "kh_gpu_wide_kernel: final payload check failed\n");
             code = 1;
         }

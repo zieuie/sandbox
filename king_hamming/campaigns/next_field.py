@@ -131,12 +131,9 @@ def certificate_bytes(q: int, f: int) -> int:
 
 def matchable(p: int, r: int, q: int, f: int, disk_bytes: int) -> str | None:
     """None if a matcher can take the field, else why not."""
-    if p == 2 and q > BLOCK_MAX_Q:
-        return "p = 2 needs the block matcher (q below 2^36)"
+    # (p = 2 used to be refused here; the wide matcher takes it since 2026-10-29, q up to 2^40)
     if q > WIDE_MAX_Q:
         return "q above the wide matcher's 2^40"
-    if f > BLOCK_MAX_F and p == 2:
-        return "F too large for the block matcher"
     if certificate_bytes(q, f) > disk_bytes:
         return f"certificate ({certificate_bytes(q, f) / 2**30:.0f} GiB) larger than any free disk"
     return None

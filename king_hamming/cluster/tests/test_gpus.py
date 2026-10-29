@@ -426,8 +426,10 @@ class GPUWideTests(unittest.TestCase):
         p600s = [self.node(f"p600-{i}", P600, ram=16 * 1024**3) for i in range(4)]
         plan = gpu_policy.plan(self.wide_dp(5, 15), {}, today + p600s)
         self.assertEqual((plan["hosts"], plan["gpu_memory_bytes"]), (["merlin"], gpus.usable_bytes(rtx)))
-        # p = 2 can't mark 'unmatched' in the payload (F is a power of two).
-        self.assertIsNone(gpu_policy.wide_plan(self.wide_dp(2, 37), {}, nodes, 4))
+        # p = 2 (F a power of two) is taken since 2026-10-29: the kernel keeps one extra payload bit
+        # while it runs and packs it down when the matching is complete.
+        self.assertEqual(gpu_policy.wide_plan(self.wide_dp(2, 37), {}, nodes, 4)["program"], "match_gpu_wide")
+        self.assertIsNone(gpu_policy.wide_plan(self.wide_dp(2, 41), {}, nodes, 4))   # q above 2^40
 
     def test_adapter_validates_and_runs_the_wide_bridge(self) -> None:
         from gpu_wide_match_solver.adapter import GPUWideMatchingAdapter, minimum_host_bytes

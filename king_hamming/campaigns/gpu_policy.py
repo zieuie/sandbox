@@ -111,7 +111,7 @@ def wide_plan(dp: dict, settings: dict, nodes: list[dict], threads: int) -> dict
     """
     if not settings.get("gpu_wide_matching", DEFAULTS["gpu_wide_matching"]):
         return None
-    if dp["p"] == 2 or dp["f"] > wide_adapter.MAX_F or dp["q"] > wide_adapter.MAX_Q:
+    if dp["f"] > wide_adapter.MAX_F or dp["q"] > wide_adapter.MAX_Q:
         return None
     hosts = []
     for node in nodes:
@@ -178,8 +178,6 @@ def blocker(dp: dict, settings: dict, nodes: list[dict]) -> str | None:
                           f"less {gib(HOST_RESERVE_BYTES)} kept for the system)")
     if not settings.get("gpu_wide_matching", DEFAULTS["gpu_wide_matching"]):
         limits.append("wide matching is turned off")
-    elif dp["p"] == 2:
-        limits.append("the wide matcher refuses p = 2 (F is a power of two)")
     elif q > wide_adapter.MAX_Q:
         limits.append(f"q = {q:,} is above the wide matcher's {wide_adapter.MAX_Q:,}")
     else:

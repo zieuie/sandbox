@@ -25,8 +25,10 @@ class RankingTests(unittest.TestCase):
         self.assertEqual([item["hours"] for item in found], sorted(item["hours"] for item in found))
 
     def test_matchability(self) -> None:
-        # 2^33: F = 65,536 is past the block matcher, and the wide matcher refuses p = 2.
-        self.assertIsNotNone(next_field.matchable(2, 33, 2**33, 2**16, 10**15))
+        # 2^33: F = 65,536 is past the block matcher; the wide matcher takes p = 2 (since 2026-10-29)...
+        self.assertIsNone(next_field.matchable(2, 33, 2**33, 2**16, 10**15))
+        # ...up to q = 2^40 - 1: 2^41 has no matcher yet.
+        self.assertIsNotNone(next_field.matchable(2, 41, 2**41, 2**20, 10**15))
         # 3^23's 212 GB certificate needs that much disk on the matching host.
         self.assertIsNotNone(next_field.matchable(3, 23, 3**23, 3**11, 96 * 10**9))
         self.assertIsNone(next_field.matchable(41, 5, 41**5, 41**2, 96 * 10**9))
@@ -37,8 +39,10 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(scheduling.dp_estimate({"arguments": {"p": 2, "r": 33}})["budget"], 2**17)
         found = {(item["p"], item["r"]): item for item in next_field.candidates(set(), SETTINGS, 100 * 2**30)}
         self.assertIn((2, 33), found)
-        self.assertIsNotNone(found[(2, 33)]["dp_only"])      # no matcher takes it yet: DP value only
-        self.assertEqual(found[(2, 33)]["match_hours"], 0.0)
+        self.assertIsNone(found[(2, 33)]["dp_only"])         # the wide matcher takes p = 2 now
+        self.assertIn((2, 41), found)
+        self.assertIsNotNone(found[(2, 41)]["dp_only"])      # q above 2^40: no matcher: DP value only
+        self.assertEqual(found[(2, 41)]["match_hours"], 0.0)
         self.assertIsNone(found[(41, 5)]["dp_only"])
         # Tiles that wouldn't fit the workers' disks rule a field out.
         self.assertNotIn((2, 33), {(i["p"], i["r"]) for i in next_field.candidates(set(), SETTINGS, 100 * 2**30, 10**6)})
