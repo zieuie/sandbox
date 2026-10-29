@@ -61,8 +61,9 @@ width (17 bits):
 - A block's requests are one run of consecutive cells per (DP run, coset). At 7¹³ that's about
   270,000 runs of about 1.3 KB per block, about 750 KB apart.
 - An unmatched request is stored as all ones (`2^bits − 1`). That value can't be a real choice
-  unless F is a power of two, which only happens for p = 2. The wide solver refuses p = 2 and
-  leaves those fields to the block matcher.
+  unless F is a power of two, which only happens for p = 2. For p = 2 (since 2026-10-29) the payload
+  keeps one extra bit per choice during the run and is packed down to `bits` in place when the
+  matching is complete (`repack_payload`), so the certificate is the usual KHM1.
 - Exchange rounds read choices back with `pread`: the target block's own runs, plus single
   entries for its imports.
 - There is no separate write stage. A final read of the payload confirms there's no sentinel left
@@ -129,8 +130,8 @@ Every field so far had a round-1 residual of 0, including 13⁹, so exchange is 
 | Choice writes | interleaved; tens of minutes in total | 2–4 GB of page writes per block |
 | **Solver total** | **about 3–6 h** | was 7–9 h when estimated from the old builder |
 
-The rescue passes described above are built, as is refusing p = 2 (F is a power of two, so the
-payload has no spare "unmatched" value). **One inherited limit:** when n = q, a block's leftover
+The rescue passes described above are built, as is p = 2 (F is a power of two, so the payload
+gets one extra bit while it runs and is packed down at the end). **One inherited limit:** when n = q, a block's leftover
 requests have nowhere to go, because every other window is exactly full. Exchange can't fix that,
 in either solver. Production-size blocks have never left any (11⁹, 13⁹, 29⁷).
 
@@ -194,7 +195,7 @@ Needed before a 7¹³ run:
 - **Program `match_gpu_wide`:** an adapter, bridge and spec builder copied from the block
   matcher, registered in the leader's adapters, and with its own worker rollout.
 - **Feeder routing:** use `match_gpu_wide` only when `match_gpu_blocks` is refused (F > 65,534,
-  q ≥ 2³⁶, or rows over the host-RAM limit), and not for p = 2.
+  q ≥ 2³⁶, or rows over the host-RAM limit); p = 2 goes wide too since 2026-10-29.
 - **Verifier:** `artifacts.verify` picks `kh_verify_wide` for fields `kh_verify_khm1` can't take.
 - **Dashboard:** the feeder note for a refused field lists every limit it hits, not just the first.
   That was offered separately and is still useful.

@@ -53,8 +53,13 @@ make -C king_hamming/cuda toolchain && make -C king_hamming/gpu_wide_match_solve
 (`"engine": "gpu-wide"`, plus `passes`, `rescue_passes` and `row_bytes`).
 - **Exit codes:** 0 is a full matching, 4 incomplete (no payload), 1 an error.
 - **The payload must not exist beforehand,** and it is removed unless the matching completes.
-- **p = 2 is refused:** F is then a power of two, so the payload has no spare value to mark a
-  request "unmatched".
+- **p = 2 (since 2026-10-29):** F is then a power of two, so ceil(log2 F) bits leave no spare value
+  to mark a request "unmatched". While the run lasts the payload therefore has one extra bit per
+  choice (all ones stays "unmatched"); when the matching is complete the kernel packs it down in
+  place to the certificate's width, clears the padding, cuts the file and checks it again
+  (`repack_payload`). An incomplete run still publishes nothing. Tested 2^7 to 2^29 and
+  `tests/check_p2.py`. Also since then: `r` up to 63 (the field arithmetic and `kh_verify_wide`
+  had `r <= 31` and 32-entry buffers; 2^33 has a 34-coefficient polynomial).
 - **`kh_verify_wide` takes `kh_verify_khm1`'s arguments,** plus `--threads` and `--row-bytes`.
 
 ## How it works
