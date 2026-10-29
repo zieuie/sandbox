@@ -1549,7 +1549,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    uint16_t polynomial[32] = {0};
+    uint16_t polynomial[64] = {0};
     uint64_t candidate = 0;
     if (poly_text != NULL) {
         if (!polynomial_parse(poly_text, &parameters, polynomial) || !fw_primitive(&parameters, polynomial)) {

@@ -393,7 +393,7 @@ def verify(path, dp, dp_digest, max_bytes=2**31, hydrate=None, native=None):
             raise ValueError("native verifier is not built")
         memory = native_memory(dp, q, f) if use_native else 4 * q + 4 * budget + 2 * ((q + 7) // 8) + 64 * 1024 * 1024
         # Too big for kh_verify_khm1 (all rows at once, q < 2^36): kh_verify_wide in passes.
-        use_wide = use_native and (q >= NATIVE_MAX_Q or memory > max_bytes) and WIDE_VERIFIER.exists()
+        use_wide = use_native and (q >= NATIVE_MAX_Q or memory > max_bytes or r > 31) and WIDE_VERIFIER.exists()   # kh_verify_khm1 stops at r = 31
         if use_wide:
             threads = verify_threads()
             fixed = wide_fixed_memory(dp, q, f, threads)

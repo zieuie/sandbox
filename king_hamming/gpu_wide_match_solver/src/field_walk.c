@@ -12,12 +12,12 @@
 // with a table of (p - carry * c_i mod p), with no divisions in the inner loop.
 
 typedef struct {
-    uint32_t d[32];
+    uint32_t d[64];
 } element_t;
 
 typedef struct {
     uint32_t p, r, half;
-    uint32_t poly[32];
+    uint32_t poly[64];
 } ring_t;
 
 static ring_t ring_of(const kh_parameters_t *parameters, const uint16_t *polynomial) {
@@ -29,7 +29,7 @@ static ring_t ring_of(const kh_parameters_t *parameters, const uint16_t *polynom
 }
 
 static element_t multiply(const ring_t *ring, const element_t *a, const element_t *b) {
-    uint64_t product[64] = {0};
+    uint64_t product[128] = {0};
     uint32_t p = ring->p, r = ring->r;
     for (uint32_t i = 0; i < r; ++i) {
         for (uint32_t j = 0; j < r; ++j) {
@@ -79,7 +79,7 @@ static bool is_one(const ring_t *ring, const element_t *element) {
 
 bool fw_primitive(const kh_parameters_t *parameters, const uint16_t *polynomial) {
     uint32_t p = parameters->p, r = parameters->r;
-    if (parameters->q < 2 || parameters->q >= FW_MAX_Q || r < 3 || r > 31 || polynomial[r] != 1 || polynomial[0] == 0) {
+    if (parameters->q < 2 || parameters->q >= FW_MAX_Q || r < 3 || r > 63 || polynomial[r] != 1 || polynomial[0] == 0) {
         return false;
     }
     for (uint32_t index = 0; index <= r; ++index) {

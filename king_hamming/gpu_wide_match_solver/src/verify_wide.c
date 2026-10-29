@@ -46,7 +46,7 @@ static bool parse_u64(const char *text, uint64_t *value) {
 
 typedef struct {
     uint64_t p, r, q, qm1, f, budget, half, top_place;
-    uint64_t poly[32];
+    uint64_t poly[64];
     uint64_t magic_p, magic_f;   // floor(2^64 / d) + 1: exact quotients for n < 2^40, d < 2^24
     double inverse_top;          // 1 / p^(r-1), corrected after use
     uint32_t *subtract;          // subtract[top * r + j] = top * c_j mod p
@@ -87,7 +87,7 @@ static inline uint64_t cell_of(const field_t *field, uint64_t element) {
 }
 
 static uint64_t multiply(const field_t *field, uint64_t a, uint64_t b) {
-    uint64_t p = field->p, r = field->r, da[32], db[32], product[64] = {0};
+    uint64_t p = field->p, r = field->r, da[64], db[64], product[128] = {0};
     for (uint64_t j = 0; j < r; ++j) { da[j] = a % p; a /= p; db[j] = b % p; b /= p; }
     for (uint64_t i = 0; i < r; ++i) {
         for (uint64_t j = 0; j < r; ++j) product[i + j] = (product[i + j] + da[i] * db[j]) % p;
@@ -260,7 +260,7 @@ int main(int argc, char **argv) {
     }
     uint64_t p, r, offset, threads = 1, row_bytes = 0;
     if (argc < 7 || !parse_u64(argv[1], &p) || !parse_u64(argv[2], &r) || !parse_u64(argv[6], &offset) ||
-        p < 3 || p > 65535 || r < 3 || r > 31) {
+        p < 2 || p > 65535 || r < 3 || r > 63) {
         return fail("invalid arguments");
     }
     for (int index = 7; index + 1 < argc + 1; index += 2) {
