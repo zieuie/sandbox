@@ -20,8 +20,11 @@ These notes are written by hand; everything from "Summary" down is generated.
   each machine's GPU section; see [GPU.md](GPU.md) for how the cluster uses them.
 - **purdin `.110` joined on 2026-10-28:** a desktop (NZXT N7 Z590 board, i7-11700KF 8C/16T, 30.7 GiB,
   **RTX 3080 10 GiB (LHR)**, 1 TB WD Blue SN570, Ubuntu 26.04, Linux 7.0.0-42). Wi-Fi `192.168.4.110`
-  is up; its Ethernet (`enp3s0`) is plugged in but has only a link-local address, and it has no
-  passwordless sudo yet, so the wired profile (`10.203.0.110/24`) and the watchdog are pending.
+  is up; its Ethernet (`enp3s0`, "King Hamming wired", `10.203.0.110/24`, no default route) was set
+  up on 2026-10-29 with `cluster/ops/add_wired_worker.sh` (0.2 ms to merlin on the switch), and the
+  Wi-Fi watchdog (same script version as the other nine) is installed and active. The
+  "Ethernet"/"Network" sections of its machine details below were generated before that change
+  and still show the link-local address. Not yet an agent: the campaign is stopped on purpose.
 - **pellinore `.152` was retired on 2026-10-04** and powered off; see
   [MACHINE_CONTRIBUTIONS.md](MACHINE_CONTRIBUTIONS.md). Its last inventory is in this
   file's git history.
