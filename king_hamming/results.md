@@ -10,7 +10,7 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 
 | Prime \ Exponent | 3 | 5 | 7 | 9 | 11 | 13 | 15 | 17 | 19 | 21 | 23 | 25 | 27 | 29 | 31 | 33 | 35 | 37 | 39 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 28^ | 192^ | 1,472^ | 11,264^ | 89,088^ | 704,512^ | 5,619,712^ | 44,826,624^ | 358,350,848^ | 2,864,709,632^ | 22,913,482,752^ | 183,274,307,584^ | 1,466,127,351,808^ | 11,728,481,943,552^ | 93,826,781,806,592^ | 750,605,664,518,144^ | 6,004,828,136,275,968 | 48,038,487,651,254,272 | 384,307,626,332,127,232 |
+| 2 | 28^ | 192^ | 1,472^ | 11,264^ | 89,088^ | 704,512^ | 5,619,712^ | 44,826,624^ | 358,350,848^ | 2,864,709,632^ | 22,913,482,752^ | 183,274,307,584^ | 1,466,127,351,808^ | 11,728,481,943,552^ | 93,826,781,806,592^ | 750,605,664,518,144^ | 6,004,828,136,275,968^ | 48,038,487,651,254,272 | 384,307,626,332,127,232 |
 | 3 | 144^ | 3,483^ | 90,396^ | 2,407,887^ | 64,717,704^ | 1,744,720,803^ | 47,083,546,836^ | 1,271,040,530,967^ | 34,316,157,233,664^ | 926,518,811,386,923^ | 25,015,851,002,148,876^ | — | — | — | — | — | — | — | — |
 | 5 | 1,375^ | 159,375^ | 19,609,375^ | 2,443,359,375^ | 305,224,609,375^ | 38,148,193,359,375^ | 4,768,402,099,609,375^ | — | — | — | — | — | — | — | — | — | — | — | — |
 | 7 | 6,076^ | 1,990,429^ | 678,717,081^ | 232,569,366,743^ | 79,760,841,208,636^ | 27,357,428,724,361,309^ | — | — | — | — | — | — | — | — | — | — | — | — | — |
@@ -52,7 +52,7 @@ Each number is the exact number of permutations (rows) in the array. `^` means a
 | 173 | 11,648,845,664^ | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Notes:
-- **99 fields are proved.** Every one matched with the first polynomial the solver could
+- **100 fields are proved.** Every one matched with the first polynomial the solver could
   finish (5¹⁵'s first two failed from a solver defect, below); no Hall obstruction has ever been
   found.
 - **7¹³** was matched on 2026-10-07 by the wide GPU matcher on merlin (723 blocks, 7 passes,
@@ -80,8 +80,12 @@ Notes:
     SHA-256 `480a03bf500ce31fd3fb7d74150e1e67442c672492c73cdc3c1437ab0c53164e`, kept at
     `~/king_hamming_archive/2_33/` on purdin. It is not in the leader's database, so
     `campaigns/result_table.py` would not show its `^`; the cell above was set by hand.
-  - **2³⁵, 2³⁷ and 2³⁹:** 2³⁵ is being matched the same way; 2³⁷ needs about 288 GiB of disk and 2³⁹
-    about 1.2 TiB. Before 2026-10-29 no matcher took p = 2 past F = 65,534 (the wide matcher refused
+  - **2³⁵ (2026-10-29):** the same way on purdin: matching 5,190 s (1 h 27 min), independent
+    verification 2,750 s (46 min), full matching of 34,359,738,368 requests, certificate
+    73,014,444,151 bytes, SHA-256 `7a61a3bdce7905251c15a7cca55c789223e0088a1f0686483d7fd4175111f830`,
+    kept at `~/king_hamming_archive/2_35/` on purdin. Like 2³³ it is not in the leader's database, so
+    its `^` was set by hand.
+  - **2³⁷ and 2³⁹:** still DP values only. 2³⁷ needs about 288 GiB of disk and 2³⁹ about 1.2 TiB. Before 2026-10-29 no matcher took p = 2 past F = 65,534 (the wide matcher refused
     p = 2, since F is a power of two). They are the first fields with r above 31; the DP's old
     cap of 31 had no width reason and was lifted on 2026-10-08.
   - **3²³** (2026-10-14/16): its certificate (197 GiB) wouldn't fit merlin's free disk while 7¹³'s
