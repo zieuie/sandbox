@@ -18,6 +18,11 @@ These notes are written by hand; everything from "Summary" down is generated.
   merlin `.151` (MSI GE76 laptop, i7-11800H, 38.9 GiB, RTX 3060 Laptop) and gawain `.156`
   (ThinkPad P1 Gen 2, i7-9850H, 7.4 GiB, Quadro T1000). GPUs appear in the summary and in
   each machine's GPU section; see [GPU.md](GPU.md) for how the cluster uses them.
+- **neary `.109` joined on 2026-10-29:** a Lenovo 82JS laptop (AMD Ryzen 5 5600H 6C/12T, 30.7 GiB,
+  **RTX 3050 Laptop 4 GiB**, 256 GB SPCC NVMe with ~205 GB free, Ubuntu 26.04.1, Linux 7.0.0-42), the
+  first AMD CPU in the fleet. Onboarded the same day as purdin (wired profile `10.203.0.109/24`, Wi-Fi
+  watchdog). **Not to receive DP results:** Zooey asked that no tiles, DP artifacts or certificates be
+  sent to him; he is not an agent and is left out of the certificate backup.
 - **purdin `.110` joined on 2026-10-28:** a desktop (NZXT N7 Z590 board, i7-11700KF 8C/16T, 30.7 GiB,
   **RTX 3080 10 GiB (LHR)**, 1 TB WD Blue SN570, Ubuntu 26.04, Linux 7.0.0-42). Wi-Fi `192.168.4.110`
   is up; its Ethernet (`enp3s0`, "King Hamming wired", `10.203.0.110/24`, no default route) was set
@@ -48,6 +53,7 @@ These notes are written by hand; everything from "Summary" down is generated.
 | 192.168.4.106 | ok | midnights | x86_64 | 8 | 15.5 GiB | Quadro P600 (2.0 GiB) | 1 | none | Linux 7.0.0-38-generic |
 | 192.168.4.107 | ok | poets | x86_64 | 8 | 15.5 GiB | Quadro P600 (2.0 GiB) | 1 | none | Linux 7.0.0-38-generic |
 | 192.168.4.108 | ok | showgirl | x86_64 | 8 | 15.5 GiB | Quadro P600 (2.0 GiB) | 1 | none | Linux 7.0.0-38-generic |
+| 192.168.4.109 | ok | neary | x86_64 | 12 | 30.7 GiB | NVIDIA GeForce RTX 3050 Laptop GPU (4.0 GiB) | 1 | none | Linux 7.0.0-42-generic |
 | 192.168.4.110 | ok | purdin | x86_64 | 16 | 30.7 GiB | NVIDIA GeForce RTX 3080 (10.0 GiB) | 1 | none | Linux 7.0.0-42-generic |
 | 192.168.4.151 | ok | uther | x86_64 | 16 | 38.9 GiB | NVIDIA GeForce RTX 3060 Laptop GPU (6.0 GiB) | 1 | none | Linux 7.0.0-38-generic |
 | 192.168.4.156 | ok | gawain | x86_64 | 12 | 7.4 GiB | Quadro T1000 (4.0 GiB) | 1 | none | Linux 7.0.0-38-generic |
@@ -1454,6 +1460,173 @@ default via 192.168.4.1 dev wlp3s0 proto dhcp src 192.168.4.108 metric 600
 page_size=4096
 open_files_soft=1024
 open_files_hard=1048576
+transparent_hugepages=always [madvise] never
+```
+
+### 192.168.4.109
+
+- Hostname: `neary`
+- CPU model: `AMD Ryzen 5 5600H with Radeon Graphics`
+- Online CPUs: `12`
+- Memory bytes: `32956149760`
+- GPUs: `NVIDIA GeForce RTX 3050 Laptop GPU (4.0 GiB)`
+- NVIDIA driver: `595.99.02`
+- NUMA nodes: `1`
+- Virtualization: `none`
+- Watchdog devices: `none`
+- systemd available: `yes`
+- Compiler: ``
+- Uptime: `up 13 minutes`
+
+#### Operating system
+
+```text
+PRETTY_NAME="Ubuntu 26.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="26.04"
+VERSION="26.04.1 LTS (Resolute Raccoon)"
+VERSION_CODENAME=resolute
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=resolute
+LOGO=ubuntu-logo
+```
+
+#### CPU topology
+
+```text
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           48 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  12
+On-line CPU(s) list:                     0-11
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD Ryzen 5 5600H with Radeon Graphics
+CPU family:                              25
+Model:                                   80
+Thread(s) per core:                      2
+Core(s) per socket:                      6
+Socket(s):                               1
+Stepping:                                0
+Frequency boost:                         enabled
+CPU(s) scaling MHz:                      79%
+CPU max MHz:                             4280.9849
+CPU min MHz:                             412.6250
+BogoMIPS:                                6587.15
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap
+Virtualization:                          AMD-V
+L1d cache:                               192 KiB (6 instances)
+L1i cache:                               192 KiB (6 instances)
+L2 cache:                                3 MiB (6 instances)
+L3 cache:                                16 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-11
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Mitigation; Safe RET
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Retpolines; IBPB conditional; IBRS_FW; STIBP always-on; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Mitigation; Clear CPU buffers
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Mitigation; IBPB before exit to userspace
+```
+
+#### Memory
+
+```text
+               total        used        free      shared  buff/cache   available
+Mem:            30Gi       1.5Gi        26Gi       6.9Mi       3.0Gi        29Gi
+Swap:          8.0Gi          0B       8.0Gi
+```
+
+#### NUMA
+
+```text
+available: 1 nodes (0)
+node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11
+node 0 size: 31429 MB
+node 0 free: 27151 MB
+node distances:
+node     0 
+   0:   10 
+```
+
+#### Block storage
+
+```text
+NAME        TYPE   SIZE ROTA FSTYPE   MOUNTPOINTS                         MODEL
+loop0       loop     4K    0 squashfs /snap/bare/5                        
+loop1       loop  66.8M    0 squashfs /snap/core24/1587                   
+loop2       loop  19.6M    0 squashfs /snap/desktop-security-center/150   
+loop3       loop 273.7M    0 squashfs /snap/firefox/8107                  
+loop4       loop  16.5M    0 squashfs /snap/firmware-updater/226          
+loop5       loop 606.1M    0 squashfs /snap/gnome-46-2404/153             
+loop6       loop  91.7M    0 squashfs /snap/gtk-common-themes/1535        
+loop7       loop   395M    0 squashfs /snap/mesa-2404/1165                
+loop8       loop  18.8M    0 squashfs /snap/prompting-client/204          
+loop9       loop  49.3M    0 squashfs /snap/snapd/26865                   
+loop10      loop  15.7M    0 squashfs /snap/snap-store/1367               
+loop11      loop   580K    0 squashfs /snap/snapd-desktop-integration/361 
+nvme0n1     disk 238.5G    0                                              SPCC M.2 PCIe SSD
+├─nvme0n1p1 part     1G    0 vfat     /boot/efi                           
+└─nvme0n1p2 part 237.4G    0 ext4     /                                   
+```
+
+#### Mounted filesystems
+
+```text
+Filesystem     Type      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p2 ext4      233G   16G  205G   8% /
+efivarfs       efivarfs  148K  119K   25K  83% /sys/firmware/efi/efivars
+/dev/nvme0n1p1 vfat      1.1G  6.4M  1.1G   1% /boot/efi
+```
+
+#### Watchdog
+
+```text
+
+```
+
+#### GPU
+
+```text
+index, name, memory.total [MiB], driver_version, compute_cap, pci.bus_id
+0, NVIDIA GeForce RTX 3050 Laptop GPU, 4096 MiB, 595.99.02, 8.6, 00000000:01:00.0
+Display controllers (lspci):
+01:00.0 VGA compatible controller: NVIDIA Corporation GA107BM [GeForce RTX 3050 Mobile] (rev a1)
+```
+
+#### Network
+
+```text
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+eno1             UP             169.254.161.103/16 fe80::86a9:38ff:fe4a:b7ad/64 
+wlp4s0           UP             192.168.4.109/22 fd47:fae1:3712:1:eab7:ffa2:1908:a1e1/64 fd47:fae1:3712:1:70c5:b520:68c9:b244/64 fe80::c13f:75c7:c7c1:5581/64 
+default via 192.168.4.1 dev wlp4s0 proto dhcp src 192.168.4.109 metric 600 
+```
+
+#### Process and memory limits
+
+```text
+page_size=4096
+open_files_soft=1024
+open_files_hard=524288
 transparent_hugepages=always [madvise] never
 ```
 
