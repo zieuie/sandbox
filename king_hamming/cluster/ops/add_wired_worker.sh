@@ -20,4 +20,6 @@ nmcli -t -f NAME connection show | grep -x "netplan-\$dev" >/dev/null && nmcli c
 nmcli connection up "King Hamming wired"
 ip -br addr show "\$dev"
 REMOTE
+# CVE-2026-98432 stopgap (docs/CVE-2026-98432.md) until every machine runs kernel 7.0.0-43+
+"$(dirname "$0")/cve_2026_98432_mitigation.sh" install "$host"
 echo "wired up on $host; test from merlin: ping -c2 10.203.0.$n"

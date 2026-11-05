@@ -10,6 +10,18 @@ made (see [gpu_wide_match_solver](../../gpu_wide_match_solver/README.md), "In th
 python3 cluster/ops/link_certificates.py --state cluster/deployments/continuous-campaign [--apply]
 ```
 
+# CVE-2026-98432 firewall stopgap (all machines)
+
+`cve_2026_98432_mitigation.sh` drops incoming IPv4 TCP packets that carry IP options (nftables table
+`inet cve_2026_98432`, file `/etc/cve-2026-98432.nft`, included from `/etc/nftables.conf`,
+`nftables.service` enabled). It was applied to all 12 machines on 2026-11-05 and runs as part of
+`add_wired_worker.sh`. It is a stopgap until kernel 7.0.0-43; see
+[../../docs/CVE-2026-98432.md](../../docs/CVE-2026-98432.md).
+
+```sh
+cluster/ops/cve_2026_98432_mitigation.sh install|status|uninstall HOST...    # needs sudo on HOST
+```
+
 # Wi-Fi watchdog (all workers)
 
 `wifi_watchdog.py` (acts on 3 offline minutes of the last 5; ARP counts only for a gateway that has never answered ping) is a standalone system service, installed on dp-101–108 and gawain on
